@@ -61,7 +61,7 @@
 		1F37E28D18592E5F001B9501 /* ctf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8758185929A4007D12D6 /* ctf.c */; };
 		1F37E28F18592E5F001B9501 /* ctfmerge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875A185929A4007D12D6 /* ctfmerge.c */; };
 		1F37E29218592E5F001B9501 /* darwin_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875D185929A4007D12D6 /* darwin_shim.c */; };
-		1F37E29418592E5F001B9501 /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875F185929A4007D12D6 /* dwarf.c */; };
+		1F37E29418592E5F001B9501 /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875F185929A4007D12D6 /* dwarf.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
 		1F37E29518592E5F001B9501 /* fifo.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8760185929A4007D12D6 /* fifo.c */; };
 		1F37E29718592E5F001B9501 /* hash.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8762185929A4007D12D6 /* hash.c */; };
 		1F37E29918592E5F001B9501 /* iidesc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8764185929A4007D12D6 /* iidesc.c */; };
@@ -69,7 +69,7 @@
 		1F37E29B18592E5F001B9501 /* list.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8766185929A4007D12D6 /* list.c */; };
 		1F37E29D18592E5F001B9501 /* memory.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8768185929A4007D12D6 /* memory.c */; };
 		1F37E29F18592E5F001B9501 /* merge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876A185929A4007D12D6 /* merge.c */; };
-		1F37E2A018592E5F001B9501 /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876B185929A4007D12D6 /* output.c */; };
+		1F37E2A018592E5F001B9501 /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876B185929A4007D12D6 /* output.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
 		1F37E2A118592E5F001B9501 /* st_bugs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876C185929A4007D12D6 /* st_bugs.c */; };
 		1F37E2A218592E5F001B9501 /* st_parse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876D185929A4007D12D6 /* st_parse.c */; };
 		1F37E2A318592E5F001B9501 /* stabs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876E185929A4007D12D6 /* stabs.c */; };
@@ -8363,7 +8363,6 @@
 					"$(inherited)",
 				);
 				GCC_SYMBOLS_PRIVATE_EXTERN = NO;
-				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
 				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
 				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
@@ -8378,6 +8377,10 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"-Wno-unused",
+					"-Wno-switch",
+				);
 			};
 			name = Debug;
 		};
@@ -8401,7 +8404,6 @@
 				ENABLE_NS_ASSERTIONS = NO;
 				GCC_C_LANGUAGE_STANDARD = gnu99;
 				GCC_ENABLE_OBJC_EXCEPTIONS = YES;
-				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
 				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
 				GCC_WARN_UNDECLARED_SELECTOR = YES;
 				GCC_WARN_UNINITIALIZED_AUTOS = YES;
@@ -8415,6 +8417,10 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"-Wno-unused",
+					"-Wno-switch",
+				);
 			};
 			name = Release;
 		};
