@@ -6,6 +6,22 @@
 	objectVersion = 46;
 	objects = {
 
+/* Begin PBXAggregateTarget section */
+		1F42B3DD18592FE90023356E /* mach_kernel */ = {
+			isa = PBXAggregateTarget;
+			buildConfigurationList = 1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */;
+			buildPhases = (
+				1F42B3E51859301B0023356E /* Build XNU */,
+			);
+			dependencies = (
+				1F42B3E218592FF30023356E /* PBXTargetDependency */,
+				1F42B3E418592FF30023356E /* PBXTargetDependency */,
+			);
+			name = mach_kernel;
+			productName = mach_kernel;
+		};
+/* End PBXAggregateTarget section */
+
 /* Begin PBXBuildFile section */
 		1F051D3518592295008F6CAE /* dwarf_abbrev.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F051CD818592295008F6CAE /* dwarf_abbrev.c */; };
 		1F051D3818592295008F6CAE /* dwarf_alloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F051CDB18592295008F6CAE /* dwarf_alloc.c */; };
@@ -173,6 +189,20 @@
 			proxyType = 1;
 			remoteGlobalIDString = 1FAD56701859255500EDAF39;
 			remoteInfo = elf;
+		};
+		1F42B3E118592FF30023356E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1F050FDC18591DB2008F6CAE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1F3A87481859298E007D12D6;
+			remoteInfo = ctfconvert;
+		};
+		1F42B3E318592FF30023356E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1F050FDC18591DB2008F6CAE /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 1F37E27D18592E42001B9501;
+			remoteInfo = ctfmerge;
 		};
 		1FA7B31D18592C260043E98F /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -8033,6 +8063,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				1F42B3DD18592FE90023356E /* mach_kernel */,
 				1F051CCF1859223C008F6CAE /* dwarf */,
 				1FAD56701859255500EDAF39 /* elf */,
 				1F3A87481859298E007D12D6 /* ctfconvert */,
@@ -8040,6 +8071,24 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		1F42B3E51859301B0023356E /* Build XNU */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build XNU";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" > $XNU_BUILD_LOG_FILE\nexit $?";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		1F051CCC1859223C008F6CAE /* Sources */ = {
@@ -8226,6 +8275,16 @@
 			isa = PBXTargetDependency;
 			target = 1FAD56701859255500EDAF39 /* elf */;
 			targetProxy = 1F42B3D618592E960023356E /* PBXContainerItemProxy */;
+		};
+		1F42B3E218592FF30023356E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1F3A87481859298E007D12D6 /* ctfconvert */;
+			targetProxy = 1F42B3E118592FF30023356E /* PBXContainerItemProxy */;
+		};
+		1F42B3E418592FF30023356E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 1F37E27D18592E42001B9501 /* ctfmerge */;
+			targetProxy = 1F42B3E318592FF30023356E /* PBXContainerItemProxy */;
 		};
 		1FA7B31E18592C260043E98F /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
@@ -8512,6 +8571,24 @@
 			};
 			name = Release;
 		};
+		1F42B3DF18592FE90023356E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				XNU_BUILD_LOG_FILE = "$(TMPDIR)/xnu_build.log";
+				XNU_INSTALL_BASE = "$(DERIVED_FILE_DIR)/xnu";
+			};
+			name = Debug;
+		};
+		1F42B3E018592FE90023356E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				XNU_BUILD_LOG_FILE = "$(TMPDIR)/xnu_build.log";
+				XNU_INSTALL_BASE = "$(DSTROOT)";
+			};
+			name = Release;
+		};
 		1FAD56721859255500EDAF39 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -8629,6 +8706,15 @@
 			buildConfigurations = (
 				1F3A87501859298E007D12D6 /* Debug */,
 				1F3A87511859298E007D12D6 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				1F42B3DF18592FE90023356E /* Debug */,
+				1F42B3E018592FE90023356E /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
