@@ -150,10 +150,6 @@ _dwarf_internal_printlines(Dwarf_Die die, Dwarf_Error * error)
     Dwarf_Half fixed_advance_pc;
 
 
-     /*REFERENCED*/		/* Not used in this instance of the
-				   macro */
-    int local_extension_size;
-
     /* The Dwarf_Debug this die belongs to. */
     Dwarf_Debug dbg;
     int resattr;
