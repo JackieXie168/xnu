@@ -3256,6 +3256,7 @@
 		1F3A8779185929A4007D12D6 /* utils.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = utils.c; sourceTree = "<group>"; };
 		1F3A877A185929A4007D12D6 /* utils.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = utils.h; sourceTree = "<group>"; };
 		1F3A879E18592B2F007D12D6 /* libz.dylib */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.dylib"; name = libz.dylib; path = usr/lib/libz.dylib; sourceTree = SDKROOT; };
+		1F42B3DC18592F770023356E /* availability.pl */ = {isa = PBXFileReference; lastKnownFileType = text.script.perl; path = availability.pl; sourceTree = "<group>"; };
 		1FAD56711859255500EDAF39 /* libelf.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libelf.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		1FAD56751859256300EDAF39 /* _libelf.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = _libelf.h; sourceTree = "<group>"; };
 		1FAD56761859256300EDAF39 /* ar.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ar.c; sourceTree = "<group>"; };
@@ -7525,6 +7526,7 @@
 				1F051C8818591F01008F6CAE /* newvers */,
 				1F051C8918591F01008F6CAE /* setsegname */,
 				1F051C8C18591F01008F6CAE /* setup.sh */,
+				1F42B3DC18592F770023356E /* availability.pl */,
 			);
 			path = SETUP;
 			sourceTree = "<group>";
