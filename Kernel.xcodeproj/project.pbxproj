@@ -20,6 +20,7 @@
 			isa = PBXProject;
 			attributes = {
 				LastUpgradeCheck = 0500;
+				ORGANIZATIONNAME = "Andromeda Project";
 			};
 			buildConfigurationList = 1F050FDF18591DB2008F6CAE /* Build configuration list for PBXProject "Kernel" */;
 			compatibilityVersion = "Xcode 3.2";
