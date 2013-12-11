@@ -7909,12 +7909,14 @@
 		1F050FE018591DB2008F6CAE /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				USE_HEADERMAP = NO;
 			};
 			name = Debug;
 		};
 		1F050FE118591DB2008F6CAE /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				USE_HEADERMAP = NO;
 			};
 			name = Release;
 		};
@@ -8038,7 +8040,6 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				USE_HEADERMAP = NO;
 				WARNING_CFLAGS = "-Wno-shift-op-parentheses";
 			};
 			name = Debug;
@@ -8077,7 +8078,6 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
-				USE_HEADERMAP = NO;
 				WARNING_CFLAGS = "-Wno-shift-op-parentheses";
 			};
 			name = Release;
