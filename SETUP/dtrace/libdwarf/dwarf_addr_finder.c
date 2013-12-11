@@ -52,7 +52,7 @@
 #if !defined(__APPLE__)
 #include <cmplrs/dwarf_addr_finder.h>
 #else
-#include "dwarf_addr_finder.h"
+#include "cmplrs/dwarf_addr_finder.h"
 #endif /* __APPLE__ */
 #include "dwarf_error.h"
 
