@@ -686,7 +686,7 @@ tdesc_array_create(dwarf_t *dw, Dwarf_Die dim, tdesc_t *arrtdp,
 {
 	Dwarf_Unsigned uval;
 	Dwarf_Signed sval;
-	tdesc_t *ctdp;
+	tdesc_t *ctdp = NULL;
 	Dwarf_Die dim2;
 	ardef_t *ar;
 
@@ -1907,7 +1907,7 @@ dw_read(tdata_t *td, Elf *elf, const char *filename)
 {
 	Dwarf_Unsigned abboff, hdrlen, nxthdr;
 	Dwarf_Half vers, addrsz;
-	Dwarf_Die cu, child;
+	Dwarf_Die cu = NULL, child = NULL;
 	dwarf_t dw;
 	char *prod = NULL;
 	int rc;

@@ -51,6 +51,7 @@ int	__libc_threaded = 1; /* In lieu of Solaris <thread.h> */
 #include	<string.h>
 #include	<stdio.h>
 #include	<libelf.h>
+#include	"decl.h"
 #include	"msg.h"
 #undef		_elf_seterr
 

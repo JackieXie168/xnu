@@ -61,7 +61,7 @@
 		1F3A877E185929A4007D12D6 /* ctf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8758185929A4007D12D6 /* ctf.c */; };
 		1F3A877F185929A4007D12D6 /* ctfconvert.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8759185929A4007D12D6 /* ctfconvert.c */; };
 		1F3A8781185929A4007D12D6 /* darwin_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875D185929A4007D12D6 /* darwin_shim.c */; };
-		1F3A8783185929A4007D12D6 /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875F185929A4007D12D6 /* dwarf.c */; };
+		1F3A8783185929A4007D12D6 /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A875F185929A4007D12D6 /* dwarf.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
 		1F3A8784185929A4007D12D6 /* fifo.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8760185929A4007D12D6 /* fifo.c */; };
 		1F3A8785185929A4007D12D6 /* hash.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8762185929A4007D12D6 /* hash.c */; };
 		1F3A8786185929A4007D12D6 /* iidesc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8764185929A4007D12D6 /* iidesc.c */; };
@@ -69,7 +69,7 @@
 		1F3A8788185929A4007D12D6 /* list.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8766185929A4007D12D6 /* list.c */; };
 		1F3A8789185929A4007D12D6 /* memory.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8768185929A4007D12D6 /* memory.c */; };
 		1F3A878A185929A4007D12D6 /* merge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876A185929A4007D12D6 /* merge.c */; };
-		1F3A878B185929A4007D12D6 /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876B185929A4007D12D6 /* output.c */; };
+		1F3A878B185929A4007D12D6 /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876B185929A4007D12D6 /* output.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
 		1F3A878C185929A4007D12D6 /* st_bugs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876C185929A4007D12D6 /* st_bugs.c */; };
 		1F3A878D185929A4007D12D6 /* st_parse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876D185929A4007D12D6 /* st_parse.c */; };
 		1F3A878E185929A4007D12D6 /* stabs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A876E185929A4007D12D6 /* stabs.c */; };
@@ -8130,6 +8130,7 @@
 			buildSettings = {
 				CTF_HEADER_SEARCH_PATHS = "$(SRCROOT)/SETUP/dtrace/include $(SRCROOT)/SETUP/dtrace/libdwarf $(SRCROOT)/SETUP/dtrace/libelf";
 				USE_HEADERMAP = NO;
+				WARNING_CFLAGS = "-Wno-switch";
 			};
 			name = Debug;
 		};
@@ -8138,6 +8139,7 @@
 			buildSettings = {
 				CTF_HEADER_SEARCH_PATHS = "$(SRCROOT)/SETUP/dtrace/include $(SRCROOT)/SETUP/dtrace/libdwarf $(SRCROOT)/SETUP/dtrace/libelf";
 				USE_HEADERMAP = NO;
+				WARNING_CFLAGS = "-Wno-switch";
 			};
 			name = Release;
 		};
@@ -8262,6 +8264,10 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"-Wno-unused",
+					"$(inherited)",
+				);
 			};
 			name = Debug;
 		};
@@ -8298,6 +8304,10 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
+				WARNING_CFLAGS = (
+					"-Wno-unused",
+					"$(inherited)",
+				);
 			};
 			name = Release;
 		};

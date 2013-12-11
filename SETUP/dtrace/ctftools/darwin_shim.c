@@ -164,4 +164,9 @@ p_online(processorid_t processorid, int flag)
 #if defined(_elf_seterr)
 #undef _elf_seterr
 #endif
+
+// These #pragmas silence a warning I cannot get rid of any other way.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wimplicit-function-declaration"
 void _SHIM_elf_seterr(int x) { _elf_seterr( 0, x); }
+#pragma clang diagnostic pop

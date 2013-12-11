@@ -1213,7 +1213,7 @@ write_ctf(tdata_t *td, const char *curname, const char *newname, int flags)
 	struct stat st;
 	Elf *elf = NULL;
 	Elf *telf = NULL;
-	caddr_t data;
+	caddr_t data = NULL;
 	size_t len;
 	int fd = -1;
 	int tfd = -1;
