@@ -1105,12 +1105,12 @@ _gelf_getdyndtflags_1(Elf *elf)
 	GElf_Dyn dyn;
 	int i, n;
 
-	while (scn = elf_nextscn(elf, scn)) {
+	while ((scn = elf_nextscn(elf, scn))) {
 		if (gelf_getshdr(scn, &shdr) == NULL)
 			break;
 		if (shdr.sh_type != SHT_DYNAMIC)
 			continue;
-		if (data = elf_getdata(scn, NULL)) {
+		if ((data = elf_getdata(scn, NULL))) {
 			n = shdr.sh_size / shdr.sh_entsize;
 			for (i = 0; i < n; i++) {
 				(void) gelf_getdyn(data, i, &dyn);

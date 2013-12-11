@@ -40,6 +40,7 @@
 #include "decl.h"
 #include "msg.h"
 #else /* is Apple Mac OS X */
+#include <stdlib.h>
 #include <memory.h>
 /* NOTHING */ /* In lieu of Solaris <malloc.h> */
 #include <limits.h>
@@ -49,6 +50,8 @@
 #include <assert.h>
 #include <string.h>
 #endif /* __APPLE__ */
+
+#include "_libelf.h"
 
 /*
  * This module is compiled twice, the second time having
