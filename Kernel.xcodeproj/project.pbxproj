@@ -9656,7 +9656,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				XNU_BUILD_LOG_FILE = "$(TMPDIR)/xnu_build.log";
+				XNU_BUILD_LOG_FILE = "$(DERIVED_FILE_DIR)/xnu_build.log";
 				XNU_INSTALL_BASE = "$(DERIVED_FILE_DIR)/xnu";
 			};
 			name = Debug;
@@ -9665,7 +9665,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				XNU_BUILD_LOG_FILE = "$(TMPDIR)/xnu_build.log";
+				XNU_BUILD_LOG_FILE = "$(DERIVED_FILE_DIR)/xnu_build.log";
 				XNU_INSTALL_BASE = "$(DSTROOT)";
 			};
 			name = Release;
