@@ -38,7 +38,6 @@ __BEGIN_DECLS
 #include <mach/kmod.h>
 #include <mach/vm_types.h>
 #else
-#include <CoreFoundation/CoreFoundation.h>
 #include <System/mach/kmod.h>
 #endif /* KERNEL */
 __END_DECLS
