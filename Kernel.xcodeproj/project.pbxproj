@@ -74,6 +74,7 @@
 		1F051D8C18592296008F6CAE /* pro_vars.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F051D3118592295008F6CAE /* pro_vars.c */; };
 		1F051D8D18592296008F6CAE /* pro_weaks.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F051D3218592295008F6CAE /* pro_weaks.c */; };
 		1F051DB6185924F1008F6CAE /* dwarf_addr_finder.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F051CDA18592295008F6CAE /* dwarf_addr_finder.c */; };
+		1F31C37A1864CA5E00565651 /* errno.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F7262C718594C4500FEE05A /* errno.c */; };
 		1F37E28718592E5F001B9501 /* alist.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8752185929A4007D12D6 /* alist.c */; };
 		1F37E28918592E5F001B9501 /* barrier.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8754185929A4007D12D6 /* barrier.c */; };
 		1F37E28D18592E5F001B9501 /* ctf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3A8758185929A4007D12D6 /* ctf.c */; };
@@ -9164,6 +9165,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F31C37A1864CA5E00565651 /* errno.c in Sources */,
 				1F5079D6185A4B9D00894849 /* fcntl-cancel.c in Sources */,
 				1F5079D7185A4B9D00894849 /* fcntl.c in Sources */,
 				1F5079D8185A4B9D00894849 /* select-cancel.c in Sources */,
@@ -9853,6 +9855,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				MAP_PLATFORM = MacOSX;
 				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = "$(BUILT_PRODUCTS_DIR)/syscalls.a";
 				PRODUCT_NAME = system_kernel;
 				SDKROOT = macosx;
 			};
@@ -9887,6 +9890,7 @@
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				MAP_PLATFORM = MacOSX;
+				OTHER_LDFLAGS = "$(BUILT_PRODUCTS_DIR)/syscalls.a";
 				PRODUCT_NAME = system_kernel;
 				SDKROOT = macosx;
 			};
