@@ -14,8 +14,22 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
+               BlueprintIdentifier = "1F99DED118663CFB00A7516F"
+               BuildableName = "libsystem_kernel.dylib"
+               BlueprintName = "libsystem_kernel"
+               ReferencedContainer = "container:Kernel.xcodeproj">
+            </BuildableReference>
+         </BuildActionEntry>
+         <BuildActionEntry
+            buildForTesting = "YES"
+            buildForRunning = "YES"
+            buildForProfiling = "YES"
+            buildForArchiving = "YES"
+            buildForAnalyzing = "YES">
+            <BuildableReference
+               BuildableIdentifier = "primary"
                BlueprintIdentifier = "1F7262B318594C2000FEE05A"
-               BuildableName = "libsystem_kernel.a"
+               BuildableName = "libsyscall.a"
                BlueprintName = "libsyscall"
                ReferencedContainer = "container:Kernel.xcodeproj">
             </BuildableReference>
