@@ -11,6 +11,7 @@
 			isa = PBXAggregateTarget;
 			buildConfigurationList = 1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */;
 			buildPhases = (
+				1F014EF5186622D100DABA42 /* Export XNU Headers */,
 				1F42B3E51859301B0023356E /* Build XNU */,
 				1F7262A31859490A00FEE05A /* Link Frameworks */,
 			);
@@ -8946,6 +8947,20 @@
 /* End PBXProject section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		1F014EF5186622D100DABA42 /* Export XNU Headers */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Export XNU Headers";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${DERIVED_FILE_DIR}/exporthdrs.log\"\nmake exporthdrs \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" > $DERIVED_FILE_DIR/exporthdrs.log\nexit $?";
+		};
 		1F42B3E51859301B0023356E /* Build XNU */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
