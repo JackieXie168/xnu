@@ -12,7 +12,6 @@
 			buildConfigurationList = 1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */;
 			buildPhases = (
 				1F42B3E51859301B0023356E /* Build XNU */,
-				1F72628C185946A000FEE05A /* Link Build Output Directory */,
 				1F7262A31859490A00FEE05A /* Link Frameworks */,
 			);
 			dependencies = (
@@ -8962,21 +8961,6 @@
 			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" > $XNU_BUILD_LOG_FILE\nexit $?";
 			showEnvVarsInLog = 0;
 		};
-		1F72628C185946A000FEE05A /* Link Build Output Directory */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-			);
-			name = "Link Build Output Directory";
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "ln -sfh \"${XNU_INSTALL_BASE}\" \"${PROJECT_TEMP_ROOT}/xnu\"";
-			showEnvVarsInLog = 0;
-		};
 		1F7262A31859490A00FEE05A /* Link Frameworks */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -9396,7 +9380,7 @@
 				CTF_HEADER_SEARCH_PATHS = "$(SRCROOT)/SETUP/dtrace/include $(SRCROOT)/SETUP/dtrace/libdwarf $(SRCROOT)/SETUP/dtrace/libelf";
 				USE_HEADERMAP = NO;
 				WARNING_CFLAGS = "-Wno-switch";
-				XNU_INSTALL_BASE = "$(PROJECT_TEMP_ROOT)/xnu";
+				XNU_INSTALL_BASE = "$(DSTROOT)";
 			};
 			name = Release;
 		};
@@ -9659,7 +9643,6 @@
 			buildSettings = {
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				XNU_BUILD_LOG_FILE = "$(DERIVED_FILE_DIR)/xnu_build.log";
-				XNU_INSTALL_BASE = "$(DERIVED_FILE_DIR)/xnu";
 			};
 			name = Debug;
 		};
@@ -9668,7 +9651,6 @@
 			buildSettings = {
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				XNU_BUILD_LOG_FILE = "$(DERIVED_FILE_DIR)/xnu_build.log";
-				XNU_INSTALL_BASE = "$(DSTROOT)";
 			};
 			name = Release;
 		};
