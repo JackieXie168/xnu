@@ -11,9 +11,9 @@
 			isa = PBXAggregateTarget;
 			buildConfigurationList = 1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */;
 			buildPhases = (
-				1F014EF5186622D100DABA42 /* Export XNU Headers */,
 				1F42B3E51859301B0023356E /* Build XNU */,
 				1F7262A31859490A00FEE05A /* Link Frameworks */,
+				1F014EF5186622D100DABA42 /* Install XNU External Headers */,
 			);
 			dependencies = (
 				1F42B3E218592FF30023356E /* PBXTargetDependency */,
@@ -8947,19 +8947,20 @@
 /* End PBXProject section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		1F014EF5186622D100DABA42 /* Export XNU Headers */ = {
+		1F014EF5186622D100DABA42 /* Install XNU External Headers */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
 			);
 			inputPaths = (
 			);
-			name = "Export XNU Headers";
+			name = "Install XNU External Headers";
 			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${DERIVED_FILE_DIR}/exporthdrs.log\"\nmake exporthdrs \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" > $DERIVED_FILE_DIR/exporthdrs.log\nexit $?";
+			shellScript = "set -e\n\nCopyHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/usr/include/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/usr/include/$1\"\n}\n\nCopyPrivateHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"\n}\n\nCopyHeader AssertMacros.h\nCopyHeader Availability.h\nCopyHeader AvailabilityInternal.h\nCopyHeader AvailabilityMacros.h\nCopyHeader stdarg.h\nCopyHeader stdbool.h\nCopyHeader stddef.h\nCopyHeader stdint.h\nCopyHeader architecture/byte_order.h\nCopyHeader architecture/i386/asm_help.h\nCopyHeader architecture/i386/cpu.h\nCopyHeader architecture/i386/desc.h\nCopyHeader architecture/i386/io.h\nCopyHeader architecture/i386/pio.h\nCopyHeader architecture/i386/reg_help.h\nCopyHeader architecture/i386/sel.h\nCopyHeader architecture/i386/table.h\nCopyHeader architecture/i386/tss.h\n\nCopyPrivateHeader corecrypto/cc.h\nCopyPrivateHeader corecrypto/cc_config.h\nCopyPrivateHeader corecrypto/cc_priv.h\nCopyPrivateHeader corecrypto/ccaes.h\nCopyPrivateHeader corecrypto/ccder.h\nCopyPrivateHeader corecrypto/ccdes.h\nCopyPrivateHeader corecrypto/ccdigest.h\nCopyPrivateHeader corecrypto/cchmac.h\nCopyPrivateHeader corecrypto/ccmd5.h\nCopyPrivateHeader corecrypto/ccmode.h\nCopyPrivateHeader corecrypto/ccmode_factory.h\nCopyPrivateHeader corecrypto/ccmode_impl.h\nCopyPrivateHeader corecrypto/ccn.h\nCopyPrivateHeader corecrypto/ccpad.h\nCopyPrivateHeader corecrypto/ccpbkdf2.h\nCopyPrivateHeader corecrypto/ccrc4.h\nCopyPrivateHeader corecrypto/ccrng.h\nCopyPrivateHeader corecrypto/ccrng_system.h\nCopyPrivateHeader corecrypto/ccsha1.h\nCopyPrivateHeader corecrypto/ccsha2.h";
+			showEnvVarsInLog = 0;
 		};
 		1F42B3E51859301B0023356E /* Build XNU */ = {
 			isa = PBXShellScriptBuildPhase;
