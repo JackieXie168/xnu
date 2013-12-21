@@ -193,36 +193,6 @@
 		1F7262A01859481C00FEE05A /* c_stop.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F72628F1859480100FEE05A /* c_stop.c */; };
 		1F7262AC18594A9A00FEE05A /* cplus_start.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F7262901859480100FEE05A /* cplus_start.c */; };
 		1F7262AD18594A9B00FEE05A /* cplus_stop.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F7262911859480100FEE05A /* cplus_stop.c */; };
-		1F72638B18594C4500FEE05A /* SYS.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262C818594C4500FEE05A /* SYS.h */; };
-		1F72638C18594C4500FEE05A /* abort.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262CD18594C4500FEE05A /* abort.h */; };
-		1F72639318594C4500FEE05A /* errorlib.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262DB18594C4500FEE05A /* errorlib.h */; };
-		1F72639618594C4500FEE05A /* exc_catcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262DE18594C4500FEE05A /* exc_catcher.h */; };
-		1F72639918594C4500FEE05A /* externs.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262E118594C4500FEE05A /* externs.h */; };
-		1F72639F18594C4500FEE05A /* errorlib.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262E918594C4500FEE05A /* errorlib.h */; };
-		1F7263A018594C4500FEE05A /* mach.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262EA18594C4500FEE05A /* mach.h */; };
-		1F7263A118594C4500FEE05A /* mach_error.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262EB18594C4500FEE05A /* mach_error.h */; };
-		1F7263A218594C4500FEE05A /* mach_init.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262EC18594C4500FEE05A /* mach_init.h */; };
-		1F7263A318594C4500FEE05A /* mach_interface.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262ED18594C4500FEE05A /* mach_interface.h */; };
-		1F7263A418594C4500FEE05A /* port_obj.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262EE18594C4500FEE05A /* port_obj.h */; };
-		1F7263A518594C4500FEE05A /* sync.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262EF18594C4500FEE05A /* sync.h */; };
-		1F7263A618594C4500FEE05A /* vm_page_size.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262F018594C4500FEE05A /* vm_page_size.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		1F7263A718594C4500FEE05A /* vm_task.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7262F118594C4500FEE05A /* vm_task.h */; };
-		1F7263BF18594C4500FEE05A /* key_defs.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72630C18594C4500FEE05A /* key_defs.h */; };
-		1F7263C018594C4500FEE05A /* ls_defs.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72630D18594C4500FEE05A /* ls_defs.h */; };
-		1F7263C218594C4500FEE05A /* netname_defs.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72630F18594C4500FEE05A /* netname_defs.h */; };
-		1F7263C318594C4500FEE05A /* nm_defs.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72631018594C4500FEE05A /* nm_defs.h */; };
-		1F7263C518594C4500FEE05A /* stack_logging_internal.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72631218594C4500FEE05A /* stack_logging_internal.h */; };
-		1F7263C718594C4500FEE05A /* string.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72631418594C4500FEE05A /* string.h */; };
-		1F7263CC18594C4500FEE05A /* tsd.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72631B18594C4500FEE05A /* tsd.h */; };
-		1F7263D018594C4500FEE05A /* _errno.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72632918594C4500FEE05A /* _errno.h */; };
-		1F7263D318594C4500FEE05A /* _libkernel_init.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72632C18594C4500FEE05A /* _libkernel_init.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		1F7263DD18594C4500FEE05A /* gethostuuid.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72633718594C4500FEE05A /* gethostuuid.h */; settings = {ATTRIBUTES = (Public, ); }; };
-		1F7263DE18594C4500FEE05A /* gethostuuid_private.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72633818594C4500FEE05A /* gethostuuid_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		1F7263FC18594C4500FEE05A /* libproc.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72635818594C4500FEE05A /* libproc.h */; settings = {ATTRIBUTES = (Public, ); }; };
-		1F7263FD18594C4500FEE05A /* libproc_internal.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72635918594C4500FEE05A /* libproc_internal.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		1F72640718594C4500FEE05A /* spawn.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72636418594C4500FEE05A /* spawn.h */; settings = {ATTRIBUTES = (Public, ); }; };
-		1F72640818594C4500FEE05A /* spawn_private.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72636518594C4500FEE05A /* spawn_private.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		1F72640E18594C4500FEE05A /* strings.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F72636C18594C4500FEE05A /* strings.h */; };
 		1F72641C18594DC900FEE05A /* tsd.h in Copy tsd.h */ = {isa = PBXBuildFile; fileRef = 1F72631B18594C4500FEE05A /* tsd.h */; };
 		1F72641F18594DFE00FEE05A /* clock.defs in Sources */ = {isa = PBXBuildFile; fileRef = 1F7262CE18594C4500FEE05A /* clock.defs */; };
 		1F72642018594DFE00FEE05A /* clock_priv.defs in Sources */ = {isa = PBXBuildFile; fileRef = 1F7262CF18594C4500FEE05A /* clock_priv.defs */; };
@@ -8749,46 +8719,6 @@
 		};
 /* End PBXGroup section */
 
-/* Begin PBXHeadersBuildPhase section */
-		1F7262B218594C2000FEE05A /* Headers */ = {
-			isa = PBXHeadersBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				1F7263FC18594C4500FEE05A /* libproc.h in Headers */,
-				1F72640718594C4500FEE05A /* spawn.h in Headers */,
-				1F7263DD18594C4500FEE05A /* gethostuuid.h in Headers */,
-				1F7263FD18594C4500FEE05A /* libproc_internal.h in Headers */,
-				1F72640818594C4500FEE05A /* spawn_private.h in Headers */,
-				1F7263D318594C4500FEE05A /* _libkernel_init.h in Headers */,
-				1F7263A618594C4500FEE05A /* vm_page_size.h in Headers */,
-				1F7263DE18594C4500FEE05A /* gethostuuid_private.h in Headers */,
-				1F7263BF18594C4500FEE05A /* key_defs.h in Headers */,
-				1F7263A718594C4500FEE05A /* vm_task.h in Headers */,
-				1F7263A418594C4500FEE05A /* port_obj.h in Headers */,
-				1F7263A518594C4500FEE05A /* sync.h in Headers */,
-				1F72639618594C4500FEE05A /* exc_catcher.h in Headers */,
-				1F72640E18594C4500FEE05A /* strings.h in Headers */,
-				1F7263A018594C4500FEE05A /* mach.h in Headers */,
-				1F72639918594C4500FEE05A /* externs.h in Headers */,
-				1F7263A318594C4500FEE05A /* mach_interface.h in Headers */,
-				1F7263C718594C4500FEE05A /* string.h in Headers */,
-				1F7263C318594C4500FEE05A /* nm_defs.h in Headers */,
-				1F72639318594C4500FEE05A /* errorlib.h in Headers */,
-				1F7263A118594C4500FEE05A /* mach_error.h in Headers */,
-				1F72639F18594C4500FEE05A /* errorlib.h in Headers */,
-				1F72638B18594C4500FEE05A /* SYS.h in Headers */,
-				1F7263CC18594C4500FEE05A /* tsd.h in Headers */,
-				1F7263A218594C4500FEE05A /* mach_init.h in Headers */,
-				1F72638C18594C4500FEE05A /* abort.h in Headers */,
-				1F7263C218594C4500FEE05A /* netname_defs.h in Headers */,
-				1F7263D018594C4500FEE05A /* _errno.h in Headers */,
-				1F7263C518594C4500FEE05A /* stack_logging_internal.h in Headers */,
-				1F7263C018594C4500FEE05A /* ls_defs.h in Headers */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-/* End PBXHeadersBuildPhase section */
-
 /* Begin PBXNativeTarget section */
 		1F051CCF1859223C008F6CAE /* dwarf */ = {
 			isa = PBXNativeTarget;
@@ -8885,7 +8815,7 @@
 				1F72641D18594DCF00FEE05A /* Install MiG Headers */,
 				1F7262B018594C2000FEE05A /* Sources */,
 				1F7262B118594C2000FEE05A /* Frameworks */,
-				1F7262B218594C2000FEE05A /* Headers */,
+				1F014F0218662B0B00DABA42 /* Copy Headers */,
 			);
 			buildRules = (
 			);
@@ -8960,6 +8890,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "set -e\n\nCopyHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/usr/include/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/usr/include/$1\"\n}\n\nCopyPrivateHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"\n}\n\nCopyHeader AssertMacros.h\nCopyHeader Availability.h\nCopyHeader AvailabilityInternal.h\nCopyHeader AvailabilityMacros.h\nCopyHeader stdarg.h\nCopyHeader stdbool.h\nCopyHeader stddef.h\nCopyHeader stdint.h\nCopyHeader architecture/byte_order.h\nCopyHeader architecture/i386/asm_help.h\nCopyHeader architecture/i386/cpu.h\nCopyHeader architecture/i386/desc.h\nCopyHeader architecture/i386/io.h\nCopyHeader architecture/i386/pio.h\nCopyHeader architecture/i386/reg_help.h\nCopyHeader architecture/i386/sel.h\nCopyHeader architecture/i386/table.h\nCopyHeader architecture/i386/tss.h\n\nCopyPrivateHeader corecrypto/cc.h\nCopyPrivateHeader corecrypto/cc_config.h\nCopyPrivateHeader corecrypto/cc_priv.h\nCopyPrivateHeader corecrypto/ccaes.h\nCopyPrivateHeader corecrypto/ccder.h\nCopyPrivateHeader corecrypto/ccdes.h\nCopyPrivateHeader corecrypto/ccdigest.h\nCopyPrivateHeader corecrypto/cchmac.h\nCopyPrivateHeader corecrypto/ccmd5.h\nCopyPrivateHeader corecrypto/ccmode.h\nCopyPrivateHeader corecrypto/ccmode_factory.h\nCopyPrivateHeader corecrypto/ccmode_impl.h\nCopyPrivateHeader corecrypto/ccn.h\nCopyPrivateHeader corecrypto/ccpad.h\nCopyPrivateHeader corecrypto/ccpbkdf2.h\nCopyPrivateHeader corecrypto/ccrc4.h\nCopyPrivateHeader corecrypto/ccrng.h\nCopyPrivateHeader corecrypto/ccrng_system.h\nCopyPrivateHeader corecrypto/ccsha1.h\nCopyPrivateHeader corecrypto/ccsha2.h";
+			showEnvVarsInLog = 0;
+		};
+		1F014F0218662B0B00DABA42 /* Copy Headers */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Headers";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}/usr/include\"\nmkdir -p \"${XNU_INSTALL_BASE}/usr/local/include\"\n\ncp \"${SRCROOT}/libsyscall/wrappers/libproc/libproc.h\" \"${XNU_INSTALL_BASE}/usr/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/spawn/spawn.h\" \"${XNU_INSTALL_BASE}/usr/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/gethostuuid.h\" \"${XNU_INSTALL_BASE}/usr/include\"\n\ncp \"${SRCROOT}/libsyscall/wrappers/libproc/libproc_internal.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/spawn/spawn_private.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/_libkernel_init.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/mach/mach/vm_page_size.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/gethostuuid_private.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\n";
 			showEnvVarsInLog = 0;
 		};
 		1F42B3E51859301B0023356E /* Build XNU */ = {
