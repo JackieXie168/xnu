@@ -8868,6 +8868,8 @@
 			buildPhases = (
 				1F99DECE18663CFB00A7516F /* Sources */,
 				1F99DECF18663CFB00A7516F /* Frameworks */,
+				1F0000B3186B71BC0026B0FA /* Rename Library */,
+				1F0000B4186B726C0026B0FA /* Install Library */,
 			);
 			buildRules = (
 				1FD05F4D18663DB100C7C870 /* PBXBuildRule */,
@@ -8931,6 +8933,40 @@
 /* End PBXProject section */
 
 /* Begin PBXShellScriptBuildPhase section */
+		1F0000B3186B71BC0026B0FA /* Rename Library */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libsystem_kernel.dylib",
+			);
+			name = "Rename Library";
+			outputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libsystem_kernel.guest.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# If I let the default output name stand, programs linked as part of\n# the Andromeda workspace won't launch. Therefore, I must rename the\n# dylib so that ld won't use it.\nmv \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"";
+			showEnvVarsInLog = 0;
+		};
+		1F0000B4186B726C0026B0FA /* Install Library */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 8;
+			files = (
+			);
+			inputPaths = (
+				"$(BUILT_PRODUCTS_DIR)/libsystem_kernel.guest.dylib",
+			);
+			name = "Install Library";
+			outputPaths = (
+				"$(DSTROOT)/usr/lib/system/libsystem_kernel.dylib",
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = "# On the other hand, if I let the hidden library name stand,\n# then programs running on Andromeda won't launch. Therefore,\n# I must install libsystem_kernel manually.\ncp \"${SCRIPT_INPUT_FILE_0}\" \"${SCRIPT_OUTPUT_FILE_0}\"";
+			showEnvVarsInLog = 0;
+		};
 		1F014EF5186622D100DABA42 /* Install XNU External Headers */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -9956,6 +9992,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				PRODUCT_NAME = system_kernel;
 				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
 			};
 			name = Debug;
 		};
@@ -9991,6 +10028,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 10.9;
 				PRODUCT_NAME = system_kernel;
 				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
 			};
 			name = Release;
 		};
