@@ -9024,7 +9024,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n\ncd \"${PROJECT_TEMP_ROOT}/xnu/System/Library/Frameworks/System.framework/Versions\"\nln -sfh B Current\n\ncd \"${PROJECT_TEMP_ROOT}/xnu/System/Library/Frameworks/System.framework\"\nln -sfh Versions/Current/PrivateHeaders PrivateHeaders\nln -sfh Versions/Current/System System";
+			shellScript = "set -e\n\ncd \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/Versions\"\nln -sfh B Current\n\ncd \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework\"\nln -sfh Versions/Current/PrivateHeaders PrivateHeaders\nln -sfh Versions/Current/System System";
 			showEnvVarsInLog = 0;
 		};
 		1F72641A18594CE400FEE05A /* Generate & Compile System Calls */ = {
