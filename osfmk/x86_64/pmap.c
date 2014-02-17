@@ -249,7 +249,7 @@ const boolean_t	pmap_disable_kheap_nx = FALSE;
 const boolean_t	pmap_disable_kstack_nx = FALSE;
 extern boolean_t doconstro_override;
 
-extern long __stack_chk_guard[];
+extern long __stack_chk_guard[] __attribute__((aligned(8)));
 
 /*
  *	Map memory at initialization.  The physical addresses being

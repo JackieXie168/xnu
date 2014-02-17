@@ -120,7 +120,7 @@ EXT(mc_task_stack_end):
 	movl	%cr0,%eax					;\
 	orl	$(CR0_PG|CR0_WP),%eax	/* enable paging */	;\
 	movl	%eax,%cr0					;\
-	ljmpl	$KERNEL64_CS,$64f				;\
+	jmp	$KERNEL64_CS,$64f				;\
 64:								;\
 	.code64
 
@@ -217,7 +217,8 @@ L_pstart_common:
 
 Lstore_random_guard:
 	xor	%ah, %ah	/* Security: zero second byte of stack canary */
-	movq	%rax, ___stack_chk_guard(%rip)
+    lea ___stack_chk_guard(%rip), %rcx
+	movq	%rax, %rcx
 	/* %edi = boot_args_start if BSP */
 Lvstartshim:	
 
@@ -226,12 +227,12 @@ Lvstartshim:
 	/* %edi = boot_args_start */
 	
 	leaq	_vstart(%rip), %rcx
-	movq	$0xffffff8000000000, %rax	/* adjust pointer up high */
+	movq	$0, %rax	/* adjust pointer up high */
 	or	%rax, %rsp			/* and stack pointer up there */
 	or	%rcx, %rax
 	andq	$0xfffffffffffffff0, %rsp	/* align stack */
 	xorq	%rbp, %rbp			/* zero frame pointer */
-	callq	*%rax
+	jmp	*%rax
 
 Lnon_rdrand:
 	rdtsc /* EDX:EAX := TSC */
@@ -310,7 +311,7 @@ LEXT(hibernate_machine_entrypoint)
 	leaq	EXT(hibernate_kernel_entrypoint)(%rip),%rcx
 
 	/* adjust the pointers to be up high */
-	movq	$0xffffff8000000000, %rax
+	movq	$0, %rax
 	orq	%rax, %rsp
 	orq	%rcx, %rax
 

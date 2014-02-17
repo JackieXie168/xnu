@@ -43,7 +43,7 @@
 /*
  * NB: This must be located at the kernel's base address!
  */
-#define PML4_PROT (INTEL_PTE_VALID | INTEL_PTE_WRITE)
+#define PML4_PROT (INTEL_PTE_VALID)
 pml4_entry_t	BootPML4[PTE_PER_PAGE]
 		__attribute__((section("__HIB, __bootPT"))) = {
 	[0]			= ((uint64_t)(PAGE_SIZE) | PML4_PROT),

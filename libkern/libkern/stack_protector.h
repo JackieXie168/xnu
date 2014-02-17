@@ -30,7 +30,7 @@
 #define _STACK_PROTECTOR_H
 
 /* Set up by machine-dependent code early in boot */
-extern unsigned long __stack_chk_guard;
+extern unsigned long __stack_chk_guard __attribute__((aligned(8)));
 
 /* Called as a consequence on stack corruption */
 extern void __stack_chk_fail(void);

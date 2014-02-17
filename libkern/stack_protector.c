@@ -29,7 +29,7 @@
 #include <libkern/stack_protector.h>
 #include <kern/debug.h>
 
-unsigned long __stack_chk_guard = 0UL;
+unsigned long __stack_chk_guard __attribute__((aligned(8))) = 0UL;
 
 void
 __stack_chk_fail(void)
