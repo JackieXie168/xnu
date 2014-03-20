@@ -9009,7 +9009,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" > $XNU_BUILD_LOG_FILE\nexit $?";
+			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" &> $XNU_BUILD_LOG_FILE\nexit $?";
 			showEnvVarsInLog = 0;
 		};
 		1F7262A31859490A00FEE05A /* Link Frameworks */ = {
