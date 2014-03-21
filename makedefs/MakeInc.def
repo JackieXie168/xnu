@@ -88,7 +88,8 @@ CWARNFLAGS_STD = \
 	-Wall -Werror -Wno-format-y2k -Wextra -Wstrict-prototypes \
 	-Wmissing-prototypes -Wpointer-arith -Wreturn-type -Wcast-qual \
 	-Wwrite-strings -Wswitch -Wshadow -Wcast-align -Wchar-subscripts \
-	-Winline -Wnested-externs -Wredundant-decls -Wextra-tokens
+	-Winline -Wnested-externs -Wredundant-decls -Wextra-tokens \
+	-Wno-unused-function
 
 # Can be overridden in Makefile.template or Makefile.$arch
 export CWARNFLAGS ?= $(CWARNFLAGS_STD)
