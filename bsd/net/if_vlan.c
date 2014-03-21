@@ -263,12 +263,15 @@ vlan_parent_flags_set_supports_vlan_mtu(vlan_parent_ref vlp)
     return;
 }
 
+#if 0
+// This function is unused, and as such emits a warning that is by default elevated into an error.
 static __inline__ void
 vlan_parent_flags_clear_supports_vlan_mtu(vlan_parent_ref vlp)
 {
     vlp->vlp_flags &= ~VLPF_SUPPORTS_VLAN_MTU;
     return;
 }
+#endif
 
 static __inline__ int
 vlan_parent_flags_change_in_progress(vlan_parent_ref vlp)
@@ -340,12 +343,15 @@ ifvlan_flags_set_ready(ifvlan_ref ifv)
     return;
 }
 
+#if 0
+// This function is unused, and as such emits a warning that is by default elevated into an error.
 static __inline__ void
 ifvlan_flags_clear_ready(ifvlan_ref ifv)
 {
     ifv->ifv_flags &= ~IFVF_READY;
     return;
 }
+#endif
 
 static __inline__ int
 ifvlan_flags_detaching(ifvlan_ref ifv)

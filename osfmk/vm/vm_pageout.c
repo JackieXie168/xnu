@@ -8763,7 +8763,7 @@ vm_page_slide(
 	return kr;
 }
 
-void inline memoryshot(unsigned int event, unsigned int control)
+void memoryshot(unsigned int event, unsigned int control)
 {
 	if (vm_debug_events) {
 		KERNEL_DEBUG_CONSTANT1((MACHDBG_CODE(DBG_MACH_VM_PRESSURE, event)) | control,
