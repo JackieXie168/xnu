@@ -11,6 +11,7 @@
 			isa = PBXAggregateTarget;
 			buildConfigurationList = 1F42B3DE18592FE90023356E /* Build configuration list for PBXAggregateTarget "mach_kernel" */;
 			buildPhases = (
+				1F2EE33C18DE37C900665016 /* Print XNU Log File Location */,
 				1F42B3E51859301B0023356E /* Build XNU */,
 				1F7262A31859490A00FEE05A /* Link Frameworks */,
 				1F014EF5186622D100DABA42 /* Install XNU External Headers */,
@@ -8997,6 +8998,21 @@
 			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}/usr/include\"\nmkdir -p \"${XNU_INSTALL_BASE}/usr/local/include\"\n\ncp \"${SRCROOT}/libsyscall/wrappers/libproc/libproc.h\" \"${XNU_INSTALL_BASE}/usr/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/spawn/spawn.h\" \"${XNU_INSTALL_BASE}/usr/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/gethostuuid.h\" \"${XNU_INSTALL_BASE}/usr/include\"\n\ncp \"${SRCROOT}/libsyscall/wrappers/libproc/libproc_internal.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/spawn/spawn_private.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/_libkernel_init.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/mach/mach/vm_page_size.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\ncp \"${SRCROOT}/libsyscall/wrappers/gethostuuid_private.h\" \"${XNU_INSTALL_BASE}/usr/local/include\"\n";
 			showEnvVarsInLog = 0;
 		};
+		1F2EE33C18DE37C900665016 /* Print XNU Log File Location */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Print XNU Log File Location";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "echo \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\n";
+			showEnvVarsInLog = 0;
+		};
 		1F42B3E51859301B0023356E /* Build XNU */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
@@ -9009,7 +9025,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\necho \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" &> $XNU_BUILD_LOG_FILE\nexit $?";
+			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" &> $XNU_BUILD_LOG_FILE\nexit $?";
 			showEnvVarsInLog = 0;
 		};
 		1F7262A31859490A00FEE05A /* Link Frameworks */ = {
