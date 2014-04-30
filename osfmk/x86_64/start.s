@@ -227,7 +227,7 @@ Lvstartshim:
 	/* %edi = boot_args_start */
 	
 	leaq	_vstart(%rip), %rcx
-	movq	$0, %rax	/* adjust pointer up high */
+	movq	$0xffffff8000000000, %rax	/* adjust pointer up high */
 	or	%rax, %rsp			/* and stack pointer up there */
 	or	%rcx, %rax
 	andq	$0xfffffffffffffff0, %rsp	/* align stack */
