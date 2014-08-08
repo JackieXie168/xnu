@@ -85,7 +85,7 @@ KC++ = $(CXX)
 #
 
 CWARNFLAGS_STD = \
-	-Wall -Werror -Wno-format-y2k -Wextra -Wstrict-prototypes \
+	-Wall -Wno-format-y2k -Wextra -Wstrict-prototypes \
 	-Wmissing-prototypes -Wpointer-arith -Wreturn-type -Wcast-qual \
 	-Wwrite-strings -Wswitch -Wshadow -Wcast-align -Wchar-subscripts \
 	-Winline -Wnested-externs -Wredundant-decls -Wextra-tokens
@@ -98,7 +98,7 @@ $(1)_CWARNFLAGS_ADD += $2
 endef
 
 CXXWARNFLAGS_STD = \
-	-Wall -Werror -Wno-format-y2k -Wextra -Wpointer-arith -Wreturn-type \
+	-Wall -Wno-format-y2k -Wextra -Wpointer-arith -Wreturn-type \
 	-Wcast-qual -Wwrite-strings -Wswitch -Wcast-align -Wchar-subscripts \
 	-Wredundant-decls -Wextra-tokens
 
