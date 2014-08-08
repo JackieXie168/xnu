@@ -3471,6 +3471,10 @@
 		1F72637B18594C4500FEE05A /* create-syscalls.pl */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.perl; path = "create-syscalls.pl"; sourceTree = "<group>"; };
 		1F72637C18594C4500FEE05A /* mach_install_mig.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = mach_install_mig.sh; sourceTree = "<group>"; };
 		1F72641918594CC100FEE05A /* libsyscall.aliases */ = {isa = PBXFileReference; lastKnownFileType = text; path = libsyscall.aliases; sourceTree = "<group>"; };
+		1F7EF2D11995920700BF06CA /* build-xnu.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "build-xnu.sh"; sourceTree = "<group>"; };
+		1F7EF2D21995920700BF06CA /* install-external-headers.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "install-external-headers.sh"; sourceTree = "<group>"; };
+		1F7EF2D31995920700BF06CA /* link-frameworks.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "link-frameworks.sh"; sourceTree = "<group>"; };
+		1F7EF2D41995920700BF06CA /* print-xnu-log-location.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "print-xnu-log-location.sh"; sourceTree = "<group>"; };
 		1FAD56711859255500EDAF39 /* libelf.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = libelf.a; sourceTree = BUILT_PRODUCTS_DIR; };
 		1FAD56751859256300EDAF39 /* _libelf.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = _libelf.h; sourceTree = "<group>"; };
 		1FAD56761859256300EDAF39 /* ar.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ar.c; sourceTree = "<group>"; };
@@ -7735,6 +7739,7 @@
 		1F051C6E18591F01008F6CAE /* SETUP */ = {
 			isa = PBXGroup;
 			children = (
+				1F7EF2D01995919100BF06CA /* xcodescripts */,
 				1F051CC8185921B5008F6CAE /* dtrace */,
 				1F051C6F18591F01008F6CAE /* config */,
 				1F051C7E18591F01008F6CAE /* decomment */,
@@ -8548,6 +8553,17 @@
 			path = xcodescripts;
 			sourceTree = "<group>";
 		};
+		1F7EF2D01995919100BF06CA /* xcodescripts */ = {
+			isa = PBXGroup;
+			children = (
+				1F7EF2D11995920700BF06CA /* build-xnu.sh */,
+				1F7EF2D21995920700BF06CA /* install-external-headers.sh */,
+				1F7EF2D31995920700BF06CA /* link-frameworks.sh */,
+				1F7EF2D41995920700BF06CA /* print-xnu-log-location.sh */,
+			);
+			path = xcodescripts;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -8662,7 +8678,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n\nCopyHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/usr/include/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/usr/include/$1\"\n}\n\nCopyPrivateHeader () {\n    install -d `dirname \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"`\n    install \"${SRCROOT}/EXTERNAL_HEADERS/$1\" \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1\"\n}\n\nCopyHeader AssertMacros.h\nCopyHeader Availability.h\nCopyHeader AvailabilityInternal.h\nCopyHeader AvailabilityMacros.h\nCopyHeader stdarg.h\nCopyHeader stdbool.h\nCopyHeader stddef.h\nCopyHeader architecture/byte_order.h\nCopyHeader architecture/i386/asm_help.h\nCopyHeader architecture/i386/cpu.h\nCopyHeader architecture/i386/desc.h\nCopyHeader architecture/i386/io.h\nCopyHeader architecture/i386/pio.h\nCopyHeader architecture/i386/reg_help.h\nCopyHeader architecture/i386/sel.h\nCopyHeader architecture/i386/table.h\nCopyHeader architecture/i386/tss.h\n\nCopyPrivateHeader corecrypto/cc.h\nCopyPrivateHeader corecrypto/cc_config.h\nCopyPrivateHeader corecrypto/cc_priv.h\nCopyPrivateHeader corecrypto/ccaes.h\nCopyPrivateHeader corecrypto/ccder.h\nCopyPrivateHeader corecrypto/ccdes.h\nCopyPrivateHeader corecrypto/ccdigest.h\nCopyPrivateHeader corecrypto/cchmac.h\nCopyPrivateHeader corecrypto/ccmd5.h\nCopyPrivateHeader corecrypto/ccmode.h\nCopyPrivateHeader corecrypto/ccmode_factory.h\nCopyPrivateHeader corecrypto/ccmode_impl.h\nCopyPrivateHeader corecrypto/ccn.h\nCopyPrivateHeader corecrypto/ccpad.h\nCopyPrivateHeader corecrypto/ccpbkdf2.h\nCopyPrivateHeader corecrypto/ccrc4.h\nCopyPrivateHeader corecrypto/ccrng.h\nCopyPrivateHeader corecrypto/ccrng_system.h\nCopyPrivateHeader corecrypto/ccsha1.h\nCopyPrivateHeader corecrypto/ccsha2.h";
+			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/install-external-headers.sh\"";
 			showEnvVarsInLog = 0;
 		};
 		1F2EE33C18DE37C900665016 /* Print XNU Log File Location */ = {
@@ -8677,7 +8693,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "echo \"To see information on build progress, consult ${XNU_BUILD_LOG_FILE}\"\n";
+			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/print-xnu-log-location.sh\"";
 			showEnvVarsInLog = 0;
 		};
 		1F42B3E51859301B0023356E /* Build XNU */ = {
@@ -8692,7 +8708,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "mkdir -p \"${XNU_INSTALL_BASE}\"\nmkdir -p \"${DERIVED_FILE_DIR}/xnu.obj\"\n\nmake install \"DSTROOT=${XNU_INSTALL_BASE}\" \"OBJROOT=${DERIVED_FILE_DIR}/xnu.obj\" \"CTFCONVERT=${BUILT_PRODUCTS_DIR}/ctfconvert\" \"CTFMERGE=${BUILT_PRODUCTS_DIR}/ctfmerge\" &> $XNU_BUILD_LOG_FILE\nexit $?";
+			shellScript = ". \"${SRCROOT}/build-xnu.sh\"";
 			showEnvVarsInLog = 0;
 		};
 		1F7262A31859490A00FEE05A /* Link Frameworks */ = {
@@ -8707,7 +8723,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\n\ncd \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/Versions\"\nln -sfh B Current\n\ncd \"${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework\"\nln -sfh Versions/Current/PrivateHeaders PrivateHeaders\nln -sfh Versions/Current/System System";
+			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/link-frameworks.sh\"";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
