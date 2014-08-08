@@ -8708,7 +8708,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = ". \"${SRCROOT}/build-xnu.sh\"";
+			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/build-xnu.sh\"";
 			showEnvVarsInLog = 0;
 		};
 		1F7262A31859490A00FEE05A /* Link Frameworks */ = {
