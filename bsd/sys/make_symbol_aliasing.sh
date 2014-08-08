@@ -34,8 +34,8 @@ fi
 SDKROOT="$1"
 OUTPUT="$2"
 
-if [ ! -x "${SDKROOT}/usr/local/libexec/availability.pl" ] ; then
-    echo "Unable to locate ${SDKROOT}/usr/local/libexec/availability.pl (or not executable)" >&2
+if [ ! -x "${SRCROOT}/SETUP/availability.pl" ]; then
+    echo "Unable to locate ${SRCROOT}/SETUP/availability.pl (or not executable)" >&2
     exit 1
 fi
 	    
