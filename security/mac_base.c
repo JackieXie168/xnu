@@ -419,8 +419,6 @@ mac_policy_grab_exclusive(void)
 	}
 }
 
-#if 0
-// This function is unused, and as such emits a warning that is by default elevated into an error.
 static __inline void
 mac_policy_assert_exclusive(void)
 {
@@ -428,7 +426,6 @@ mac_policy_assert_exclusive(void)
 	KASSERT(mac_policy_busy == 0,
 	    ("mac_policy_assert_exclusive(): not exclusive"));
 }
-#endif
 
 static __inline void
 mac_policy_release_exclusive(void)
