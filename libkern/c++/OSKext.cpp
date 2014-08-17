@@ -2595,7 +2595,7 @@ OSKext::extractMkext1Entry(
         (vm_offset_t *)&uncompressedDataBuffer,
         alloc_size);
     if (kern_result != KERN_SUCCESS) {
-        panic(ALLOC_FAIL);
+        panic("Allocation failure");
         goto finish;
     }
 
@@ -2603,7 +2603,7 @@ OSKext::extractMkext1Entry(
         alloc_size);
     if (uncompressedData == NULL) {
        /* No need to free uncompressedDataBuffer here, either. */
-        panic(ALLOC_FAIL);
+        panic("Allocation failure");
         goto finish;
     }
     uncompressedData->setDeallocFunction(&osdata_kmem_free);

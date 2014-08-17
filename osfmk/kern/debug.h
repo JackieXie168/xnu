@@ -359,7 +359,7 @@ void panic_context(unsigned int reason, void *ctx, const char *string, ...);
 #define LINE_NUMBER(x) __STRINGIFY(x)
 #define PANIC_LOCATION __FILE__ ":" LINE_NUMBER(__LINE__)
 #define panic(ex, ...) \
-	(panic)(# ex "@" PANIC_LOCATION, ## __VA_ARGS__)
+	(panic)(ex "\n@" PANIC_LOCATION, ## __VA_ARGS__)
 #endif /* CONFIGS_NO_PANIC_STRINGS */
 
 void 		populate_model_name(char *);
