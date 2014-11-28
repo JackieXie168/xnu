@@ -1,0 +1,17 @@
+ident		SECURITY
+options		AUDIT
+options		CONFIG_LCTX
+options		CONFIG_DTRACE
+options		VM_PRESSURE_EVENTS
+options		CONFIG_MEMORYSTATUS
+options		CONFIG_MACF
+options		CONFIG_MACF_SOCKET_SUBSET
+options		CONFIG_FSE
+options		CONFIG_TRIGGERS
+options		CONFIG_EXT_RESOLVER
+options		CONFIG_AUDIT
+machine		"x86_64"
+cpu		"x86_64"
+builddir	"."
+objectdir	"/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/security/RELEASE"
+sourcedir	"/Users/admin/Code/xnu/xnu-2422.115.4"

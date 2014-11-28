@@ -1,0 +1,9 @@
+ident		PEXPERT
+options		MACH_PE
+options		MACH_KERNEL
+options		CONFIG_DTRACE
+machine		"x86_64"
+cpu		"x86_64"
+builddir	"."
+objectdir	"/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE"
+sourcedir	"/Users/admin/Code/xnu/xnu-2422.115.4"
