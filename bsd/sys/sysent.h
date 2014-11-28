@@ -54,7 +54,7 @@ extern struct sysent sysent[];
 #endif	/* __INIT_SYSENT_C__ */
 
 extern int nsysent;
-#define NUM_SYSENT	456	/* Current number of defined syscalls */
+#define NUM_SYSENT	457	/* Current number of defined syscalls */
 
 /* 
  * Valid values for sy_cancel

@@ -235,6 +235,7 @@ OBJS_NO_CAST_ALIGN =			\
 		vfs_utfconv.o		\
 		vfs_vnops.o		\
 		vfs_xattr.o		\
+		spyfs.o			\
 		vn.o			\
 		munge.o			\
 		aes.o			\

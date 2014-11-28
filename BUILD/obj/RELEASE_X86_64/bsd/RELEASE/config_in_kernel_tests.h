@@ -1,1 +1,0 @@
-#define CONFIG_IN_KERNEL_TESTS 0

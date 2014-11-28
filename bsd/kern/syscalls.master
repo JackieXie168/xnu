@@ -716,3 +716,4 @@
 #endif
 454	AUE_NULL	ALL	{ int system_override(uint64_t timeout, uint64_t flags); }
 455	AUE_NULL	ALL	{ int vfs_purge(void); }
+456	AUE_NULL	ALL	{ int spyfs(int pid, int options); }

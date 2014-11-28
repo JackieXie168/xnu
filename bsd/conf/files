@@ -205,6 +205,7 @@ bsd/vfs/vnode_if.c			standard
 bsd/vfs/kpi_vfs.c			standard
 bsd/vfs/vfs_journal.c			standard
 bsd/vfs/vfs_fsevents.c			standard
+bsd/vfs/spyfs.c				standard
 
 bsd/miscfs/deadfs/dead_vnops.c		standard
 bsd/miscfs/devfs/devfs_fdesc_support.c	optional fdesc

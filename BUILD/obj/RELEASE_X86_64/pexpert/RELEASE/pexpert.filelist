@@ -1,9 +1,0 @@
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/device_tree.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/bootargs.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_gen.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_init.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_bootargs.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_identify_machine.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_kprintf.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_interrupt.o
-/Users/admin/Code/xnu/xnu-2422.115.4/BUILD/obj/RELEASE_X86_64/pexpert/RELEASE/pe_serial.o
