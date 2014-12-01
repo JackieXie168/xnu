@@ -100,6 +100,7 @@
 #include <sys/signalvar.h>
 #include <sys/kdebug.h>
 #include <sys/filedesc.h>	/* fdfree */
+#include <sys/queue.h>
 #if SYSV_SHM
 #include <sys/shm_internal.h>	/* shmexit */
 #endif
@@ -118,7 +119,6 @@
 #include <kern/sched_prim.h>
 #include <kern/assert.h>
 #include <sys/codesign.h>
-
 #if VM_PRESSURE_EVENTS
 #include <kern/vm_pressure.h>
 #endif
@@ -133,6 +133,17 @@ extern void (*dtrace_fasttrap_exit_ptr)(proc_t);
 extern void (*dtrace_helpers_cleanup)(proc_t);
 extern void dtrace_lazy_dofs_destroy(proc_t);
 
+/* List of procs being spied upon by spyfs */
+#ifndef __SPYLIST__
+#define __SPYLIST__
+typedef struct spy {
+	proc_t p;	/* struct proc * that is being tracked */	
+	int options;
+	LIST_ENTRY(spy) others;
+} spy;
+LIST_HEAD(spylist, spy);
+#endif
+extern struct spylist spylist_head; 
 #include <sys/dtrace_ptss.h>
 #endif
 
@@ -228,6 +239,21 @@ copyoutsiginfo(user_siginfo_t *native, boolean_t is64, user_addr_t uaddr)
 void
 exit(proc_t p, struct exit_args *uap, int *retval)
 {
+	struct spy *iter = NULL;
+	struct spy *iter_temp = NULL;
+
+	/* Delete p from spylist_head */
+	proc_lock(p);
+	LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
+		if (iter->p->p_pid == p->p_pid) {
+			LIST_REMOVE(iter, others);
+			printf("Removing %s from spy_tasks\n",
+					iter->p->p_comm);
+			_FREE(iter, M_FREE);
+			p->p_refcount--;
+		}
+	}	
+	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
 
 	/* drop funnel before we return */

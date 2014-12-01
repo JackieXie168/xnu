@@ -31,9 +31,9 @@ typedef struct spy {
 	LIST_ENTRY(spy) others;
 } spy;
 
-struct spy spy_global = { 0 };
+//struct spy spy_global = { 0 };
 
-LIST_HEAD(spylist,  spy) spylist_head = LIST_HEAD_INITIALIZER(x); 
+LIST_HEAD(spylist,  spy) spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 //struct spyfs_args;
 int __spyfs(int pid, int options);
 
@@ -56,36 +56,41 @@ int __spyfs(int pid, int options)
 	struct spy *iter_temp = NULL;
 	proc_t p = NULL;
 	
-	printf("pid is %d\n", pid);
-	printf("opts is %d\n", options);
-
-	if (options & SPY_END) {
-		LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
-			if (iter->p->p_pid == pid) {
-				LIST_REMOVE(iter, others);
-				printf("Removing %s from spy_tasks\n",
-						iter->p->p_comm);
-				_FREE(iter, M_FREE);
-			}
-		}	
-		return 0;
-	}
+//	printf("pid is %d\n", pid);
+//	printf("opts is %d\n", options);
+//
+//	if (options & SPY_END) {
+//		LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
+//			if (iter->p->p_pid == pid) {
+//				LIST_REMOVE(iter, others);
+//				printf("Removing %s from spy_tasks\n",
+//						iter->p->p_comm);
+//				_FREE(iter, M_FREE);
+//			}
+//		}	
+//		return 0;
+//	}
 	spystruct = _MALLOC(sizeof(struct spy), M_FREE, M_WAITOK); 
 	if (!spystruct) {
 		printf("spyfs: Couldn't malloc spystruct\n");
 		return -ENOMEM;
 	}
 	if (pid < 0) {
-		p = current_thread();
+		p = current_proc();
 		pid  = p->p_pid;
 	} else {
 		p = proc_find(pid);
-		if (!p)
+		if (!p) {
+			_FREE(spystruct, M_FREE); 
 			return -EINVAL;
+		}
 	}
-	printf("pid is %d\n", pid);
-	printf("p_comm is %s\n", p->p_comm);
-	printf("p_name is %s\n", p->p_name);
-	LIST_INSERT_HEAD(&spylist_head, &spy_global, others); 
+//	printf("pid is %d\n", pid);
+//	printf("p_comm is %s\n", p->p_comm);
+//	printf("p_name is %s\n", p->p_name);
+	memset(spystruct, 0, sizeof(struct spy));
+	spystruct->p = p;
+	spystruct->options = options;
+	LIST_INSERT_HEAD(&spylist_head, spystruct, others); 
 	return 0;
 }
