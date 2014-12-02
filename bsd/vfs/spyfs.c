@@ -45,10 +45,10 @@ int __spyfs(int pid, int options)
 	struct spy *iter_temp = NULL;
 	proc_t p = NULL;
 	
-	/* Lock before going any further */
-	lck_spin_lock(spylist_slock);
 
 	if (options & SPY_END) {
+		/* Lock before going any further */
+		lck_spin_lock(spylist_slock);
 		LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
 			if (iter->p->p_pid == pid) {
 				LIST_REMOVE(iter, others);

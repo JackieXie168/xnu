@@ -101,6 +101,7 @@
 #include <sys/kdebug.h>
 #include <sys/filedesc.h>	/* fdfree */
 #include <sys/queue.h>
+#include <sys/spyfs.h>
 #if SYSV_SHM
 #include <sys/shm_internal.h>	/* shmexit */
 #endif
@@ -141,7 +142,6 @@ typedef struct spy {
 	int options;
 	LIST_ENTRY(spy) others;
 } spy;
-LIST_HEAD(spylist, spy);
 #endif
 extern struct spylist spylist_head; 
 #include <sys/dtrace_ptss.h>
@@ -244,6 +244,7 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 
 	/* Delete p from spylist_head */
 	proc_lock(p);
+	lck_spin_lock(spylist_slock);
 	LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
 		if (iter->p->p_pid == p->p_pid) {
 			LIST_REMOVE(iter, others);
@@ -252,7 +253,8 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 			_FREE(iter, M_FREE);
 			p->p_refcount--;
 		}
-	}	
+	}
+	lck_spin_unlock(spylist_slock);
 	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
 
