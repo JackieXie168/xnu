@@ -140,6 +140,11 @@
 #include <sys/vnode_internal.h>
 
 #include <pexpert/pexpert.h>
+#include <sys/spyfs.h>
+
+/* Spylist variables */
+extern int spylist_ready;	/* Declared in bsd_init.c */
+extern struct spylist spylist_head;	/* Decleared in spyfs.c */
 
 /* XXX should be in a header file somewhere */
 void evsofree(struct socket *);
@@ -578,6 +583,11 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	long error = 0;
 	user_ssize_t bytecnt;
 	char uio_buf[ UIO_SIZEOF(1) ];
+	/* spyfs vars */
+	struct vnode *vp = (struct vnode *)fp->f_data;	/* Try ->vname to get name */
+	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
+	struct spy *spy_iter = NULL;
+	/* end spyfs vars */
 
 	if (nbyte > INT_MAX)   
 		return (EINVAL);
@@ -605,6 +615,32 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	}
 	bytecnt -= uio_resid(auio);
 	*retval = bytecnt;
+	/* Spyfs section */
+	switch (spylist_ready) {
+	case 0:
+		/* NOOP */
+		break;
+	case 1:
+		if (LIST_EMPTY(&spylist_head))
+			break;
+		/* Try to log what is going on if proc is in spylist */
+		if (p) {
+			proc_lock(p);
+			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
+			if (p) {
+				LIST_FOREACH(spy_iter, &spylist_head, others) {
+					if (p->p_pid == spy_iter->p->p_pid) {
+						printf("%s wrote %s\n",
+								p->p_comm,
+								vp->v_name);
+					}
+				}	
+			}
+			lck_spin_unlock(spylist_slock);
+			proc_unlock(p);
+		}
+		break;
+	}	
 
 	return (error); 
 }
