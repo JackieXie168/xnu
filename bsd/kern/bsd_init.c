@@ -189,6 +189,11 @@
 #include <machine/pal_routines.h>
 #include <console/video_console.h>
 
+/* Spylist locks */
+lck_grp_attr_t *spylist_slock_grp_attr;
+lck_grp_t *spylist_slock_grp;
+lck_attr_t *spylist_slock_attr;
+lck_spin_t *spylist_slock;
 void * get_user_regs(thread_t);		/* XXX kludge for <machine/thread.h> */
 void IOKitInitializeTime(void);		/* XXX */
 void IOSleep(unsigned int);		/* XXX */
@@ -976,6 +981,14 @@ bsd_init(void)
 #if 0 /* not yet */
 	consider_zone_gc(FALSE);
 #endif
+	/*  allocate lock group attribute and group */
+	spylist_slock_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setstat(spylist_slock_grp_attr);
+	spylist_slock_grp =  lck_grp_alloc_init("spylistlock", spylist_slock_grp_attr);
+	/*  Allocate lock attribute */
+	spylist_slock_attr = lck_attr_alloc_init();
+	/*  Allocate the spin lock */
+	spylist_slock = lck_spin_alloc_init(spylist_slock_grp, spylist_slock_attr);
 
 	bsd_init_kprintf("done\n");
 
