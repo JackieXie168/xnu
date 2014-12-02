@@ -13,9 +13,7 @@
 #include <sys/kasl.h>
 #include <kern/locks.h>
 #include <dev/random/randomdev.h>
-
 #include <uuid/uuid.h>
-
 #include <stdarg.h>
 #include <sys/queue.h>
 #include <sys/sysproto.h>
@@ -70,13 +68,19 @@ int __spyfs(int pid, int options)
 				LIST_REMOVE(iter, others);
 				printf("Removing %s from spy_tasks\n",
 						iter->p->p_comm);
+				p = iter->p;
 				_FREE(iter, M_FREE);
 			}
 		}	
+		/* Unlock */
+		lck_spin_unlock(spylist_slock);
+		if (p) {
+			proc_lock(p);
+			p->p_refcount--;
+			proc_unlock(p);
+		}
 		return 0;
 	}
-	/* Unlock */
-	lck_spin_unlock(spylist_slock);
 
 	spystruct = _MALLOC(sizeof(struct spy), M_FREE, M_WAITOK); 
 	if (!spystruct) {
