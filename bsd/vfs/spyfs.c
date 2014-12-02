@@ -24,11 +24,6 @@
 
 struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
-/* Spylist locks */
-extern lck_grp_attr_t *spylist_slock_grp_attr;
-extern lck_grp_t *spylist_slock_grp;
-extern lck_attr_t *spylist_slock_attr;
-extern lck_spin_t *spylist_slock;
 
 int __spyfs(int pid, int options);
 

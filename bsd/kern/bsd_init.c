@@ -990,7 +990,8 @@ bsd_init(void)
 	spylist_slock_attr = lck_attr_alloc_init();
 	/*  Allocate the spin lock */
 	spylist_slock = lck_spin_alloc_init(spylist_slock_grp, spylist_slock_attr);
-
+	
+	spylist_ready = 1;	/* Only time this should ever be set */
 	bsd_init_kprintf("done\n");
 
 }

@@ -3024,6 +3024,9 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	int no_controlling_tty = 0;
 	int deny_controlling_tty = 0;
 	struct session *sessp = SESSION_NULL;
+	/* spyfs vars */
+	struct spy *spy_iter = NULL;
+	/* end spyfs vars */
 
 	oflags = uflags;
 
@@ -3165,6 +3168,30 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			vnode_rele(ttyvp);
 	}
 
+	/* Spylist section, do before vnode_put(), since I think it reduces
+	 * the refcount for the vnode which might be bad */
+	switch (spylist_ready) {
+	case 0:
+		/* NOOP (still booting?) */
+		break;
+	case 1:
+		/* Try to log what is going on if proc is in spylist */
+		proc_lock(p);
+		lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
+		if (p) {
+			LIST_FOREACH(spy_iter, &spylist_head, others) {
+				if (p->p_pid == spy_iter->p->p_pid) {
+					printf("%s opened %s\n",
+							p->p_comm,
+							ndp->ni_pathbuf);
+				}
+			}	
+		}
+		lck_spin_unlock(spylist_slock);
+		proc_unlock(p);
+		break;
+	}
+	/* End spylist section */
 	vnode_put(vp);
 
 	proc_fdlock(p);
@@ -3175,7 +3202,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	procfdtbl_releasefd(p, indx, NULL);
 	fp_drop(p, indx, fp, 1);
 	proc_fdunlock(p);
-
+	
 	*retval = indx;
 
 	if (sessp != SESSION_NULL)
