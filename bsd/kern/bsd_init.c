@@ -194,6 +194,7 @@ lck_grp_attr_t *spylist_slock_grp_attr;
 lck_grp_t *spylist_slock_grp;
 lck_attr_t *spylist_slock_attr;
 lck_spin_t *spylist_slock;
+int spylist_ready = 0;	/* In case open() or read() is called before list exists */
 void * get_user_regs(thread_t);		/* XXX kludge for <machine/thread.h> */
 void IOKitInitializeTime(void);		/* XXX */
 void IOSleep(unsigned int);		/* XXX */

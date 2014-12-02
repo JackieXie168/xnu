@@ -17,21 +17,12 @@
 #include <stdarg.h>
 #include <sys/queue.h>
 #include <sys/sysproto.h>
-
+#include <sys/spyfs.h>
 #define SPY_END		(1 << 1)	/* Stop tracking pid */
 #define SPY_WRITES	(1 << 2)	/* Track files that are written  */
 #define SPY_READS	(1 << 3)	/* Track files that are read */
 
-/* List of procs being spied upon by spyfs */
-#ifndef __SPYLIST__
-#define __SPYLIST__
-typedef struct spy {
-	proc_t p;	/* struct proc * that is being tracked */	
-	int options;
-	LIST_ENTRY(spy) others;
-} spy;
-#endif
-LIST_HEAD(spylist, spy) spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
+struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
 /* Spylist locks */
 extern lck_grp_attr_t *spylist_slock_grp_attr;

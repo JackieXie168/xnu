@@ -115,7 +115,7 @@
 
 #include <libkern/OSAtomic.h>
 #include <pexpert/pexpert.h>
-
+#include <sys/spyfs.h>
 #if CONFIG_MACF
 #include <security/mac.h>
 #include <security/mac_framework.h>
@@ -133,6 +133,9 @@
 	FREE_ZONE((x), MAXPATHLEN, M_NAMEI);
 #endif /* CONFIG_FSE */
 
+/* Spylist variables */
+extern int spylist_ready;	/* Declared in bsd_init.c */
+extern struct spylist spylist_head;	/* Decleared in spyfs.c */
 /* struct for checkdirs iteration */
 struct cdirargs {
 	vnode_t olddp;
