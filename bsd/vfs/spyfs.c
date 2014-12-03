@@ -37,7 +37,7 @@ int proc_is_sibling(proc_t test, proc_t against, int locked)
 	case 0:
 		lck_mtx_lock(proc_list_mlock);
 		PROC_FOREACH_SIBLING(against, iter) {
-			if (iter == against) {
+			if (iter == test) {
 				lck_mtx_unlock(proc_list_mlock);
 				return 1;
 			}
@@ -46,10 +46,11 @@ int proc_is_sibling(proc_t test, proc_t against, int locked)
 		return 0;
 	case 1:
 		PROC_FOREACH_SIBLING(against, iter)
-			if (iter == against)
+			if (iter == test)
 				return 1;
 		return 0;
 	}
+	return 0;
 }
 
 /* Returns 1 if 'test' is a descendent of 'against' */
@@ -89,6 +90,7 @@ int proc_is_descendant(proc_t test, proc_t against, int locked)
 		}
 		return 0;
 	}
+	return 0;
 }
 
 int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
