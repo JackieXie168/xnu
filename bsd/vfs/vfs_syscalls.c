@@ -3180,22 +3180,22 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		break;
 	case 1:
 		/* Try to log what is going on if proc is in spylist */
-		proc_lock(p);
-		lck_spin_lock(spylist_slock);
 		if (p) {
-			if (p->p_pid == spy_iter->p->p_pid) {
-				printf("%s opened %s\n",
-					p->p_comm,
-					ndp->ni_pathbuf);
-			} else {
-				if (proc_is_descendant(p, spy_iter->p, 0))
+			lck_spin_lock(spylist_slock);
+			LIST_FOREACH(spy_iter, &spylist_head, others) {
+				if (p->p_pid == spy_iter->p->p_pid) {
 					printf("%s opened %s\n",
 						p->p_comm,
 						ndp->ni_pathbuf);
+				} else {
+					if (proc_is_descendant(p, spy_iter->p, 0))
+						printf("%s opened %s\n",
+							p->p_comm,
+							ndp->ni_pathbuf);
+				}
 			}
+			lck_spin_unlock(spylist_slock);
 		}
-		lck_spin_unlock(spylist_slock);
-		proc_unlock(p);
 		break;
 	}
 	/* End spylist section */
