@@ -22,10 +22,74 @@
 #define SPY_WRITES	(1 << 2)	/* Track files that are written  */
 #define SPY_READS	(1 << 3)	/* Track files that are read */
 
+extern lck_mtx_t * proc_list_mlock;
 struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
 
 int __spyfs(int pid, int options);
+
+/* Returns 1 if 'test' is a sibling of 'against' */
+int proc_is_sibling(proc_t test, proc_t against, int locked)
+{
+	proc_t iter = NULL;
+
+	switch (locked) {
+	case 0:
+		lck_mtx_lock(proc_list_mlock);
+		PROC_FOREACH_SIBLING(against, iter) {
+			if (iter == against) {
+				lck_mtx_unlock(proc_list_mlock);
+				return 1;
+			}
+		}
+		lck_mtx_unlock(proc_list_mlock);
+		return 0;
+	case 1:
+		PROC_FOREACH_SIBLING(against, iter)
+			if (iter == against)
+				return 1;
+		return 0;
+	}
+}
+
+/* Returns 1 if 'test' is a descendent of 'against' */
+int proc_is_descendant(proc_t test, proc_t against, int locked)
+{
+	proc_t iter = NULL;
+	int match = 0;
+
+	switch (locked) {
+	case 0:
+		/* Wait for proclist lock */
+		lck_mtx_lock(proc_list_mlock);
+		
+		PROC_FOREACH_DESCENDANT(against, iter) {
+			if (iter == test) {
+				lck_mtx_unlock(proc_list_mlock);
+				return 1;
+			} else {
+				match = proc_is_sibling(test, iter, 1);
+				if (match) {
+					lck_mtx_unlock(proc_list_mlock);
+					return 1;
+				}
+			}
+		}
+		lck_mtx_unlock(proc_list_mlock);
+		return 0;
+	case 1:
+		PROC_FOREACH_DESCENDANT(against, iter) {
+			if (iter == test) {
+				return 1;
+			} else {
+				match = proc_is_sibling(test, iter, 1);
+				if (match)
+					return 1;
+			}
+		}
+		return 0;
+	}
+}
 
 int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 {
