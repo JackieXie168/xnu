@@ -260,7 +260,7 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	lck_spin_unlock(spylist_slock);
 	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
-	if (match = 1)
+	if (match == 1)
 		issuing_pid = -1;
 	/* drop funnel before we return */
 	thread_exception_return();

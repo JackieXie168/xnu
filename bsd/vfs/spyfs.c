@@ -117,7 +117,7 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 	issuing_pid = p->p_pid; 
 	pid = args->pid;
 	opts = args->options;
-	return (__spyfs(pid, 0));
+	return (__spyfs(pid, opts));
 }
 
 int __spyfs(int pid, int options)

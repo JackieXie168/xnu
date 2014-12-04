@@ -617,32 +617,32 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	bytecnt -= uio_resid(auio);
 	*retval = bytecnt;
 	/* Spyfs section */
-	match = spylist_ready && (issuing_pid < 0);
-	switch (match) {
-	case 0:
-		/* NOOP */
-		break;
-	case 1:
-		if (LIST_EMPTY(&spylist_head))
-			break;
-		/* Try to log what is going on if proc is in spylist */
-		if (p) {
-			proc_lock(p);
-			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
-			if (p) {
-				LIST_FOREACH(spy_iter, &spylist_head, others) {
-					if (p->p_pid == spy_iter->p->p_pid) {
-						printf("%s wrote %s\n",
-								p->p_comm,
-								vp->v_name);
-					}
-				}	
-			}
-			lck_spin_unlock(spylist_slock);
-			proc_unlock(p);
-		}
-		break;
-	}	
+//	match = spylist_ready && (issuing_pid < 0);
+//	switch (match) {
+//	case 0:
+//		/* NOOP */
+//		break;
+//	case 1:
+//		if (LIST_EMPTY(&spylist_head))
+//			break;
+//		/* Try to log what is going on if proc is in spylist */
+//		if (p) {
+//			proc_lock(p);
+//			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
+//			if (p) {
+//				LIST_FOREACH(spy_iter, &spylist_head, others) {
+//					if (p->p_pid == spy_iter->p->p_pid) {
+//						printf("%s wrote %s\n",
+//								p->p_comm,
+//								vp->v_name);
+//					}
+//				}	
+//			}
+//			lck_spin_unlock(spylist_slock);
+//			proc_unlock(p);
+//		}
+//		break;
+//	}	
 
 	return (error); 
 }
