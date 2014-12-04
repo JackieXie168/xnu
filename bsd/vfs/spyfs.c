@@ -114,6 +114,7 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 	       			 * descriptive error to return, 
 				 * since the problem is not technically
 				 * an invalid parameter */
+	issuing_pid = p->p_pid; 
 	pid = args->pid;
 	opts = args->options;
 	return (__spyfs(pid, 0));
