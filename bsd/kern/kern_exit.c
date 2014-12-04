@@ -143,7 +143,8 @@ typedef struct spy {
 	LIST_ENTRY(spy) others;
 } spy;
 #endif
-extern struct spylist spylist_head; 
+extern struct spylist spylist_head;
+extern int issuing_pid;
 #include <sys/dtrace_ptss.h>
 #endif
 
@@ -241,8 +242,10 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 {
 	struct spy *iter = NULL;
 	struct spy *iter_temp = NULL;
-
+	int match = 0;
 	/* Delete p from spylist_head */
+	if (p->p_pid == issuing_pid)
+		match = 1;
 	proc_lock(p);
 	lck_spin_lock(spylist_slock);
 	LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
@@ -257,7 +260,8 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	lck_spin_unlock(spylist_slock);
 	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
-
+	if (match = 1)
+		issuing_pid = -1;
 	/* drop funnel before we return */
 	thread_exception_return();
 	/* NOTREACHED */

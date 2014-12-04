@@ -136,6 +136,7 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern int issuing_pid;		/* If this is < 0, it is safe to spy on tasks */
 /* struct for checkdirs iteration */
 struct cdirargs {
 	vnode_t olddp;
@@ -3030,6 +3031,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	proc_t p_iter_sib = NULL;
 	proc_t p_iter_temp = NULL;
 	int match = 0;
+	int ready = 0;	/* 1 if both spylist_ready and issuing_pid < 0 */
 	/* end spyfs vars */
 
 	oflags = uflags;
@@ -3174,13 +3176,15 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 
 	/* Spylist section, do before vnode_put(), since I think it reduces
 	 * the refcount for the vnode which might be bad */
-	switch (spylist_ready) {
+	ready = (spylist_ready && (issuing_pid < 0));
+	switch (ready) {
 	case 0:
 		/* NOOP (still booting?) */
 		break;
 	case 1:
 		/* Try to log what is going on if proc is in spylist */
 		if (p) {
+			proc_lock(p);
 			lck_spin_lock(spylist_slock);
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
@@ -3195,6 +3199,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 				}
 			}
 			lck_spin_unlock(spylist_slock);
+			proc_unlock(p);
 		}
 		break;
 	}
@@ -9907,4 +9912,3 @@ vfs_purge(__unused struct proc *p, __unused struct vfs_purge_args *uap, __unused
 
 	return 0;
 }
-

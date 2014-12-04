@@ -145,7 +145,7 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
-
+extern int issuing_pid;
 /* XXX should be in a header file somewhere */
 void evsofree(struct socket *);
 void evpipefree(struct pipe *);
@@ -587,6 +587,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	struct vnode *vp = (struct vnode *)fp->f_data;	/* Try ->vname to get name */
 	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
 	struct spy *spy_iter = NULL;
+	int match = 0;
 	/* end spyfs vars */
 
 	if (nbyte > INT_MAX)   
@@ -616,7 +617,8 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	bytecnt -= uio_resid(auio);
 	*retval = bytecnt;
 	/* Spyfs section */
-	switch (spylist_ready) {
+	match = spylist_ready && (issuing_pid < 0);
+	switch (match) {
 	case 0:
 		/* NOOP */
 		break;
