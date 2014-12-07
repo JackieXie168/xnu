@@ -584,12 +584,16 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	user_ssize_t bytecnt;
 	char uio_buf[ UIO_SIZEOF(1) ];
 	/* spyfs vars */
-	struct vnode *vp = (struct vnode *)fp->f_data;	/* Try ->vname to get name */
+	struct vnode *vp = NULL;	/* Try ->vname to get name */
 	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
 	struct spy *spy_iter = NULL;
 	int match = 0;
+	int skip = 0;
 	/* end spyfs vars */
 
+	if (fp) {
+		vp = (struct vnode *)fp->f_data;	/* Try ->vname to get name */
+	}
 	if (nbyte > INT_MAX)   
 		return (EINVAL);
 
@@ -610,6 +614,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		/* The socket layer handles SIGPIPE */
 		if (error == EPIPE && fp->f_type != DTYPE_SOCKET &&
 		    (fp->f_fglob->fg_lflags & FG_NOSIGPIPE) == 0) {
+			skip = 1;
 			/* XXX Raise the signal on the thread? */
 			psignal(vfs_context_proc(ctx), SIGPIPE);
 		}
@@ -617,32 +622,36 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	bytecnt -= uio_resid(auio);
 	*retval = bytecnt;
 	/* Spyfs section */
-//	match = spylist_ready && (issuing_pid < 0);
-//	switch (match) {
-//	case 0:
-//		/* NOOP */
-//		break;
-//	case 1:
-//		if (LIST_EMPTY(&spylist_head))
-//			break;
-//		/* Try to log what is going on if proc is in spylist */
-//		if (p) {
-//			proc_lock(p);
-//			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
-//			if (p) {
-//				LIST_FOREACH(spy_iter, &spylist_head, others) {
-//					if (p->p_pid == spy_iter->p->p_pid) {
+	match = spylist_ready && (issuing_pid < 0) && (vp && vp->v_name) && !skip;
+	/* Lock the vnode until after we've printed it's name */
+	switch (match) {
+	case 0:
+		/* NOOP */
+		break;
+	case 1:
+		if (LIST_EMPTY(&spylist_head))
+			break;
+		/* Try to log what is going on if proc is in spylist */
+		if (p) {
+			proc_lock(p);
+			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
+			
+			lck_mtx_lock(&vp->v_lock);
+			if (p) {
+				LIST_FOREACH(spy_iter, &spylist_head, others) {
+					if (p->p_pid == spy_iter->p->p_pid) {
 //						printf("%s wrote %s\n",
 //								p->p_comm,
 //								vp->v_name);
-//					}
-//				}	
-//			}
-//			lck_spin_unlock(spylist_slock);
-//			proc_unlock(p);
-//		}
-//		break;
-//	}	
+					}
+				}	
+			}
+			lck_mtx_unlock(&vp->v_lock);
+			lck_spin_unlock(spylist_slock);
+			proc_unlock(p);
+		}
+		break;
+	}	
 
 	return (error); 
 }
