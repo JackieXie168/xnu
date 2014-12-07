@@ -18,8 +18,8 @@ LIST_HEAD(spylist, spy);
 int proc_is_sibling(proc_t test, proc_t against, int locked);
 int proc_is_descendant(proc_t test, proc_t against, int locked);
 /* Spylist locks */
-extern lck_grp_attr_t *spylist_slock_grp_attr;
-extern lck_grp_t *spylist_slock_grp;
-extern lck_attr_t *spylist_slock_attr;
-extern lck_spin_t *spylist_slock;
+extern lck_grp_attr_t *spylist_mtx_grp_attr;
+extern lck_grp_t *spylist_mtx_grp;
+extern lck_attr_t *spylist_mtx_attr;
+extern lck_mtx_t *spylist_mtx;
 #endif

@@ -3027,10 +3027,10 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	struct session *sessp = SESSION_NULL;
 	/* spyfs vars */
 	struct spy *spy_iter = NULL;
-	proc_t p_iter = NULL;
-	proc_t p_iter_sib = NULL;
-	proc_t p_iter_temp = NULL;
-	int match = 0;
+//	proc_t p_iter = NULL;
+//	proc_t p_iter_sib = NULL;
+//	proc_t p_iter_temp = NULL;
+//	int match = 0;
 	int ready = 0;	/* 1 if both spylist_ready and issuing_pid < 0 */
 	/* end spyfs vars */
 
@@ -3185,7 +3185,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		/* Try to log what is going on if proc is in spylist */
 		if (p) {
 			proc_lock(p);
-			lck_spin_lock(spylist_slock);
+			lck_mtx_lock(spylist_mtx);
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
 					printf("%s opened %s\n",
@@ -3198,7 +3198,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 							ndp->ni_pathbuf);
 				}
 			}
-			lck_spin_unlock(spylist_slock);
+			lck_mtx_unlock(spylist_mtx);
 			proc_unlock(p);
 		}
 		break;

@@ -190,10 +190,10 @@
 #include <console/video_console.h>
 
 /* Spylist locks */
-lck_grp_attr_t *spylist_slock_grp_attr;
-lck_grp_t *spylist_slock_grp;
-lck_attr_t *spylist_slock_attr;
-lck_spin_t *spylist_slock;
+lck_grp_attr_t *spylist_mtx_grp_attr;
+lck_grp_t *spylist_mtx_grp;
+lck_attr_t *spylist_mtx_attr;
+lck_mtx_t *spylist_mtx;
 int spylist_ready = 0;	/* In case open() or read() is called before list exists */
 void * get_user_regs(thread_t);		/* XXX kludge for <machine/thread.h> */
 void IOKitInitializeTime(void);		/* XXX */
@@ -983,13 +983,13 @@ bsd_init(void)
 	consider_zone_gc(FALSE);
 #endif
 	/*  allocate lock group attribute and group */
-	spylist_slock_grp_attr = lck_grp_attr_alloc_init();
-	lck_grp_attr_setstat(spylist_slock_grp_attr);
-	spylist_slock_grp =  lck_grp_alloc_init("spylistlock", spylist_slock_grp_attr);
+	spylist_mtx_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setstat(spylist_mtx_grp_attr);
+	spylist_mtx_grp =  lck_grp_alloc_init("spylistlock", spylist_mtx_grp_attr);
 	/*  Allocate lock attribute */
-	spylist_slock_attr = lck_attr_alloc_init();
+	spylist_mtx_attr = lck_attr_alloc_init();
 	/*  Allocate the spin lock */
-	spylist_slock = lck_spin_alloc_init(spylist_slock_grp, spylist_slock_attr);
+	spylist_mtx = lck_mtx_alloc_init(spylist_mtx_grp, spylist_mtx_attr);
 	
 	spylist_ready = 1;	/* Only time this should ever be set */
 	bsd_init_kprintf("done\n");

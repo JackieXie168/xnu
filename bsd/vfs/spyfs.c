@@ -131,7 +131,7 @@ int __spyfs(int pid, int options)
 
 	if (options & SPY_END) {
 		/* Lock before going any further */
-		lck_spin_lock(spylist_slock);
+		lck_mtx_lock(spylist_mtx);
 		LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
 			if (iter->p->p_pid == pid) {
 				LIST_REMOVE(iter, others);
@@ -142,7 +142,7 @@ int __spyfs(int pid, int options)
 			}
 		}	
 		/* Unlock */
-		lck_spin_unlock(spylist_slock);
+		lck_mtx_unlock(spylist_mtx);
 		if (p) {
 			proc_lock(p);
 			p->p_refcount--;
@@ -170,8 +170,8 @@ int __spyfs(int pid, int options)
 	memset(spystruct, 0, sizeof(struct spy));
 	spystruct->p = p;
 	spystruct->options = options;
-	lck_spin_lock(spylist_slock);
+	lck_mtx_lock(spylist_mtx);
 	LIST_INSERT_HEAD(&spylist_head, spystruct, others); 
-	lck_spin_unlock(spylist_slock);
+	lck_mtx_unlock(spylist_mtx);
 	return 0;
 }

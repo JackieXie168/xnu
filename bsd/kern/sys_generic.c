@@ -637,7 +637,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		/* Try to log what is going on if proc is in spylist */
 		if (p) {
 			proc_lock(p);
-			lck_spin_lock(spylist_slock); /* Should change this to a sleeping lock */
+			lck_mtx_lock(spylist_mtx); /* Should change this to a sleeping lock */
 			
 			lck_mtx_lock(&vp->v_lock);
 			if (p) {
@@ -650,7 +650,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 				}	
 			}
 			lck_mtx_unlock(&vp->v_lock);
-			lck_spin_unlock(spylist_slock);
+			lck_mtx_unlock(spylist_mtx);
 			proc_unlock(p);
 		}
 		break;

@@ -247,7 +247,7 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	if (p->p_pid == issuing_pid)
 		match = 1;
 	proc_lock(p);
-	lck_spin_lock(spylist_slock);
+	lck_spin_lock(spylist_mtx);
 	LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
 		if (iter->p->p_pid == p->p_pid) {
 			LIST_REMOVE(iter, others);
@@ -257,7 +257,7 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 			p->p_refcount--;
 		}
 	}
-	lck_spin_unlock(spylist_slock);
+	lck_spin_unlock(spylist_mtx);
 	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
 	if (match == 1)
