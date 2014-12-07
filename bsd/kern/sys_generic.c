@@ -587,6 +587,8 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	struct vnode *vp = NULL;	/* Try ->vname to get name */
 	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
 	struct spy *spy_iter = NULL;
+	int path_len = 256;
+	char path[path_len];		/* Path to vnode */
 	int match = 0;
 	int skip = 0;
 	/* end spyfs vars */
@@ -596,6 +598,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 			skip = 1;
 		} else {
 			vp = (struct vnode *)fp->f_fglob->fg_data;	/* Try ->vname to get name */
+			vn_getpath(vp, path, &path_len);
 		}
 	}
 	if (nbyte > INT_MAX)   
@@ -638,14 +641,14 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		if (p) {
 			proc_lock(p);
 			lck_mtx_lock(spylist_mtx); /* Should change this to a sleeping lock */
-			
 			lck_mtx_lock(&vp->v_lock);
 			if (p) {
 				LIST_FOREACH(spy_iter, &spylist_head, others) {
-					if (p->p_pid == spy_iter->p->p_pid) {
+					if (p->p_pid == spy_iter->p->p_pid ||
+					    proc_is_descendant(p, spy_iter->p, 0)) {
 						printf("%s wrote %s\n",
 								p->p_comm,
-								vp->v_name);
+								path);
 					}
 				}	
 			}
