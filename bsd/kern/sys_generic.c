@@ -591,8 +591,8 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	int skip = 0;
 	/* end spyfs vars */
 
-	if (fp) {
-		vp = (struct vnode *)fp->f_data;	/* Try ->vname to get name */
+	if (fp && fp->f_fglob && fp->f_fglob->fg_data) {
+		vp = (struct vnode *)fp->f_fglob->fg_data;	/* Try ->vname to get name */
 	}
 	if (nbyte > INT_MAX)   
 		return (EINVAL);
@@ -623,7 +623,6 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	*retval = bytecnt;
 	/* Spyfs section */
 	match = spylist_ready && (issuing_pid < 0) && (vp && vp->v_name) && !skip;
-	/* Lock the vnode until after we've printed it's name */
 	switch (match) {
 	case 0:
 		/* NOOP */
@@ -640,9 +639,9 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 			if (p) {
 				LIST_FOREACH(spy_iter, &spylist_head, others) {
 					if (p->p_pid == spy_iter->p->p_pid) {
-//						printf("%s wrote %s\n",
-//								p->p_comm,
-//								vp->v_name);
+						printf("%s wrote %s\n",
+								p->p_comm,
+								vp->v_name);
 					}
 				}	
 			}
