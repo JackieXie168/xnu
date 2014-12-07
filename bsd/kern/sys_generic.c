@@ -592,7 +592,11 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	/* end spyfs vars */
 
 	if (fp && fp->f_fglob && fp->f_fglob->fg_data) {
-		vp = (struct vnode *)fp->f_fglob->fg_data;	/* Try ->vname to get name */
+		if (fp->f_fglob->fg_ops->fo_type != DTYPE_VNODE) {
+			skip = 1;
+		} else {
+			vp = (struct vnode *)fp->f_fglob->fg_data;	/* Try ->vname to get name */
+		}
 	}
 	if (nbyte > INT_MAX)   
 		return (EINVAL);
