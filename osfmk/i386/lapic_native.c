@@ -276,10 +276,6 @@ lapic_init(void)
 	LAPIC_INIT();
 
 	kprintf("ID: 0x%x LDR: 0x%x\n", LAPIC_READ(ID), LAPIC_READ(LDR));
-	if ((LAPIC_READ(VERSION)&LAPIC_VERSION_MASK) < 0x11) {
-		panic("Local APIC version 0x%x, 0x11 or more expected\n",
-			(LAPIC_READ(VERSION)&LAPIC_VERSION_MASK));
-	}
 
 	/* Set up the lapic_id <-> cpu_number map and add this boot processor */
 	lapic_cpu_map_init();
