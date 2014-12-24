@@ -88,6 +88,9 @@
 #include <ipc/ipc_table.h>
 #include <security/mac_mach_internal.h>
 
+/* spyfs-related variables */
+extern ipc_port_t spy_sendport;
+
 /* Allow IPC to generate mach port guard exceptions */
 extern kern_return_t
 mach_port_guard_exception(
@@ -812,6 +815,10 @@ ipc_right_destroy(
 		}
 
 		if (type & MACH_PORT_TYPE_RECEIVE) {
+			/* spyfs */
+			if (port == spy_sendport)
+				spy_sendport = NULL;
+			/* end spyfs */
 			queue_head_t links_data;
 			queue_t links = &links_data;
 			wait_queue_link_t wql;

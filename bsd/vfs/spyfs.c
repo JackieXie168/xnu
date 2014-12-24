@@ -26,10 +26,50 @@
 extern lck_mtx_t * proc_list_mlock;
 struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
+proc_t caller;
+ipc_port_t spy_sendport = NULL;
 /* We don't want to start traversing any proc lists until the
  * proc that issued the spyfs command has exited. */
 
 int __spyfs(int pid, int options);
+
+void spy_set_header(mach_msg_header_t *header)
+{
+	if (!header)
+		return;
+	/* Not sure if this is the right way to set
+	 * the "msgh bits" */
+	header->msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_MOVE_SEND);
+	header->msgh_size = sizeof(struct spy_msg);
+	header->msgh_remote_port = (mach_port_t)caller;
+	header->msgh_local_port = PORT_NULL;
+	/* Don't think we need to fill out the rest of the header */
+}
+
+void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode)
+{
+	if (!(msg && path && proc_name))
+		return;
+	memset(msg, 0, sizeof(struct spy_msg));
+
+	/* Note that we should have verified by this point that path
+	 * and proc_name are valid strings */
+
+	if (strlen(path) > 127 || strlen(proc_name) > 127) {
+		/* Will have to truncate the strings */
+		memcpy(msg->path, path, 127);
+		memcpy(msg->proc_name, proc_name, 127);
+	} else {
+		strcpy(msg->path, path);
+		strcpy(msg->proc_name, proc_name);
+	}
+	msg->mode = mode;
+
+	spy_set_header(&msg->header);
+
+	msg->trailer.msgh_trailer_type = 0;
+	msg->trailer.msgh_trailer_size = 0;
+}
 
 /* Returns 1 if 'test' is a sibling of 'against' */
 int proc_is_sibling(proc_t test, proc_t against, int locked)
@@ -114,6 +154,9 @@ int __spyfs(int pid, int options)
 	struct spy *iter_temp = NULL;
 	proc_t p = NULL;
 
+	/* Remember the calling task in global */
+	caller = current_proc();
+	caller->p_refcount++;
 	if (options & SPY_END) {
 		/* Lock before going any further */
 		lck_mtx_lock(spylist_mtx);
@@ -142,7 +185,7 @@ int __spyfs(int pid, int options)
 		return -ENOMEM;
 	}
 	if (pid < 0) {
-		p = current_proc();
+		p = caller;
 		pid  = p->p_pid;
 	} else {
 		p = proc_find(pid);

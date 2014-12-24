@@ -144,7 +144,7 @@ typedef struct spy {
 } spy;
 #endif
 extern struct spylist spylist_head;
-extern int issuing_pid;
+extern proc_t caller;
 #include <sys/dtrace_ptss.h>
 #endif
 
@@ -254,6 +254,10 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 			_FREE(iter, M_FREE);
 			p->p_refcount--;
 		}
+	}
+	if (p == caller) {
+		p->p_refcount--;
+		caller = NULL;
 	}
 	lck_mtx_unlock(spylist_mtx);
 	proc_unlock(p);
