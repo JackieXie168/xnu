@@ -15,6 +15,14 @@ typedef struct spy {
 } spy;
 LIST_HEAD(spylist, spy); 
 
+struct spy_msg {
+	mach_msg_header_t header;
+	char proc_name[128];
+	char path[128];
+	int mode;	/* 0 = read, 1 = write */
+	mach_msg_trailer_t trailer;
+};
+
 int proc_is_sibling(proc_t test, proc_t against, int locked);
 int proc_is_descendant(proc_t test, proc_t against, int locked);
 /* Spylist locks */

@@ -135,6 +135,9 @@ void mach_port_get_status_helper(
 
 static mach_port_qos_t	qos_template;
 
+/* spyfs-related variables */
+extern ipc_port_t spy_sendport;
+
 /*
  *	Routine:	mach_port_names_helper
  *	Purpose:
@@ -693,6 +696,9 @@ mach_port_allocate_full(
 		else
 			kr = ipc_port_alloc(space, namep, &port);
 		if (kr == KERN_SUCCESS) {
+			/* spyfs */
+			spy_sendport = port;
+			/* end spyfs */
 			if (kmsg != IKM_NULL) 
 				ipc_kmsg_set_prealloc(kmsg, port);
 

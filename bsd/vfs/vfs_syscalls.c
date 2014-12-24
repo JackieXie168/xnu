@@ -136,6 +136,13 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern proc_t caller;
+extern ipc_port_t spy_sendport;
+
+extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
+extern mach_msg_return_t mach_msg_send_from_kernel_proper(
+		mach_msg_header_t	*msg,
+		mach_msg_size_t		send_size);
 /* struct for checkdirs iteration */
 struct cdirargs {
 	vnode_t olddp;
@@ -3027,6 +3034,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	/* spyfs vars */
 	struct spy *spy_iter = NULL;
 	int ready = 0;	/* 1 if spylist_ready */
+	struct spy_msg spy_msg; /* The msg we will send to the spy */
+	mach_msg_return_t kr;
 	/* end spyfs vars */
 
 	oflags = uflags;
@@ -3186,6 +3195,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					printf("%s opened %s\n",
 						p->p_comm,
 						ndp->ni_pathbuf);
+
 				} else {
 					if (proc_is_descendant(p, spy_iter->p, 0))
 						printf("%s opened %s\n",
@@ -3197,6 +3207,14 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			proc_unlock(p);
 		}
 		break;
+	}
+	if (spy_sendport) {
+		/* Send the message */
+		spy_construct_message(&spy_msg,
+					ndp->ni_pathbuf,
+					p->p_comm,
+					0 /* Read */);
+		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 	}
 	/* End spylist section */
 	vnode_put(vp);
