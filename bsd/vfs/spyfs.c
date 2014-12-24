@@ -18,6 +18,7 @@
 #include <sys/queue.h>
 #include <sys/sysproto.h>
 #include <sys/spyfs.h>
+#include <ipc/ipc_types.h>
 #define SPY_END		(1 << 1)	/* Stop tracking pid */
 #define SPY_WRITES	(1 << 2)	/* Track files that are written  */
 #define SPY_READS	(1 << 3)	/* Track files that are read */
@@ -27,9 +28,6 @@ struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
 /* We don't want to start traversing any proc lists until the
  * proc that issued the spyfs command has exited. */
-int issuing_pid = -1;	/* If this is <  0, go ahead and log. If not, do not log,
-			 * also, the syscall should fail if another proc already
-			 * called it and still has not exited */
 
 int __spyfs(int pid, int options);
 
@@ -103,18 +101,6 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 	int pid;
 	int opts;
 
-	/* If issuing_pid > 0, that means another proc recently
-	 * called spyfs, and has not exited yet. This can cause
-	 * a problem in some cases when the proc_list changes
-	 * (the calling proc exits) while the spied upon proc
-	 * is traversing the list. The problem this solution
-	 * creates is that a proc cannot spy on itself */
-	if (issuing_pid > 0)
-		return -EINVAL;	/* TO DO: see if there is a more
-	       			 * descriptive error to return, 
-				 * since the problem is not technically
-				 * an invalid parameter */
-	issuing_pid = p->p_pid; 
 	pid = args->pid;
 	opts = args->options;
 	return (__spyfs(pid, opts));
@@ -127,7 +113,6 @@ int __spyfs(int pid, int options)
 	struct spy *iter = NULL;
 	struct spy *iter_temp = NULL;
 	proc_t p = NULL;
-	
 
 	if (options & SPY_END) {
 		/* Lock before going any further */

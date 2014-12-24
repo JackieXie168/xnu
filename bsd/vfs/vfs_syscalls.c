@@ -136,7 +136,6 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
-extern int issuing_pid;		/* If this is < 0, it is safe to spy on tasks */
 /* struct for checkdirs iteration */
 struct cdirargs {
 	vnode_t olddp;
@@ -3027,11 +3026,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	struct session *sessp = SESSION_NULL;
 	/* spyfs vars */
 	struct spy *spy_iter = NULL;
-//	proc_t p_iter = NULL;
-//	proc_t p_iter_sib = NULL;
-//	proc_t p_iter_temp = NULL;
-//	int match = 0;
-	int ready = 0;	/* 1 if both spylist_ready and issuing_pid < 0 */
+	int ready = 0;	/* 1 if spylist_ready */
 	/* end spyfs vars */
 
 	oflags = uflags;
@@ -3176,7 +3171,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 
 	/* Spylist section, do before vnode_put(), since I think it reduces
 	 * the refcount for the vnode which might be bad */
-	ready = (spylist_ready && (issuing_pid < 0));
+	ready = spylist_ready;
 	switch (ready) {
 	case 0:
 		/* NOOP (still booting?) */

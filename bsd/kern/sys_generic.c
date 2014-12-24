@@ -145,7 +145,6 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
-extern int issuing_pid;
 /* XXX should be in a header file somewhere */
 void evsofree(struct socket *);
 void evpipefree(struct pipe *);
@@ -629,7 +628,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	bytecnt -= uio_resid(auio);
 	*retval = bytecnt;
 	/* Spyfs section */
-	match = spylist_ready && (issuing_pid < 0) && (vp && vp->v_name) && !skip;
+	match = spylist_ready && (vp && vp->v_name) && !skip;
 	switch (match) {
 	case 0:
 		/* NOOP */

@@ -244,10 +244,8 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	struct spy *iter_temp = NULL;
 	int match = 0;
 	/* Delete p from spylist_head */
-	if (p->p_pid == issuing_pid)
-		match = 1;
 	proc_lock(p);
-	lck_spin_lock(spylist_mtx);
+	lck_mtx_lock(spylist_mtx);
 	LIST_FOREACH_SAFE(iter, &spylist_head, others, iter_temp) {
 		if (iter->p->p_pid == p->p_pid) {
 			LIST_REMOVE(iter, others);
@@ -257,11 +255,9 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 			p->p_refcount--;
 		}
 	}
-	lck_spin_unlock(spylist_mtx);
+	lck_mtx_unlock(spylist_mtx);
 	proc_unlock(p);
 	exit1(p, W_EXITCODE(uap->rval, 0), retval);
-	if (match == 1)
-		issuing_pid = -1;
 	/* drop funnel before we return */
 	thread_exception_return();
 	/* NOTREACHED */
