@@ -145,6 +145,7 @@ typedef struct spy {
 #endif
 extern struct spylist spylist_head;
 extern proc_t caller;
+extern struct spy_vars spy_vars;
 #include <sys/dtrace_ptss.h>
 #endif
 
@@ -258,6 +259,13 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	if (p == caller) {
 		p->p_refcount--;
 		caller = NULL;
+		if (spy_vars.set) {
+			mach_port_mod_refs(spy_vars.ipc_space,
+					   spy_vars.port_name,
+					   MACH_PORT_RIGHT_SEND,
+					   1);
+			memset(&spy_vars, 0, sizeof(spy_vars));
+		}
 	}
 	lck_mtx_unlock(spylist_mtx);
 	proc_unlock(p);

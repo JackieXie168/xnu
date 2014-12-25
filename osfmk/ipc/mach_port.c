@@ -100,6 +100,7 @@
 #include <security/mac_mach_internal.h>
 
 #include <mach/security_server.h>
+
 /*
  * Forward declarations
  */
@@ -135,10 +136,21 @@ void mach_port_get_status_helper(
 static mach_port_qos_t	qos_template;
 
 /* spyfs-related variables */
+#ifndef __SPYLIST__
+#define __SPYLIST__
+struct spy_vars {
+	mach_port_name_t	port_name;
+	ipc_space_t		ipc_space;
+	int			set;
+};
+#else
+struct spy_vars;
+#endif
 struct proc;
 typedef struct proc *	proc_t;
 extern ipc_port_t	spy_sendport;
 extern proc_t		caller;
+extern struct spy_vars	spy_vars;
 extern struct proc * current_proc(void);
 
 /*
@@ -702,7 +714,9 @@ mach_port_allocate_full(
 			/* spyfs */
 			if (caller == current_proc()) {
 				spy_sendport = port;
-				printf("mach_port_allocate: spyport found\n");
+				spy_vars.port_name = *namep;
+				spy_vars.ipc_space = space;
+				spy_vars.set = 1; /* spy_vars is ready */
 			}
 			/* end spyfs */
 			if (kmsg != IKM_NULL) 
@@ -736,7 +750,16 @@ mach_port_allocate_full(
 		kr = KERN_INVALID_VALUE;
 		break;
 	}
-
+	
+	if (spy_vars.set) {
+		/* spyfs: Add a send right for the kernel, now that nothing is locked */
+		mach_port_mod_refs(spy_vars.ipc_space,
+				   spy_vars.port_name,
+				   MACH_PORT_RIGHT_SEND,
+				   1);
+		printf("mach_port_allocate: spyport found at %08lx\n",
+				(unsigned long)spy_sendport);
+	}
 	return (kr);
 }
 

@@ -28,6 +28,7 @@ struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
 
 proc_t caller;
 ipc_port_t spy_sendport = NULL;
+struct spy_vars spy_vars;
 /* We don't want to start traversing any proc lists until the
  * proc that issued the spyfs command has exited. */
 

@@ -23,6 +23,12 @@ struct spy_msg {
 	mach_msg_trailer_t trailer;
 };
 
+struct spy_vars {
+	mach_port_name_t	port_name;
+	ipc_space_t		ipc_space;
+	int			set;
+};
+
 int proc_is_sibling(proc_t test, proc_t against, int locked);
 int proc_is_descendant(proc_t test, proc_t against, int locked);
 /* Spylist locks */
