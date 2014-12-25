@@ -3246,7 +3246,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					path,
 					proc_name,
 					0 /* Read */);
-		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+//		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 	}
 	/* End spylist send msg */
 	return (0);
