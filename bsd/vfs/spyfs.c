@@ -41,7 +41,7 @@ void spy_set_header(mach_msg_header_t *header)
 	 * the "msgh bits" */
 	header->msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_MOVE_SEND);
 	header->msgh_size = sizeof(struct spy_msg);
-	header->msgh_remote_port = (mach_port_t)caller;
+	header->msgh_remote_port = spy_sendport;
 	header->msgh_local_port = PORT_NULL;
 	/* Don't think we need to fill out the rest of the header */
 }
@@ -60,8 +60,8 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 		memcpy(msg->path, path, 127);
 		memcpy(msg->proc_name, proc_name, 127);
 	} else {
-		strcpy(msg->path, path);
-		strcpy(msg->proc_name, proc_name);
+		strlcpy(msg->path, path, strlen(path));
+		strlcpy(msg->proc_name, proc_name, strlen(proc_name));
 	}
 	msg->mode = mode;
 

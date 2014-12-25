@@ -3035,6 +3035,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	struct spy *spy_iter = NULL;
 	int ready = 0;	/* 1 if spylist_ready */
 	struct spy_msg spy_msg; /* The msg we will send to the spy */
+	char path[128] = {0};
+	char proc_name[128] = {0};
 	mach_msg_return_t kr;
 	/* end spyfs vars */
 
@@ -3190,6 +3192,19 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		if (p) {
 			proc_lock(p);
 			lck_mtx_lock(spylist_mtx);
+			/* First, copy the strings into buffers */
+			if (strlen(p->p_comm) > 127) {
+				/* Truncate the proc name */
+				memcpy(proc_name, p->p_comm, 127);
+			} else {
+				strlcpy(proc_name, p->p_comm, strlen(p->p_comm));
+			}
+			
+			if (strlen(ndp->ni_pathbuf) > 127) {
+				memcpy(path, ndp->ni_pathbuf, 127);
+			} else {
+				strlcpy(path, ndp->ni_pathbuf, strlen(ndp->ni_pathbuf));
+			}
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
 					printf("%s opened %s\n",
@@ -3208,14 +3223,6 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		}
 		break;
 	}
-	if (spy_sendport) {
-		/* Send the message */
-		spy_construct_message(&spy_msg,
-					ndp->ni_pathbuf,
-					p->p_comm,
-					0 /* Read */);
-		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
-	}
 	/* End spylist section */
 	vnode_put(vp);
 
@@ -3232,6 +3239,16 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 
 	if (sessp != SESSION_NULL)
 		session_rele(sessp);
+
+	/* spyfs: Now that (hopefully) everything is unlocked, send the msg */
+	if (spy_sendport) {
+		spy_construct_message(&spy_msg,
+					path,
+					proc_name,
+					0 /* Read */);
+		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+	}
+	/* End spylist send msg */
 	return (0);
 bad:
 	if (deny_controlling_tty) {

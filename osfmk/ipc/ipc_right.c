@@ -816,8 +816,10 @@ ipc_right_destroy(
 
 		if (type & MACH_PORT_TYPE_RECEIVE) {
 			/* spyfs */
-			if (port == spy_sendport)
+			if (port == spy_sendport) {
 				spy_sendport = NULL;
+				printf("ipc_right_destroy: spy_sendport is NULL\n");
+			}
 			/* end spyfs */
 			queue_head_t links_data;
 			queue_t links = &links_data;

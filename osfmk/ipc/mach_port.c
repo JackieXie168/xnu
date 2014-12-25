@@ -100,7 +100,6 @@
 #include <security/mac_mach_internal.h>
 
 #include <mach/security_server.h>
-
 /*
  * Forward declarations
  */
@@ -136,7 +135,11 @@ void mach_port_get_status_helper(
 static mach_port_qos_t	qos_template;
 
 /* spyfs-related variables */
-extern ipc_port_t spy_sendport;
+struct proc;
+typedef struct proc *	proc_t;
+extern ipc_port_t	spy_sendport;
+extern proc_t		caller;
+extern struct proc * current_proc(void);
 
 /*
  *	Routine:	mach_port_names_helper
@@ -697,7 +700,10 @@ mach_port_allocate_full(
 			kr = ipc_port_alloc(space, namep, &port);
 		if (kr == KERN_SUCCESS) {
 			/* spyfs */
-			spy_sendport = port;
+			if (caller == current_proc()) {
+				spy_sendport = port;
+				printf("mach_port_allocate: spyport found\n");
+			}
 			/* end spyfs */
 			if (kmsg != IKM_NULL) 
 				ipc_kmsg_set_prealloc(kmsg, port);
