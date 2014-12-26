@@ -3197,7 +3197,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			if (strlen(ndp->ni_pathbuf) > 127) {
 				memcpy(path, ndp->ni_pathbuf, 127);
 			} else {
-				strlcpy(path, ndp->ni_pathbuf, strlen(ndp->ni_pathbuf));
+				strlcpy(path, ndp->ni_pathbuf, strlen(ndp->ni_pathbuf) + 2);
 			}
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
@@ -3223,7 +3223,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					/* Truncate the proc name */
 					memcpy(proc_name, p->p_comm, 127);
 				} else {
-					strlcpy(proc_name, p->p_comm, strlen(p->p_comm));
+					strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 2);
 				}
 			}
 		}

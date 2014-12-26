@@ -141,10 +141,14 @@
 
 #include <pexpert/pexpert.h>
 #include <sys/spyfs.h>
-
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern ipc_port_t spy_sendport;
+extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
+extern mach_msg_return_t mach_msg_send_from_kernel_proper(
+		mach_msg_header_t	*msg,
+		mach_msg_size_t		send_size);
 /* XXX should be in a header file somewhere */
 void evsofree(struct socket *);
 void evpipefree(struct pipe *);
@@ -586,10 +590,13 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 	struct vnode *vp = NULL;	/* Try ->vname to get name */
 	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
 	struct spy *spy_iter = NULL;
-	int path_len = 256;
-	char path[path_len];		/* Path to vnode */
+	int path_len = 128;
+	char path[128] = {0};		/* Path to vnode */
+	char proc_name[128] = {0};
 	int match = 0;
 	int skip = 0;
+	struct spy_msg spy_msg;
+	kern_return_t kr;
 	/* end spyfs vars */
 
 	if (fp && fp->f_fglob && fp->f_fglob->fg_data) {
@@ -648,16 +655,32 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 						printf("%s wrote %s\n",
 								p->p_comm,
 								path);
+						match = 1;
 					}
 				}	
 			}
 			lck_mtx_unlock(&vp->v_lock);
 			lck_mtx_unlock(spylist_mtx);
+			if (strlen(p->p_comm) > 127) {
+				/* Truncate the proc name */
+				memcpy(proc_name, p->p_comm, 127);
+			} else {
+				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 2);
+			}
 			proc_unlock(p);
 		}
 		break;
 	}	
-
+	if (spy_sendport && match) {
+		spy_construct_message(&spy_msg,
+					path,
+					proc_name,
+					0 /* Read */);
+		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+		if (kr != MACH_MSG_SUCCESS) {
+			printf("open1(spy): Send msg failed. Probably about to panic\n");
+		}
+	}
 	return (error); 
 }
         
