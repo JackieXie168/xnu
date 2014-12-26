@@ -62,7 +62,7 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 		memcpy(msg->proc_name, proc_name, 127);
 	} else {
 		strlcpy(msg->path, path, strlen(path));
-		strlcpy(msg->proc_name, proc_name, strlen(proc_name));
+		strlcpy(msg->proc_name, proc_name, strlen(proc_name) + 3);
 	}
 	msg->mode = mode;
 

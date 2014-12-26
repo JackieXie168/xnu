@@ -641,12 +641,16 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		/* NOOP */
 		break;
 	case 1:
+		/* Reset match because it has a new purpose from here
+		 * on out (1 if p is or is a descendant of the target
+		 * task, which will cause a mach msg to be sent) */
+		match = 0;
 		if (LIST_EMPTY(&spylist_head))
 			break;
 		/* Try to log what is going on if proc is in spylist */
 		if (p) {
 			proc_lock(p);
-			lck_mtx_lock(spylist_mtx); /* Should change this to a sleeping lock */
+			lck_mtx_lock(spylist_mtx); 
 			lck_mtx_lock(&vp->v_lock);
 			if (p) {
 				LIST_FOREACH(spy_iter, &spylist_head, others) {
@@ -665,7 +669,7 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 				/* Truncate the proc name */
 				memcpy(proc_name, p->p_comm, 127);
 			} else {
-				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 2);
+				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
 			}
 			proc_unlock(p);
 		}
