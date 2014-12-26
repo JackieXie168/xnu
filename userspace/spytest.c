@@ -5,6 +5,12 @@
 #include <mach/mach_types.h>
 #include "spy.h"
 
+#define MODE_O	"opened"
+#define MODE_R	"read"
+#define MODE_W	"wrote"
+#define MODE_C	"closed"
+#define MODE_M	"mapped"
+
 void hexdie(kern_return_t err, const char *msg)
 {
 	fprintf(stderr, "%s:%#x\n", msg, err);
@@ -15,6 +21,7 @@ void recv_msg(mach_port_t source)
 {
 	mach_msg_return_t err = 0;
 	struct spy_msg msg;
+	const char *msg_txt = NULL;
 
 	memset(&msg, 0, sizeof(msg));
 	
@@ -29,9 +36,27 @@ void recv_msg(mach_port_t source)
 	if (err != MACH_MSG_SUCCESS) {
 		hexdie(err, "Couldn't receive message");
 	}
-	printf("%s : %d : %s\n",
+
+	switch(msg.mode) {
+	case 0:
+		msg_txt = MODE_O;
+		break;
+	case 1:
+		msg_txt = MODE_R;
+		break;
+	case 2:
+		msg_txt = MODE_W;
+		break;
+	case 3:
+		msg_txt = MODE_C;
+		break;
+	case 4:
+		msg_txt = MODE_M;
+		break;
+	}
+	printf("%s : %s : %s\n",
 			msg.proc_name,
-			msg.mode,
+			msg_txt,
 			msg.path);
 	
 }

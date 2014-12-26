@@ -806,7 +806,7 @@ vn_close(struct vnode *vp, int flags, vfs_context_t ctx)
 			spy_construct_message(&spy_msg,
 						path,
 						proc_name,
-						4 /* Close */);
+						SPY_MODE_CLOSE /* Close */);
 			kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 			if (kr != MACH_MSG_SUCCESS) {
 				printf("open1(spy): Send msg failed. Probably about to panic\n");

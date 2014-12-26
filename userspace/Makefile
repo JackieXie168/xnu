@@ -3,7 +3,7 @@ LDFLAGS =
 
 spytest: spytest.o
 
-spytest.o: spytest.c
+spytest.o: spytest.c spy.h
 
 .PHONY: clean
 
