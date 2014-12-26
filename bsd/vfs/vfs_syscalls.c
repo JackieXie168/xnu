@@ -3038,6 +3038,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	char path[128] = {0};
 	char proc_name[128] = {0};
 	mach_msg_return_t kr;
+	int match = 0;
 	/* end spyfs vars */
 
 	oflags = uflags;
@@ -3192,13 +3193,6 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		if (p) {
 			proc_lock(p);
 			lck_mtx_lock(spylist_mtx);
-			/* First, copy the strings into buffers */
-			if (strlen(p->p_comm) > 127) {
-				/* Truncate the proc name */
-				memcpy(proc_name, p->p_comm, 127);
-			} else {
-				strlcpy(proc_name, p->p_comm, strlen(p->p_comm));
-			}
 			
 			if (strlen(ndp->ni_pathbuf) > 127) {
 				memcpy(path, ndp->ni_pathbuf, 127);
@@ -3210,16 +3204,27 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					printf("%s opened %s\n",
 						p->p_comm,
 						ndp->ni_pathbuf);
+					match = 1;
 
 				} else {
 					if (proc_is_descendant(p, spy_iter->p, 0))
 						printf("%s opened %s\n",
 							p->p_comm,
 							ndp->ni_pathbuf);
+					match = 1;
 				}
 			}
 			lck_mtx_unlock(spylist_mtx);
 			proc_unlock(p);
+			if (match) {
+				/* First, copy the strings into buffers */
+				if (strlen(p->p_comm) > 127) {
+					/* Truncate the proc name */
+					memcpy(proc_name, p->p_comm, 127);
+				} else {
+					strlcpy(proc_name, p->p_comm, strlen(p->p_comm));
+				}
+			}
 		}
 		break;
 	}
@@ -3241,7 +3246,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		session_rele(sessp);
 
 	/* spyfs: Now that (hopefully) everything is unlocked, send the msg */
-	if (spy_sendport) {
+	if (spy_sendport && match) {
 		spy_construct_message(&spy_msg,
 					path,
 					proc_name,
