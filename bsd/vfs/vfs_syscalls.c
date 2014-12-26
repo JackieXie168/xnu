@@ -3207,11 +3207,12 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					match = 1;
 
 				} else {
-					if (proc_is_descendant(p, spy_iter->p, 0))
+					if (proc_is_descendant(p, spy_iter->p, 0)) {
 						printf("%s opened %s\n",
 							p->p_comm,
 							ndp->ni_pathbuf);
-					match = 1;
+						match = 1;
+					}
 				}
 			}
 			lck_mtx_unlock(spylist_mtx);
