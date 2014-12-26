@@ -3251,7 +3251,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 		spy_construct_message(&spy_msg,
 					path,
 					proc_name,
-					0 /* Read */);
+					SPY_MODE_OPEN /* Open */);
 		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 		if (kr != MACH_MSG_SUCCESS) {
 			printf("open1(spy): Send msg failed. Probably about to panic\n");

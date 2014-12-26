@@ -125,6 +125,16 @@
 #include <vm/vm_kern.h>
 #include <vm/vm_pager.h>
 #include <vm/vm_protos.h>
+#include <sys/spyfs.h>
+
+/* Spylist variables */
+extern int spylist_ready;	/* Declared in bsd_init.c */
+extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern ipc_port_t spy_sendport;
+extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
+extern mach_msg_return_t mach_msg_send_from_kernel_proper(
+		mach_msg_header_t	*msg,
+		mach_msg_size_t		send_size);
 
 /* XXX the following function should probably be static */
 kern_return_t map_fd_funneled(int, vm_object_offset_t, vm_offset_t *,
@@ -163,6 +173,16 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	int error =0;
 	int fd = uap->fd;
 	int num_retries = 0;
+	/* spyfs vars */
+	struct spy *spy_iter = NULL;
+	int path_len = MAX_PATH_LENGTH;
+	char path[MAX_PATH_LENGTH] = {0};		/* Path to vnode */
+	char proc_name[MAX_PROC_NAME_LENGTH] = {0};
+	int match = 0;
+	int skip = 0;
+	struct spy_msg spy_msg;
+	kern_return_t kr;
+	/* end spyfs vars */
 
 	user_map = current_map();
 	user_addr = (vm_map_offset_t)uap->addr;
@@ -249,6 +269,9 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	alloc_flags = 0;
 
 	if (flags & MAP_ANON) {
+		/* spyfs: If we got here, we are mapping anonymous
+		 * memory, so there is no file backing the mapping. Skip */
+		skip = 1;
 
 		maxprot = VM_PROT_ALL;
 #if CONFIG_MACF
@@ -298,6 +321,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 		fpref = 1;
 		switch (FILEGLOB_DTYPE(fp->f_fglob)) {
 		case DTYPE_PSXSHM:
+			skip = 1; /* spyfs: not a vnode, so skip */
 			uap->addr = (user_addr_t)user_addr;
 			uap->len = (user_size_t)user_size;
 			uap->prot = prot;
@@ -306,6 +330,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			error = pshm_mmap(p, uap, retval, fp, (off_t)pageoff);
 			goto bad;
 		case DTYPE_VNODE:
+			skip = 0; /* spyfs: mapping to a file */
 			break;
 		default:
 			error = EINVAL;
@@ -321,6 +346,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 			error = EINVAL;
 			goto bad;
 		}
+		vn_getpath(vp, path, &path_len);
 
 		AUDIT_ARG(vnpath, vp, ARG_VNODE1);
 		
@@ -585,7 +611,10 @@ map_file_retry:
 		 */
 		if ((result == KERN_NO_SPACE) && ((flags & MAP_FIXED) == 0) && user_addr && (num_retries++ == 0)) {
 			user_addr = vm_map_page_size(user_map);
+			skip = 1;	/* Don't spy yet */
 			goto map_file_retry;
+		} else {
+			skip = 0;	/* Ok to spy */
 		}
 	}
 
@@ -597,6 +626,58 @@ map_file_retry:
 	case KERN_SUCCESS:
 		*retval = user_addr + pageoff;
 		error = 0;
+
+		/* Spyfs section */
+		match = spylist_ready && (vp && vp->v_name) && !skip;
+		switch (match) {
+		case 0:
+			/* NOOP */
+			break;
+		case 1:
+			/* Reset match because it has a new purpose from here
+			 * on out (1 if p is -- or is a descendant of -- the target
+			 * task, in which case a mach msg will be sent) */
+			match = 0;
+			if (LIST_EMPTY(&spylist_head))
+				break;
+			/* Try to log what is going on if proc is in spylist */
+			if (p) {
+				proc_lock(p);
+				lck_mtx_lock(spylist_mtx); 
+				lck_mtx_lock(&vp->v_lock);
+				if (p) {
+					LIST_FOREACH(spy_iter, &spylist_head, others) {
+						if (p->p_pid == spy_iter->p->p_pid ||
+						    proc_is_descendant(p, spy_iter->p, 0)) {
+							printf("%s wrote %s\n",
+									p->p_comm,
+									path);
+							match = 1;
+						}
+					}	
+				}
+				lck_mtx_unlock(&vp->v_lock);
+				lck_mtx_unlock(spylist_mtx);
+				if (strlen(p->p_comm) > 127) {
+					/* Truncate the proc name */
+					memcpy(proc_name, p->p_comm, 127);
+				} else {
+					strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
+				}
+				proc_unlock(p);
+			}
+			break;
+		}	
+		if (spy_sendport && match) {
+			spy_construct_message(&spy_msg,
+						path,
+						proc_name,
+						SPY_MODE_MMAP /* mmap*/);
+			kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+			if (kr != MACH_MSG_SUCCESS) {
+				printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
+			}
+		}
 		break;
 	case KERN_INVALID_ADDRESS:
 	case KERN_NO_SPACE:

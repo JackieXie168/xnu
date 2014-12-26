@@ -5,6 +5,14 @@
 
 #define MAX_PATH_LENGTH		256
 #define MAX_PROC_NAME_LENGTH	128
+
+/* Mode defines */
+#define SPY_MODE_OPEN		0
+#define SPY_MODE_READ		1
+#define SPY_MODE_WRITE		2
+#define SPY_MODE_CLOSE		3
+#define SPY_MODE_MMAP		4
+
 #define PROC_FOREACH_DESCENDANT(p, iter)\
 	for (iter = p->p_children.lh_first; iter != NULL; iter = iter->p_children.lh_first)
 #define PROC_FOREACH_SIBLING(p, iter)\
