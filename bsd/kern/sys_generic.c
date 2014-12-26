@@ -367,7 +367,28 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 	user_ssize_t bytecnt;
 	long error = 0;
 	char uio_buf[ UIO_SIZEOF(1) ];
+	/* spyfs vars */
+	struct vnode *vp = NULL;	/* Try ->vname to get name */
+	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
+	struct spy *spy_iter = NULL;
+	int path_len = 128;
+	char path[128] = {0};		/* Path to vnode */
+	char proc_name[128] = {0};
+	int match = 0;
+	int skip = 0;
+	struct spy_msg spy_msg;
+	kern_return_t kr;
+	/* end spyfs vars */
 
+	if (fp && fp->f_fglob && fp->f_fglob->fg_data) {
+		if (fp->f_fglob->fg_ops->fo_type != DTYPE_VNODE) {
+			skip = 1;
+		} else {
+			vp = (struct vnode *)fp->f_fglob->fg_data;	/* Try ->vname to get name */
+			vn_getpath(vp, path, &path_len);
+		}
+	}
+	
 	if (nbyte > INT_MAX)
 		return (EINVAL);
 
@@ -391,6 +412,57 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 
 	*retval = bytecnt;
 
+	/* Spyfs section */
+	match = spylist_ready && (vp && vp->v_name) && !skip;
+	switch (match) {
+	case 0:
+		/* NOOP */
+		break;
+	case 1:
+		/* Reset match because it has a new purpose from here
+		 * on out (1 if p is -- or is a descendant of -- the target
+		 * task, in which case a mach msg will be sent) */
+		match = 0;
+		if (LIST_EMPTY(&spylist_head))
+			break;
+		/* Try to log what is going on if proc is in spylist */
+		if (p) {
+			proc_lock(p);
+			lck_mtx_lock(spylist_mtx); 
+			lck_mtx_lock(&vp->v_lock);
+			if (p) {
+				LIST_FOREACH(spy_iter, &spylist_head, others) {
+					if (p->p_pid == spy_iter->p->p_pid ||
+					    proc_is_descendant(p, spy_iter->p, 0)) {
+						printf("%s read %s\n",
+								p->p_comm,
+								path);
+						match = 1;
+					}
+				}	
+			}
+			lck_mtx_unlock(&vp->v_lock);
+			lck_mtx_unlock(spylist_mtx);
+			if (strlen(p->p_comm) > 127) {
+				/* Truncate the proc name */
+				memcpy(proc_name, p->p_comm, 127);
+			} else {
+				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
+			}
+			proc_unlock(p);
+		}
+		break;
+	}	
+	if (spy_sendport && match) {
+		spy_construct_message(&spy_msg,
+					path,
+					proc_name,
+					1 /* Read*/);
+		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+		if (kr != MACH_MSG_SUCCESS) {
+			printf("dofileread(spy): Send msg failed. Probably about to panic\n");
+		}
+	}
 	return (error);
 }
 
@@ -642,8 +714,8 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		break;
 	case 1:
 		/* Reset match because it has a new purpose from here
-		 * on out (1 if p is or is a descendant of the target
-		 * task, which will cause a mach msg to be sent) */
+		 * on out (1 if p is -- or is a descendant of -- the target
+		 * task, in which case a mach msg will be sent) */
 		match = 0;
 		if (LIST_EMPTY(&spylist_head))
 			break;
@@ -679,10 +751,10 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		spy_construct_message(&spy_msg,
 					path,
 					proc_name,
-					1 /* Write*/);
+					2 /* Write*/);
 		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 		if (kr != MACH_MSG_SUCCESS) {
-			printf("open1(spy): Send msg failed. Probably about to panic\n");
+			printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
 		}
 	}
 	return (error); 
