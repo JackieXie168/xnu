@@ -114,7 +114,20 @@ int	ubc_setcred(struct vnode *, struct proc *);
 #if CONFIG_PROTECT
 #include <sys/cprotect.h>
 #endif
+#include <mach/mach_types.h>
+#include <sys/spyfs.h>
 
+
+/* Spylist variables */
+extern int spylist_ready;	/* Declared in bsd_init.c */
+extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern proc_t caller;
+extern ipc_port_t spy_sendport;
+
+extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
+extern mach_msg_return_t mach_msg_send_from_kernel_proper(
+		mach_msg_header_t	*msg,
+		mach_msg_size_t		send_size);
 extern void	sigpup_attach_vnode(vnode_t); /* XXX */
 
 static int vn_closefile(struct fileglob *fp, vfs_context_t ctx);
@@ -691,7 +704,68 @@ vn_close(struct vnode *vp, int flags, vfs_context_t ctx)
 {
 	int error;
 	int flusherror = 0;
+	/* spyfs vars */
+	proc_t p = vfs_context_proc(ctx);
+	struct spy *spy_iter = NULL;
+	int ready = 0;	/* 1 if spylist_ready */
+	struct spy_msg spy_msg; /* The msg we will send to the spy */
+	int path_len = 128;
+	char path[128] = {0};
+	char proc_name[128] = {0};
+	mach_msg_return_t kr;
+	int match = 0;
+	int skip = 0;	/* 1 if some condition means the entire
+       			 * spying process should be skipped */
+	/* end spyfs vars */
 
+	/* Spyfs area */
+	error = vn_getpath(vp, path, &path_len);
+	if (error) {
+		/* Couldn't get path, so don't try to spy */
+		skip = 1;
+	}
+	ready = spylist_ready && !skip;
+	switch (ready) {
+	case 0:
+		/* NOOP (still booting?) */
+		break;
+	case 1:
+		/* Try to log what is going on if proc is in spylist */
+		if (p) {
+			proc_lock(p);
+			lck_mtx_lock(spylist_mtx);
+			
+			LIST_FOREACH(spy_iter, &spylist_head, others) {
+				if (p->p_pid == spy_iter->p->p_pid) {
+					printf("%s closed %s\n",
+						p->p_comm,
+						path);
+					match = 1;
+
+				} else {
+					if (proc_is_descendant(p, spy_iter->p, 0)) {
+						printf("%s closed %s\n",
+							p->p_comm,
+							path);
+						match = 1;
+					}
+				}
+			}
+			lck_mtx_unlock(spylist_mtx);
+			proc_unlock(p);
+			if (match) {
+				/* First, copy the strings into buffers */
+				if (strlen(p->p_comm) > 127) {
+					/* Truncate the proc name */
+					memcpy(proc_name, p->p_comm, 127);
+				} else {
+					strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
+				}
+			}
+		}
+		break;
+	}
+	/* End spylist section */
 #if NAMEDRSRCFORK
 	/* Sync data from resource fork shadow file if needed. */
 	if ((vp->v_flag & VISNAMEDSTREAM) && 
@@ -724,6 +798,21 @@ vn_close(struct vnode *vp, int flags, vfs_context_t ctx)
 	
 	if (flusherror) {
 		error = flusherror;
+	}
+
+	if (!error) {
+		/* spyfs send msg */
+		if (spy_sendport && match) {
+			spy_construct_message(&spy_msg,
+						path,
+						proc_name,
+						4 /* Close */);
+			kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+			if (kr != MACH_MSG_SUCCESS) {
+				printf("open1(spy): Send msg failed. Probably about to panic\n");
+			}
+		}
+		/* End spylist send msg */
 	}
 	return (error);
 }
