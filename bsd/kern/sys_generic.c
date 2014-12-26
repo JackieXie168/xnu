@@ -371,8 +371,8 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 	struct vnode *vp = NULL;	/* Try ->vname to get name */
 	proc_t p = vfs_context_proc(ctx); /* I don't think this increments refcount */
 	struct spy *spy_iter = NULL;
-	int path_len = 128;
-	char path[128] = {0};		/* Path to vnode */
+	int path_len = MAX_PATH_LENGTH;
+	char path[MAX_PATH_LENGTH] = {0};	/* Path to vnode */
 	char proc_name[128] = {0};
 	int match = 0;
 	int skip = 0;
@@ -443,9 +443,9 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 			}
 			lck_mtx_unlock(&vp->v_lock);
 			lck_mtx_unlock(spylist_mtx);
-			if (strlen(p->p_comm) > 127) {
+			if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
 				/* Truncate the proc name */
-				memcpy(proc_name, p->p_comm, 127);
+				memcpy(proc_name, p->p_comm, MAX_PROC_NAME_LENGTH - 1);
 			} else {
 				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
 			}

@@ -56,10 +56,11 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 	/* Note that we should have verified by this point that path
 	 * and proc_name are valid strings */
 
-	if (strlen(path) > 127 || strlen(proc_name) > 127) {
+	if (strlen(path) > MAX_PATH_LENGTH - 1 ||
+		       	strlen(proc_name) > MAX_PROC_NAME_LENGTH - 1) {
 		/* Will have to truncate the strings */
-		memcpy(msg->path, path, 127);
-		memcpy(msg->proc_name, proc_name, 127);
+		memcpy(msg->path, path, MAX_PATH_LENGTH - 1);
+		memcpy(msg->proc_name, proc_name, MAX_PROC_NAME_LENGTH - 1);
 	} else {
 		strlcpy(msg->path, path, strlen(path) + 3);
 		strlcpy(msg->proc_name, proc_name, strlen(proc_name) + 3);

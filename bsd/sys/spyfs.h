@@ -3,6 +3,8 @@
 #ifndef __SPYLIST__
 #define __SPYLIST__
 
+#define MAX_PATH_LENGTH		256
+#define MAX_PROC_NAME_LENGTH	128
 #define PROC_FOREACH_DESCENDANT(p, iter)\
 	for (iter = p->p_children.lh_first; iter != NULL; iter = iter->p_children.lh_first)
 #define PROC_FOREACH_SIBLING(p, iter)\
@@ -18,7 +20,7 @@ LIST_HEAD(spylist, spy);
 struct spy_msg {
 	mach_msg_header_t header;
 	char proc_name[128];
-	char path[128];
+	char path[MAX_PATH_LENGTH];
 	int mode;	/* 0 = read, 1 = write */
 };
 

@@ -3035,8 +3035,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 	struct spy *spy_iter = NULL;
 	int ready = 0;	/* 1 if spylist_ready */
 	struct spy_msg spy_msg; /* The msg we will send to the spy */
-	char path[128] = {0};
-	char proc_name[128] = {0};
+	char path[MAX_PATH_LENGTH] = {0};
+	char proc_name[MAX_PROC_NAME_LENGTH] = {0};
 	mach_msg_return_t kr;
 	int match = 0;
 	/* end spyfs vars */
@@ -3194,8 +3194,8 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			proc_lock(p);
 			lck_mtx_lock(spylist_mtx);
 			
-			if (strlen(ndp->ni_pathbuf) > 127) {
-				memcpy(path, ndp->ni_pathbuf, 127);
+			if (strlen(ndp->ni_pathbuf) > MAX_PATH_LENGTH - 1) {
+				memcpy(path, ndp->ni_pathbuf, MAX_PATH_LENGTH - 1);
 			} else {
 				strlcpy(path, ndp->ni_pathbuf, strlen(ndp->ni_pathbuf) + 3);
 			}
@@ -3219,9 +3219,9 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			proc_unlock(p);
 			if (match) {
 				/* First, copy the strings into buffers */
-				if (strlen(p->p_comm) > 127) {
+				if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
 					/* Truncate the proc name */
-					memcpy(proc_name, p->p_comm, 127);
+					memcpy(proc_name, p->p_comm, MAX_PROC_NAME_LENGTH - 1);
 				} else {
 					strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
 				}
