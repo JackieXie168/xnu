@@ -40,7 +40,7 @@ void spy_set_header(mach_msg_header_t *header)
 		return;
 	/* Not sure if this is the right way to set
 	 * the "msgh bits" */
-	header->msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_MOVE_SEND);
+	header->msgh_bits = MACH_MSGH_BITS_REMOTE(MACH_MSG_TYPE_COPY_SEND);
 	header->msgh_size = sizeof(struct spy_msg);
 	header->msgh_remote_port = spy_sendport;
 	header->msgh_local_port = PORT_NULL;

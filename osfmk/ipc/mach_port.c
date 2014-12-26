@@ -757,7 +757,6 @@ mach_port_allocate_full(
 	}
 	
 	if (spy_vars.set) {
-		/* spyfs: Add a send right for the kernel, now that nothing is locked */
 		printf("mach_port_allocate: spyport found at %08lx\n",
 				(unsigned long)spy_sendport);
 	}

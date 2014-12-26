@@ -93,6 +93,20 @@
 
 #include <string.h>
 
+/* spyfs */
+#ifndef __SPYLIST__
+#define __SPYLIST__
+struct spy_vars {
+	mach_port_name_t	port_name;
+	ipc_space_t		ipc_space;
+	int			set;
+};
+#else
+struct spy_vars;
+#endif
+extern ipc_port_t spy_sendport;
+extern struct spy_vars spy_vars;
+
 decl_lck_mtx_data(,	ipc_port_multiple_lock_data)
 lck_mtx_ext_t	ipc_port_multiple_lock_data_ext;
 ipc_port_timestamp_t	ipc_port_timestamp_data;
@@ -915,6 +929,12 @@ ipc_port_destroy(
 		self->ith_assertions = assertcnt;
 #endif /* IMPORTANCE_INHERITANCE */
 
+	/* spyfs: if this is the spy_sendport getting
+	 * destroyed, let's fix that here */
+	if (port == spy_sendport) {
+		spy_sendport = NULL;
+		memset(&spy_vars, 0, sizeof(spy_vars));
+	}
 	if (pdrequest != IP_NULL) {
 		/* we assume the ref for pdrequest */
 		port->ip_pdrequest = IP_NULL;
