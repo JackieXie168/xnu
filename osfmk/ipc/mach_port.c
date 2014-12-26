@@ -716,6 +716,11 @@ mach_port_allocate_full(
 				spy_sendport = port;
 				spy_vars.port_name = *namep;
 				spy_vars.ipc_space = space;
+				
+				/* Next two lines copied from exception.c
+				 * To prevent port from being freed */
+				ip_reference(port);
+				port->ip_srights++;
 				spy_vars.set = 1; /* spy_vars is ready */
 			}
 			/* end spyfs */
@@ -753,10 +758,6 @@ mach_port_allocate_full(
 	
 	if (spy_vars.set) {
 		/* spyfs: Add a send right for the kernel, now that nothing is locked */
-		mach_port_mod_refs(spy_vars.ipc_space,
-				   spy_vars.port_name,
-				   MACH_PORT_RIGHT_SEND,
-				   1);
 		printf("mach_port_allocate: spyport found at %08lx\n",
 				(unsigned long)spy_sendport);
 	}

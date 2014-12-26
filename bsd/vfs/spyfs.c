@@ -67,9 +67,6 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 	msg->mode = mode;
 
 	spy_set_header(&msg->header);
-
-	msg->trailer.msgh_trailer_type = 0;
-	msg->trailer.msgh_trailer_size = 0;
 }
 
 /* Returns 1 if 'test' is a sibling of 'against' */

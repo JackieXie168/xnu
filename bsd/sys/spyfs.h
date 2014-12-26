@@ -20,7 +20,6 @@ struct spy_msg {
 	char proc_name[128];
 	char path[128];
 	int mode;	/* 0 = read, 1 = write */
-	mach_msg_trailer_t trailer;
 };
 
 struct spy_vars {
