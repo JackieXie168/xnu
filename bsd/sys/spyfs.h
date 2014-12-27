@@ -12,6 +12,9 @@
 #define SPY_MODE_WRITE		2
 #define SPY_MODE_CLOSE		3
 #define SPY_MODE_MMAP		4
+#define SPY_MODE_PAGEIN		5
+#define SPY_MODE_PAGEOUT	6
+#define SPY_MODE_MUNMAP		7
 
 #define PROC_FOREACH_DESCENDANT(p, iter)\
 	for (iter = p->p_children.lh_first; iter != NULL; iter = iter->p_children.lh_first)

@@ -10,6 +10,9 @@
 #define MODE_W	"wrote"
 #define MODE_C	"closed"
 #define MODE_M	"mapped"
+#define MODE_PI	"paged in"
+#define MODE_PO	"paged out"
+#define MODE_UM	"unmapped"
 
 void hexdie(kern_return_t err, const char *msg)
 {
@@ -52,6 +55,15 @@ void recv_msg(mach_port_t source)
 		break;
 	case 4:
 		msg_txt = MODE_M;
+		break;
+	case 5:
+		msg_txt = MODE_PI;
+		break;
+	case 6:
+		msg_txt = MODE_PO;
+		break;
+	case 7:
+		msg_txt = MODE_UM;
 		break;
 	}
 	printf("%s : %s : %s\n",

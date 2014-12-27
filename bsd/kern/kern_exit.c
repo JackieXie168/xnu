@@ -151,6 +151,9 @@ extern kern_return_t mach_port_mod_refs(
 	mach_port_name_t	name,
 	mach_port_right_t	right,
 	mach_port_delta_t	delta);
+extern void ipc_port_release(
+	ipc_port_t port);
+extern ipc_port_t spy_sendport;
 #include <sys/dtrace_ptss.h>
 #endif
 
@@ -263,6 +266,11 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	}
 	if (p == caller) {
 		p->p_refcount--;
+		if (spy_sendport) {
+			/* Decrement refcounts for spy_sendport */
+			ipc_port_release(spy_sendport);
+		}
+
 		caller = NULL;
 		if (spy_vars.set) {
 			mach_port_mod_refs(spy_vars.ipc_space,

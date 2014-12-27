@@ -817,6 +817,7 @@ ipc_right_destroy(
 		if (type & MACH_PORT_TYPE_RECEIVE) {
 			/* spyfs */
 			if (port == spy_sendport) {
+				ip_release(spy_sendport);
 				spy_sendport = NULL;
 				printf("ipc_right_destroy: spy_sendport is NULL\n");
 			}

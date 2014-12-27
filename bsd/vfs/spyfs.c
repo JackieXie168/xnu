@@ -155,7 +155,6 @@ int __spyfs(int pid, int options)
 
 	/* Remember the calling task in global */
 	caller = current_proc();
-	caller->p_refcount++;
 	if (options & SPY_END) {
 		/* Lock before going any further */
 		lck_mtx_lock(spylist_mtx);
