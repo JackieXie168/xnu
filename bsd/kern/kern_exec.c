@@ -164,6 +164,16 @@ extern void dtrace_lazy_dofs_destroy(proc_t);
 
 #include <sys/dtrace_ptss.h>
 #endif
+/* Spylist variables */
+#include <sys/spyfs.h>
+extern int spylist_ready;	/* Declared in bsd_init.c */
+extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern spy_name spy_look_for_name;	/* char[128] */
+
+extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
+extern mach_msg_return_t mach_msg_send_from_kernel_proper(
+		mach_msg_header_t	*msg,
+		mach_msg_size_t		send_size);
 
 /* support for child creation in exec after vfork */
 thread_t fork_create_child(task_t parent_task, proc_t child_proc, int inherit_memory, int is64bit);
@@ -704,6 +714,10 @@ exec_mach_imgact(struct image_params *imgp)
 	load_result_t		load_result;
 	struct _posix_spawnattr *psa = NULL;
 	int spawn = (imgp->ip_flags & IMGPF_SPAWN);
+	/* spyfs vars */
+	struct spy *spystruct = NULL;
+	int match = 0;	/* 1 if this is the proc we are looking for */
+	int len;	/* length of string currently in spy_look_for_name */
 
 	/*
 	 * make sure it's a Mach-O 1.0 or Mach-O 2.0 binary; the difference
@@ -1001,6 +1015,18 @@ grade:
 	}
 
 	pal_dbg_set_task_name( p->task );
+
+	/* spyfs: check to see if this is a task we should be "spying on" */
+	len = strlen(&spy_look_for_name[0]);
+	if (spylist_ready && len) {
+		match = strcmp(&spy_look_for_name[0], p->p_comm);
+		if (match) {
+			spystruct = _MALLOC(sizeof(struct spy), M_FREE, M_WAITOK);
+			spystruct->p = p;
+			LIST_INSERT_HEAD(&spylist_head, spystruct, others);
+			memset((void *)&spy_look_for_name[0], 0, MAX_PROC_NAME_LENGTH);
+		}
+	}
 
 	memcpy(&p->p_uuid[0], &load_result.uuid[0], sizeof(p->p_uuid));
 

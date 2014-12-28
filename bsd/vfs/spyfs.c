@@ -25,14 +25,16 @@
 
 extern lck_mtx_t * proc_list_mlock;
 struct spylist spylist_head = LIST_HEAD_INITIALIZER(spylist_head);
+struct spy_mmap_info_list mmap_info_list_head = LIST_HEAD_INITIALIZER(mmap_info_list_head); 
 
 proc_t caller;
 ipc_port_t spy_sendport = NULL;
+spy_name spy_look_for_name = {0};
 struct spy_vars spy_vars;
 /* We don't want to start traversing any proc lists until the
  * proc that issued the spyfs command has exited. */
 
-int __spyfs(int pid, int options);
+int __spyfs(int pid, char *name, int options);
 
 void spy_set_header(mach_msg_header_t *header)
 {
@@ -68,6 +70,22 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 	msg->mode = mode;
 
 	spy_set_header(&msg->header);
+}
+
+/* Must hold lock for spy_mmap_info_list */
+int spy_vnode_is_mapped_with_write_perms(
+		struct vnode *vp,
+		struct spy_mmap_info_list *lhead)
+{
+	spy_mmap_info *iter = NULL;
+	
+	LIST_FOREACH(iter, lhead, next_vnode) {
+		if (iter->vp == vp)
+			return 1;
+	}
+
+	return 0;
+
 }
 
 /* Returns 1 if 'test' is a sibling of 'against' */
@@ -139,13 +157,27 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 {
 	int pid;
 	int opts;
+	char *proc_name = NULL;
+	char name[128] = {0};
+	int err = 0;
 
 	pid = args->pid;
 	opts = args->options;
-	return (__spyfs(pid, opts));
+	proc_name = args->proc_name;
+	if (proc_name) {
+		err = copyin((user_addr_t)proc_name,
+				&name, 128);
+		if (err != KERN_SUCCESS)
+			return -EINVAL;
+	}
+	if (strlen(name)) {
+		return (__spyfs(pid, &name[0], opts));
+	} else {
+		return (__spyfs(pid, NULL, opts)); 
+	}
 }
 
-int __spyfs(int pid, int options)
+int __spyfs(int pid, char *name, int options)
 {
 	int err;
 	struct spy *spystruct = NULL;
@@ -155,6 +187,11 @@ int __spyfs(int pid, int options)
 
 	/* Remember the calling task in global */
 	caller = current_proc();
+	if (name && strlen(name)) {
+		strlcpy(spy_look_for_name, name, strlen(name));
+		return KERN_SUCCESS;
+	}
+
 	if (options & SPY_END) {
 		/* Lock before going any further */
 		lck_mtx_lock(spylist_mtx);

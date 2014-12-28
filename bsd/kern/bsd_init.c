@@ -194,7 +194,14 @@ lck_grp_attr_t *spylist_mtx_grp_attr;
 lck_grp_t *spylist_mtx_grp;
 lck_attr_t *spylist_mtx_attr;
 lck_mtx_t *spylist_mtx;
+
+/* spy_mmap_list locks */
+lck_grp_attr_t *spy_mmap_list_mtx_grp_attr;
+lck_grp_t *spy_mmap_list_mtx_grp;
+lck_attr_t *spy_mmap_list_mtx_attr;
+lck_mtx_t *spy_mmap_list_mtx;
 int spylist_ready = 0;	/* In case open() or read() is called before list exists */
+int spy_mmap_list_ready = 0;
 void * get_user_regs(thread_t);		/* XXX kludge for <machine/thread.h> */
 void IOKitInitializeTime(void);		/* XXX */
 void IOSleep(unsigned int);		/* XXX */
@@ -992,6 +999,17 @@ bsd_init(void)
 	spylist_mtx = lck_mtx_alloc_init(spylist_mtx_grp, spylist_mtx_attr);
 	
 	spylist_ready = 1;	/* Only time this should ever be set */
+	
+	/*  Allocate locks for spy_mmap_list */
+	spy_mmap_list_mtx_grp_attr = lck_grp_attr_alloc_init();
+	lck_grp_attr_setstat(spy_mmap_list_mtx_grp_attr);
+	spy_mmap_list_mtx_grp =  lck_grp_alloc_init("spy_mmap_listlock", spy_mmap_list_mtx_grp_attr);
+	/*  Allocate lock attribute */
+	spy_mmap_list_mtx_attr = lck_attr_alloc_init();
+	/*  Allocate the spin lock */
+	spy_mmap_list_mtx = lck_mtx_alloc_init(spy_mmap_list_mtx_grp, spy_mmap_list_mtx_attr);
+	spy_mmap_list_ready = 1;
+
 	bsd_init_kprintf("done\n");
 
 }

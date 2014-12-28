@@ -130,11 +130,18 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern struct spy_mmap_info_list mmap_info_list_head; /* Declared in spyfs.c */
 extern ipc_port_t spy_sendport;
 extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int mode);
 extern mach_msg_return_t mach_msg_send_from_kernel_proper(
 		mach_msg_header_t	*msg,
 		mach_msg_size_t		send_size);
+/* spy_mmap_list locks */
+extern lck_grp_attr_t *spy_mmap_list_mtx_grp_attr;
+extern lck_grp_t *spy_mmap_list_mtx_grp;
+extern lck_attr_t *spy_mmap_list_mtx_attr;
+extern lck_mtx_t *spy_mmap_list_mtx;
+extern int spy_mmap_list_ready;
 
 /* XXX the following function should probably be static */
 kern_return_t map_fd_funneled(int, vm_object_offset_t, vm_offset_t *,
@@ -180,10 +187,18 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	char proc_name[MAX_PROC_NAME_LENGTH] = {0};
 	int match = 0;
 	int skip = 0;
+	int write_flags = 0; /* 1 if mapping with write perm */
+	int mmap_info_skip = 0;
 	struct spy_msg spy_msg;
 	kern_return_t kr;
+	spy_mmap_info *mmap_entry = NULL;
 	/* end spyfs vars */
 
+	/* spyfs: allocate mmap metadata before holding other mutexes */
+	mmap_entry =  _MALLOC(sizeof(spy_mmap_info), M_FREE, M_WAITOK);
+	if (!mmap_entry)
+		mmap_info_skip = 1;
+	/* end spyfs */
 	user_map = current_map();
 	user_addr = (vm_map_offset_t)uap->addr;
 	user_size = (vm_map_size_t) uap->len;
@@ -628,6 +643,7 @@ map_file_retry:
 		error = 0;
 
 		/* Spyfs section */
+		write_flags = ((flags & MAP_FILE) && (prot & VM_PROT_WRITE)); 
 		match = spylist_ready && (vp && vp->v_name) && !skip;
 		switch (match) {
 		case 0:
@@ -678,6 +694,21 @@ map_file_retry:
 				printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
 			}
 		}
+		/* spyfs: vnode_pageout tracking */
+		if (write_flags && spy_mmap_list_ready && !mmap_info_skip) {
+			lck_mtx_lock(spy_mmap_list_mtx);
+			LIST_INSERT_HEAD(&mmap_info_list_head,
+				       	mmap_entry,
+				       	next_vnode);
+			lck_mtx_unlock(spy_mmap_list_mtx);
+			printf("%s mapped %s with write permissions\n",
+					proc_name,
+					path);
+		} else {
+			if (!mmap_info_skip)
+				_FREE(mmap_entry, M_FREE);
+		}
+
 		break;
 	case KERN_INVALID_ADDRESS:
 	case KERN_NO_SPACE:

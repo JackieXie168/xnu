@@ -41,6 +41,23 @@ struct spy_vars {
 	int			set;
 };
 
+/* This struct keeps track of memory=mapped files
+ * for pageout monitoring. Mmap'ed files are not
+ * paged out by the task using them, but by a
+ * separate kernel thread(s): vnode_pager */
+
+typedef struct spy_mmap_info {
+	struct vnode *vp;	/* Vnode being paged */
+	LIST_ENTRY(spy_mmap_info) next_vnode;
+} spy_mmap_info;
+
+/* Linked list of mmap'd vnodes  */
+LIST_HEAD(spy_mmap_info_list, spy_mmap_info);
+
+/* If we are looking for a proc by name */
+typedef char	spy_name[MAX_PROC_NAME_LENGTH];
+
+
 int proc_is_sibling(proc_t test, proc_t against, int locked);
 int proc_is_descendant(proc_t test, proc_t against, int locked);
 /* Spylist locks */
@@ -48,4 +65,10 @@ extern lck_grp_attr_t *spylist_mtx_grp_attr;
 extern lck_grp_t *spylist_mtx_grp;
 extern lck_attr_t *spylist_mtx_attr;
 extern lck_mtx_t *spylist_mtx;
+/* spy_mmap_info_list locks */
+extern lck_grp_attr_t *spy_mmap_list_mtx_grp_attr;
+extern lck_grp_t *spy_mmap_list_mtx_grp;
+extern lck_attr_t *spy_mmap_list_mtx_attr;
+extern lck_mtx_t *spy_mmap_list_mtx;
+
 #endif

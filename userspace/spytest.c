@@ -78,33 +78,62 @@ int main(int argc, char **argv)
 	int err, pid, opts;
 	kern_return_t kr;
 	mach_port_t dest_port;
-	
-	if (argc != 3) {
-		fprintf(stderr, "Usage: spytest <pid> <options>\n");
+	char *name = NULL;
+
+	switch(argc) {
+	case 2: /* PID, no name */
+		if (atoi(argv[1]) < 0) {
+			pid = getpid();
+		} else {
+			pid = atoi(argv[1]);
+		}
+		opts = atoi(argv[2]);
+
+		err = syscall(456, pid, NULL, opts);
+		if (err) {
+			perror("Spyfs failed");
+			exit(err);
+		}
+		kr = mach_port_allocate(mach_task_self(),
+					    MACH_PORT_RIGHT_RECEIVE,
+					    &dest_port);
+		if (err != KERN_SUCCESS) {
+			hexdie(err, "main: mach_port_allocate recv failed");
+		}
+
+		while(1) {
+			recv_msg(dest_port);
+		}
+
+		break;
+	case 3: /* Name given */
+		opts = atoi(argv[3]);
+		name = argv[2];
+		pid = -1; /* Ignored in this case */
+		err = syscall(456, pid, name, opts);
+		if (err) {
+			perror("Spyfs failed");
+			exit(err);
+		}
+		kr = mach_port_allocate(mach_task_self(),
+					    MACH_PORT_RIGHT_RECEIVE,
+					    &dest_port);
+		
+		if (err != KERN_SUCCESS) {
+			hexdie(err, "main: mach_port_allocate recv failed");
+		}
+
+		while(1) {
+			recv_msg(dest_port);
+		}
+
+		break;
+
+	default:
+		fprintf(stderr, "Usage: spytest <pid> <name(optional)> <options>\n");
 		exit(1);
-	}
-
-	if (atoi(argv[1]) < 0) {
-		pid = getpid();
-	} else {
-		pid = atoi(argv[1]);
-	}
-	opts = atoi(argv[2]);
-
-	err = syscall(456, pid, opts);
-	if (err) {
-		perror("Spyfs failed");
-		exit(err);
-	}
-	kr = mach_port_allocate(mach_task_self(),
-				    MACH_PORT_RIGHT_RECEIVE,
-				    &dest_port);
-	if (err != KERN_SUCCESS) {
-		hexdie(err, "main: mach_port_allocate recv failed");
-	}
-
-	while(1) {
-		recv_msg(dest_port);
+		break;
 	}
 	return 0;
+
 }

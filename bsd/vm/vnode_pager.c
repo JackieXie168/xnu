@@ -84,6 +84,7 @@
 /* Spylist variables */
 extern int spylist_ready;	/* Declared in bsd_init.c */
 extern struct spylist spylist_head;	/* Decleared in spyfs.c */
+extern struct spy_mmap_info_list mmap_info_list_head; /* Declared in spyfs.c */
 extern proc_t caller;
 extern ipc_port_t spy_sendport;
 
@@ -91,6 +92,15 @@ extern void spy_construct_message(struct spy_msg *msg, char *path, char* proc_na
 extern mach_msg_return_t mach_msg_send_from_kernel_proper(
 		mach_msg_header_t	*msg,
 		mach_msg_size_t		send_size);
+extern int spy_vnode_is_mapped_with_write_perms(
+		struct vnode *vp,
+		struct spy_mmap_info_list *lhead);
+/* spy_mmap_list locks */
+extern lck_grp_attr_t *spy_mmap_list_mtx_grp_attr;
+extern lck_grp_t *spy_mmap_list_mtx_grp;
+extern lck_attr_t *spy_mmap_list_mtx_attr;
+extern lck_mtx_t *spy_mmap_list_mtx;
+extern int spy_mmap_list_ready;
 
 void
 vnode_pager_throttle()
@@ -284,7 +294,6 @@ vnode_pageout(struct vnode *vp,
 	upl_page_info_t *pl;
 	vfs_context_t ctx = vfs_context_current();	/* pager context */
 	/* spyfs vars */
-	struct spy *spy_iter = NULL;
 	int ready = 0;	/* 1 if spylist_ready */
 	struct spy_msg spy_msg; /* The msg we will send to the spy */
 	char path[MAX_PATH_LENGTH] = {0};
@@ -529,29 +538,15 @@ vnode_pageout(struct vnode *vp,
 out:
 	/* Spylist section, do before vnode_put(), since I think it reduces
 	 * the refcount for the vnode which might be bad */
-	ready = spylist_ready && (result == PAGER_SUCCESS);
+	ready = spy_mmap_list_ready && (result == PAGER_SUCCESS);
 	switch (ready) {
 	case 0:
 		/* NOOP (still booting?) */
 		break;
 	case 1:
-		/* Try to log what is going on if proc is in spylist */
-		if (p) {
-			proc_lock(p);
-			lck_mtx_lock(spylist_mtx);
-			
-			LIST_FOREACH(spy_iter, &spylist_head, others) {
-				if (p->p_pid == spy_iter->p->p_pid) {
-					match = 1;
-				} else {
-					if (proc_is_descendant(p, spy_iter->p, 0)) {
-						match = 1;
-					}
-				}
-			}
-			lck_mtx_unlock(spylist_mtx);
-			proc_unlock(p);
-			if (match) {
+		if (match) {
+			if (spy_vnode_is_mapped_with_write_perms(vp,
+								&mmap_info_list_head)) {
 				/* First, copy the strings into buffers */
 				if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
 					/* Truncate the proc name */
@@ -612,6 +607,7 @@ vnode_pagein(
 	char proc_name[MAX_PROC_NAME_LENGTH] = {0};
 	mach_msg_return_t kr;
 	int match = 0;
+	int skip = 0;
 	proc_t p = NULL;
 	int path_len = MAX_PATH_LENGTH;
 	/* end spyfs vars */
@@ -804,9 +800,7 @@ vnode_pagein(
 		}
         }
 out:
-	/* Spylist section, do before vnode_put(), since I think it reduces
-	 * the refcount for the vnode which might be bad */
-	ready = spylist_ready && (result == PAGER_SUCCESS);
+	ready = spylist_ready && (result == PAGER_SUCCESS) && !skip;
 	switch (ready) {
 	case 0:
 		/* NOOP (still booting?) */
