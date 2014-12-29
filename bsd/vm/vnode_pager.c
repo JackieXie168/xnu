@@ -544,16 +544,14 @@ out:
 		/* NOOP (still booting?) */
 		break;
 	case 1:
-		if (match) {
-			if (spy_vnode_is_mapped_with_write_perms(vp,
-								&mmap_info_list_head)) {
-				/* First, copy the strings into buffers */
-				if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
-					/* Truncate the proc name */
-					memcpy(proc_name, p->p_comm, MAX_PROC_NAME_LENGTH - 1);
-				} else {
-					strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
-				}
+		if (spy_vnode_is_mapped_with_write_perms(vp,
+							&mmap_info_list_head)) {
+			/* First, copy the strings into buffers */
+			if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
+				/* Truncate the proc name */
+				memcpy(proc_name, p->p_comm, MAX_PROC_NAME_LENGTH - 1);
+			} else {
+				strlcpy(proc_name, p->p_comm, strlen(p->p_comm) + 3);
 			}
 		}
 		break;

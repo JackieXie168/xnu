@@ -81,7 +81,7 @@ int main(int argc, char **argv)
 	char *name = NULL;
 
 	switch(argc) {
-	case 2: /* PID, no name */
+	case 3: /* PID, no name */
 		if (atoi(argv[1]) < 0) {
 			pid = getpid();
 		} else {
@@ -106,7 +106,7 @@ int main(int argc, char **argv)
 		}
 
 		break;
-	case 3: /* Name given */
+	case 4: /* Name given */
 		opts = atoi(argv[3]);
 		name = argv[2];
 		pid = -1; /* Ignored in this case */
