@@ -44,7 +44,9 @@ struct spy_vars {
 /* This struct keeps track of memory=mapped files
  * for pageout monitoring. Mmap'ed files are not
  * paged out by the task using them, but by a
- * separate kernel thread(s): vnode_pager */
+ * separate kernel thread(s): vnode_pager. 
+ * Also note that we incremented the v_kusecount
+ * field for the vnode in mmap syscall */
 
 typedef struct spy_mmap_info {
 	struct vnode *vp;	/* Vnode being paged */

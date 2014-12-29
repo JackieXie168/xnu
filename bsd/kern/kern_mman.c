@@ -665,9 +665,6 @@ map_file_retry:
 					LIST_FOREACH(spy_iter, &spylist_head, others) {
 						if (p->p_pid == spy_iter->p->p_pid ||
 						    proc_is_descendant(p, spy_iter->p, 0)) {
-							printf("%s wrote %s\n",
-									p->p_comm,
-									path);
 							match = 1;
 						}
 					}	
@@ -682,34 +679,35 @@ map_file_retry:
 				}
 				proc_unlock(p);
 			}
-			break;
-		}	
-		if (spy_sendport && match) {
-			spy_construct_message(&spy_msg,
-						path,
-						proc_name,
-						SPY_MODE_MMAP /* mmap*/);
-			kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
-			if (kr != MACH_MSG_SUCCESS) {
-				printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
+			if (spy_sendport && match) {
+				spy_construct_message(&spy_msg,
+							path,
+							proc_name,
+							SPY_MODE_MMAP /* mmap*/);
+				kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
+				if (kr != MACH_MSG_SUCCESS) {
+					printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
+				}
 			}
+			/* spyfs: vnode_pageout tracking */
+			if (write_flags && spy_mmap_list_ready && !mmap_info_skip) {
+				lck_mtx_lock(spy_mmap_list_mtx);
+				lck_mtx_lock(&vp->v_lock);
+				LIST_INSERT_HEAD(&mmap_info_list_head,
+						mmap_entry,
+						next_vnode);
+				vp->v_kusecount++;
+				lck_mtx_unlock(&vp->v_lock);
+				lck_mtx_unlock(spy_mmap_list_mtx);
+				printf("%s mapped %s with write permissions\n",
+						proc_name,
+						path);
+			} else {
+				if (!mmap_info_skip)
+					_FREE(mmap_entry, M_FREE);
+			}
+			break;
 		}
-		/* spyfs: vnode_pageout tracking */
-		if (write_flags && spy_mmap_list_ready && !mmap_info_skip) {
-			lck_mtx_lock(spy_mmap_list_mtx);
-			LIST_INSERT_HEAD(&mmap_info_list_head,
-				       	mmap_entry,
-				       	next_vnode);
-			lck_mtx_unlock(spy_mmap_list_mtx);
-			printf("%s mapped %s with write permissions\n",
-					proc_name,
-					path);
-		} else {
-			if (!mmap_info_skip)
-				_FREE(mmap_entry, M_FREE);
-		}
-
-		break;
 	case KERN_INVALID_ADDRESS:
 	case KERN_NO_SPACE:
 		error =  ENOMEM;
