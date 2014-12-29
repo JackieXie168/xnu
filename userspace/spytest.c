@@ -38,6 +38,7 @@ void handle_signal(int sig)
 		if (kr != KERN_SUCCESS)
 			hexdie(kr, "mach_port_deallocate");
 	}
+	exit(0);
 }
 
 

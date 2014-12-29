@@ -719,8 +719,8 @@ mach_port_allocate_full(
 				
 				/* Next two lines copied from exception.c
 				 * To prevent port from being freed */
-				ip_reference(port);
-				port->ip_srights++;
+//				ip_reference(port);
+//				port->ip_srights++;
 				spy_vars.set = 1; /* spy_vars is ready */
 			}
 			/* end spyfs */

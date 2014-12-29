@@ -536,8 +536,7 @@ vnode_pageout(struct vnode *vp,
 		pg_index += num_of_pages;
 	}
 out:
-	/* Spylist section, do before vnode_put(), since I think it reduces
-	 * the refcount for the vnode which might be bad */
+	/* the refcount for the vnode which might be bad */
 	ready = spy_mmap_list_ready && (result == PAGER_SUCCESS);
 	switch (ready) {
 	case 0:
