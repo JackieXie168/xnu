@@ -643,7 +643,6 @@ map_file_retry:
 		error = 0;
 
 		/* Spyfs section */
-		write_flags = ((flags & MAP_FILE) && (prot & VM_PROT_WRITE)); 
 		match = spylist_ready && (vp && vp->v_name) && !skip;
 		switch (match) {
 		case 0:
@@ -660,7 +659,6 @@ map_file_retry:
 			if (p) {
 				proc_lock(p);
 				lck_mtx_lock(spylist_mtx); 
-				lck_mtx_lock(&vp->v_lock);
 				if (p) {
 					LIST_FOREACH(spy_iter, &spylist_head, others) {
 						if (p->p_pid == spy_iter->p->p_pid ||
@@ -669,7 +667,6 @@ map_file_retry:
 						}
 					}	
 				}
-				lck_mtx_unlock(&vp->v_lock);
 				lck_mtx_unlock(spylist_mtx);
 				if (strlen(p->p_comm) > 127) {
 					/* Truncate the proc name */
@@ -690,24 +687,23 @@ map_file_retry:
 				}
 			}
 			/* spyfs: vnode_pageout tracking */
+			write_flags = ((flags & MAP_FILE) && (prot & VM_PROT_WRITE)); 
 			if (write_flags && spy_mmap_list_ready && !mmap_info_skip) {
 				lck_mtx_lock(spy_mmap_list_mtx);
 				lck_mtx_lock(&vp->v_lock);
+				mmap_entry->vp = vp;
 				LIST_INSERT_HEAD(&mmap_info_list_head,
 						mmap_entry,
 						next_vnode);
-				vp->v_kusecount++;
 				lck_mtx_unlock(&vp->v_lock);
 				lck_mtx_unlock(spy_mmap_list_mtx);
-				printf("%s mapped %s with write permissions\n",
-						proc_name,
-						path);
 			} else {
 				if (!mmap_info_skip)
 					_FREE(mmap_entry, M_FREE);
 			}
 			break;
 		}
+		break;
 	case KERN_INVALID_ADDRESS:
 	case KERN_NO_SPACE:
 		error =  ENOMEM;
