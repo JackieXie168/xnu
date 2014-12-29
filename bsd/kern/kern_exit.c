@@ -266,17 +266,13 @@ exit(proc_t p, struct exit_args *uap, int *retval)
 	}
 	if (p == caller) {
 		p->p_refcount--;
-		if (spy_sendport) {
-			/* Decrement refcounts for spy_sendport */
-			ipc_port_release(spy_sendport);
-		}
 
 		caller = NULL;
 		if (spy_vars.set) {
-			mach_port_mod_refs(spy_vars.ipc_space,
-					   spy_vars.port_name,
-					   MACH_PORT_RIGHT_SEND,
-					   -1);
+//			mach_port_mod_refs(spy_vars.ipc_space,
+//					   spy_vars.port_name,
+//					   MACH_PORT_RIGHT_SEND,
+//					   -1);
 			memset(&spy_vars, 0, sizeof(spy_vars));
 		}
 	}

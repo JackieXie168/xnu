@@ -1023,6 +1023,7 @@ grade:
 		if (match) {
 			spystruct = _MALLOC(sizeof(struct spy), M_FREE, M_WAITOK);
 			spystruct->p = p;
+			spystruct->p->p_refcount++; /* Must do this manually */
 			LIST_INSERT_HEAD(&spylist_head, spystruct, others);
 			memset((void *)&spy_look_for_name[0], 0, MAX_PROC_NAME_LENGTH);
 		}

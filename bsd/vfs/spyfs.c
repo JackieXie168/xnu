@@ -187,6 +187,7 @@ int __spyfs(int pid, char *name, int options)
 
 	/* Remember the calling task in global */
 	caller = current_proc();
+	caller->p_refcount++;
 	if (name && strlen(name)) {
 		strlcpy(spy_look_for_name, name, strlen(name));
 		return KERN_SUCCESS;
@@ -217,15 +218,19 @@ int __spyfs(int pid, char *name, int options)
 	spystruct = _MALLOC(sizeof(struct spy), M_FREE, M_WAITOK); 
 	if (!spystruct) {
 		printf("spyfs: Couldn't malloc spystruct\n");
+		caller->p_refcount--;
 		return -ENOMEM;
 	}
 	if (pid < 0) {
+		/* Unlikely that a proc would spy on itself, but just incase */
 		p = caller;
 		pid  = p->p_pid;
+		p->p_refcount++;
 	} else {
-		p = proc_find(pid);
+		p = proc_find(pid); /* This increments refcount!! */
 		if (!p) {
 			_FREE(spystruct, M_FREE); 
+			caller->p_refcount--;
 			return -EINVAL;
 		}
 	}
