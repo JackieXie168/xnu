@@ -20,6 +20,27 @@ void hexdie(kern_return_t err, const char *msg)
 	exit(1);
 }
 
+/* Globals needed by sig handler */
+int port;
+int success;
+
+
+/* Interrupt handler */
+void handle_signal(int sig)
+{
+	kern_return_t kr;
+
+#ifdef DEBUG
+	printf("Entering signal handler\n");
+#endif	
+	if (success) {
+		kr = mach_port_deallocate(mach_task_self(), port);
+		if (kr != KERN_SUCCESS)
+			hexdie(kr, "mach_port_deallocate");
+	}
+}
+
+
 void recv_msg(mach_port_t source)
 {
 	mach_msg_return_t err = 0;
@@ -80,6 +101,9 @@ int main(int argc, char **argv)
 	mach_port_t dest_port;
 	char *name = NULL;
 
+	/* Install signal handler */
+	signal(SIGINT, &handle_signal); 
+
 	switch(argc) {
 	case 3: /* PID, no name */
 		if (atoi(argv[1]) < 0) {
@@ -122,6 +146,7 @@ int main(int argc, char **argv)
 		if (err != KERN_SUCCESS) {
 			hexdie(err, "main: mach_port_allocate recv failed");
 		}
+		success = 1; /* Set global for sighandler */
 
 		while(1) {
 			recv_msg(dest_port);
