@@ -198,6 +198,7 @@ mmap(proc_t p, struct mmap_args *uap, user_addr_t *retval)
 	mmap_entry =  _MALLOC(sizeof(spy_mmap_info), M_FREE, M_WAITOK);
 	if (!mmap_entry)
 		mmap_info_skip = 1;
+	memset(mmap_entry, 0, sizeof(spy_mmap_info));
 	/* end spyfs */
 	user_map = current_map();
 	user_addr = (vm_map_offset_t)uap->addr;
