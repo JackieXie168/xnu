@@ -72,22 +72,72 @@ void spy_construct_message(struct spy_msg *msg, char *path, char* proc_name, int
 	spy_set_header(&msg->header);
 }
 
-/* Must hold lock for spy_mmap_info_list */
 int spy_vnode_is_mapped_with_write_perms(
 		struct vnode *vp,
-		struct spy_mmap_info_list *lhead)
+		struct spy_mmap_info_list *lhead,
+		int locked)
 {
 	spy_mmap_info *iter = NULL;
+	int match = 0;
+	int vp_is_shadow = vnode_isshadow(vp);
 	
+	if (!locked)
+		lck_mtx_lock(spy_mmap_list_mtx);
 	LIST_FOREACH(iter, lhead, next_vnode) {
 		if (iter->vp == vp)
-			return 1;
+			match = 1;
+		else if (vp_is_shadow && (iter->vp == vp->v_parent))
+			match = 1;
 	}
-
-	return 0;
-
+	if (!locked)
+		lck_mtx_unlock(spy_mmap_list_mtx);
+	return match;
 }
 
+int spy_vnode_is_in_mmap_list(
+		struct vnode *vp,
+		struct spy_mmap_info_list *lhead,
+		int locked)
+{
+	spy_mmap_info *iter = NULL;
+	int match = 0;
+	
+	if (!locked)	
+		lck_mtx_lock(spy_mmap_list_mtx);
+	LIST_FOREACH(iter, lhead, next_vnode) {
+		if (iter->vp == vp)
+			match = 1;
+	}
+	if (!locked)
+		lck_mtx_unlock(spy_mmap_list_mtx);
+	return match;
+}
+
+/* Please make sure vnode is a regular file
+ * before calling this function, otherwise
+ * vp->v_name pointer may point to something
+ * other than a string */
+void spy_remove_vnode_from_mmap_list(
+		struct vnode *vp,
+		struct spy_mmap_info_list *lhead,
+		int locked)
+{
+	spy_mmap_info *iter = NULL;
+	spy_mmap_info *iter_temp = NULL;
+
+	if (!locked)
+		lck_mtx_lock(spy_mmap_list_mtx);
+	LIST_FOREACH_SAFE(iter, lhead, next_vnode, iter_temp) {
+		if (iter->vp == vp) {
+			LIST_REMOVE(iter, next_vnode);
+			printf("spy_remove_vnode_from_mmap_list: removing %s\n",
+					iter->vp->v_name);
+			
+		}
+	}
+	if (!locked)
+		lck_mtx_unlock(spy_mmap_list_mtx);
+}
 /* Returns 1 if 'test' is a sibling of 'against' */
 int proc_is_sibling(proc_t test, proc_t against, int locked)
 {

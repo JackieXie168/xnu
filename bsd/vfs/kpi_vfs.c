@@ -122,6 +122,16 @@
 
 #include <sys/sdt.h>
 
+/* Spyfs includes */
+#include <sys/queue.h>
+#include <sys/spyfs.h>
+extern struct spy_mmap_info_list mmap_info_list_head;
+extern void spy_remove_vnode_from_mmap_list(
+		struct vnode *vp,
+		struct spy_mmap_info_list *lhead,
+		int locked);
+/* End spyfs includes */
+
 #define ESUCCESS 0
 #undef mount_t
 #undef vnode_t
@@ -4681,6 +4691,17 @@ VNOP_INACTIVE(struct vnode *vp, vfs_context_t ctx)
 	int _err;
 	struct vnop_inactive_args a;
 
+	/* spyfs: Remove the vnode from
+	 * the mmap metadata list */
+	if (vp->v_type & VREG) {
+		lck_mtx_lock(spy_mmap_list_mtx);
+		spy_remove_vnode_from_mmap_list(vp,
+				&mmap_info_list_head,
+				1);
+		lck_mtx_unlock(spy_mmap_list_mtx);
+	}
+	/* End spyfs */
+	
 	a.a_desc = &vnop_inactive_desc;
 	a.a_vp = vp;
 	a.a_context = ctx;

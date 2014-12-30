@@ -665,6 +665,7 @@ map_file_retry:
 						if (p->p_pid == spy_iter->p->p_pid ||
 						    proc_is_descendant(p, spy_iter->p, 0)) {
 							match = 1;
+							break;
 						}
 					}	
 				}
@@ -684,7 +685,7 @@ map_file_retry:
 							SPY_MODE_MMAP /* mmap*/);
 				kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 				if (kr != MACH_MSG_SUCCESS) {
-					printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
+					printf("mmap(spy): Send msg failed\n");
 				}
 			}
 			/* spyfs: vnode_pageout tracking */
