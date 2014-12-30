@@ -711,7 +711,10 @@ mach_port_allocate_full(
 		else
 			kr = ipc_port_alloc(space, namep, &port);
 		if (kr == KERN_SUCCESS) {
-			/* spyfs */
+			/* spyfs:
+			 * 	This syscall is invoked very
+			 * 	frequently (possibly once per
+			 * 	msg) */
 			if (caller == current_proc()) {
 				spy_sendport = port;
 				spy_vars.port_name = *namep;
@@ -756,10 +759,6 @@ mach_port_allocate_full(
 		break;
 	}
 	
-	if (spy_vars.set) {
-		printf("mach_port_allocate: spyport found at %08lx\n",
-				(unsigned long)spy_sendport);
-	}
 	return (kr);
 }
 

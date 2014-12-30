@@ -434,9 +434,6 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 				LIST_FOREACH(spy_iter, &spylist_head, others) {
 					if (p->p_pid == spy_iter->p->p_pid ||
 					    proc_is_descendant(p, spy_iter->p, 0)) {
-						printf("%s read %s\n",
-								p->p_comm,
-								path);
 						match = 1;
 					}
 				}	
@@ -452,12 +449,17 @@ dofileread(vfs_context_t ctx, struct fileproc *fp,
 			proc_unlock(p);
 		}
 		break;
-	}	
+	}
+
+	/* Is it possible that following NULL checks
+	 * allow some file reads to slip by
+	 * under the radar? Should maybe 
+	 * use a wait queue? */
 	if (spy_sendport && match) {
 		spy_construct_message(&spy_msg,
 					path,
 					proc_name,
-					SPY_MODE_READ /* Read*/);
+					SPY_MODE_READ);
 		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 		if (kr != MACH_MSG_SUCCESS) {
 			printf("dofileread(spy): Send msg failed. Probably about to panic\n");
@@ -728,9 +730,6 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 				LIST_FOREACH(spy_iter, &spylist_head, others) {
 					if (p->p_pid == spy_iter->p->p_pid ||
 					    proc_is_descendant(p, spy_iter->p, 0)) {
-						printf("%s wrote %s\n",
-								p->p_comm,
-								path);
 						match = 1;
 					}
 				}	
@@ -751,10 +750,10 @@ dofilewrite(vfs_context_t ctx, struct fileproc *fp,
 		spy_construct_message(&spy_msg,
 					path,
 					proc_name,
-					SPY_MODE_WRITE /* Write*/);
+					SPY_MODE_WRITE);
 		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 		if (kr != MACH_MSG_SUCCESS) {
-			printf("dofilewrite(spy): Send msg failed. Probably about to panic\n");
+			printf("dofilewrite(spy): Send msg failed.\n");
 		}
 	}
 	return (error); 

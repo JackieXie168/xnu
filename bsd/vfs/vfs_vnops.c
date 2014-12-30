@@ -737,16 +737,10 @@ vn_close(struct vnode *vp, int flags, vfs_context_t ctx)
 			
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
-					printf("%s closed %s\n",
-						p->p_comm,
-						path);
 					match = 1;
 
 				} else {
 					if (proc_is_descendant(p, spy_iter->p, 0)) {
-						printf("%s closed %s\n",
-							p->p_comm,
-							path);
 						match = 1;
 					}
 				}
