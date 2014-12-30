@@ -94,7 +94,8 @@ extern mach_msg_return_t mach_msg_send_from_kernel_proper(
 		mach_msg_size_t		send_size);
 extern int spy_vnode_is_mapped_with_write_perms(
 		struct vnode *vp,
-		struct spy_mmap_info_list *lhead);
+		struct spy_mmap_info_list *lhead,
+		int locked);
 /* spy_mmap_list locks */
 extern lck_grp_attr_t *spy_mmap_list_mtx_grp_attr;
 extern lck_grp_t *spy_mmap_list_mtx_grp;
@@ -543,7 +544,7 @@ out:
 		break;
 	case 1:
 		if (spy_vnode_is_mapped_with_write_perms(vp,
-							&mmap_info_list_head)) {
+							&mmap_info_list_head, 0)) {
 			match = 1;
 			/* First, copy the strings into buffers */
 			if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
