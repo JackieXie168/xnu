@@ -163,7 +163,7 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 
 	pid = args->pid;
 	opts = args->options;
-	proc_name = args->proc_name;
+	proc_name = (char *)args->proc_name;
 	if (proc_name) {
 		err = copyin((user_addr_t)proc_name,
 				&name, 128);
@@ -171,15 +171,16 @@ int spyfs(proc_t p, struct spyfs_args *args, int32_t *retval)
 			return -EINVAL;
 	}
 	if (strlen(name)) {
+		*retval = 0; /* Need to move this to __spyfs() */
 		return (__spyfs(pid, &name[0], opts));
 	} else {
+		*retval = 0; /* Need to move this to __spyfs() */
 		return (__spyfs(pid, NULL, opts)); 
 	}
 }
 
 int __spyfs(int pid, char *name, int options)
 {
-	int err;
 	struct spy *spystruct = NULL;
 	struct spy *iter = NULL;
 	struct spy *iter_temp = NULL;
@@ -188,8 +189,13 @@ int __spyfs(int pid, char *name, int options)
 	/* Remember the calling task in global */
 	caller = current_proc();
 	caller->p_refcount++;
+
+	/* Remember that strlcpy only copies
+	 * len - 1 bytes so that it can NULL
+	 * terminate */
 	if (name && strlen(name)) {
-		strlcpy(spy_look_for_name, name, strlen(name));
+		printf("__spyfs: keeping a lookout for %s\n", name);
+		strlcpy((char *)&spy_look_for_name, name, strlen(name) + 1);
 		return KERN_SUCCESS;
 	}
 

@@ -97,10 +97,12 @@ void recv_msg(mach_port_t source)
 
 int main(int argc, char **argv)
 {
-	int err, pid, opts;
-	kern_return_t kr;
-	mach_port_t dest_port;
-	char *name = NULL;
+	int 			err, pid, opts;
+	kern_return_t 		kr;
+	mach_port_t 		dest_port;
+	char 			*name = NULL;
+	char 			namebuf[128] = {0}; /* Ensure safety when copying into kernel space  */
+	size_t 			namelength = 0;
 
 	/* Install signal handler */
 	signal(SIGINT, &handle_signal); 
@@ -134,6 +136,13 @@ int main(int argc, char **argv)
 	case 4: /* Name given */
 		opts = atoi(argv[3]);
 		name = argv[2];
+		namelength = strlen(argv[2]);
+		if (namelength > 127) {
+			/* Truncate name */
+			memcpy(&namebuf, argv[2], 127);
+		} else {
+			strcpy((char *)&namebuf, argv[2]);
+		}
 		pid = -1; /* Ignored in this case */
 		err = syscall(456, pid, name, opts);
 		if (err) {
@@ -149,6 +158,9 @@ int main(int argc, char **argv)
 		}
 		success = 1; /* Set global for sighandler */
 
+		/* This is where this app spends
+		 * most of its time. Ctrl-c to
+		 * break out of the infinite loop */
 		while(1) {
 			recv_msg(dest_port);
 		}

@@ -3201,16 +3201,10 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 			}
 			LIST_FOREACH(spy_iter, &spylist_head, others) {
 				if (p->p_pid == spy_iter->p->p_pid) {
-					printf("%s opened %s\n",
-						p->p_comm,
-						ndp->ni_pathbuf);
 					match = 1;
 
 				} else {
 					if (proc_is_descendant(p, spy_iter->p, 0)) {
-						printf("%s opened %s\n",
-							p->p_comm,
-							ndp->ni_pathbuf);
 						match = 1;
 					}
 				}
@@ -3254,7 +3248,7 @@ open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
 					SPY_MODE_OPEN /* Open */);
 		kr = mach_msg_send_from_kernel_proper(&spy_msg.header, sizeof(spy_msg));
 		if (kr != MACH_MSG_SUCCESS) {
-			printf("open1(spy): Send msg failed. Probably about to panic\n");
+			printf("open1(spy): Send msg failed.\n");
 		}
 	}
 	/* End spylist send msg */
