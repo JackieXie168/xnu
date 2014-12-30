@@ -536,7 +536,6 @@ vnode_pageout(struct vnode *vp,
 		pg_index += num_of_pages;
 	}
 out:
-	/* the refcount for the vnode which might be bad */
 	ready = spy_mmap_list_ready && (result == PAGER_SUCCESS);
 	switch (ready) {
 	case 0:
@@ -545,6 +544,7 @@ out:
 	case 1:
 		if (spy_vnode_is_mapped_with_write_perms(vp,
 							&mmap_info_list_head)) {
+			match = 1;
 			/* First, copy the strings into buffers */
 			if (strlen(p->p_comm) > MAX_PROC_NAME_LENGTH - 1) {
 				/* Truncate the proc name */

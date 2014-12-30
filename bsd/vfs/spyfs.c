@@ -79,13 +79,13 @@ int spy_vnode_is_mapped_with_write_perms(
 {
 	spy_mmap_info *iter = NULL;
 	
+	lck_mtx_lock(spy_mmap_list_mtx);
 	LIST_FOREACH(iter, lhead, next_vnode) {
 		if (iter->vp == vp)
 			return 1;
 	}
-
+	lck_mtx_unlock(spy_mmap_list_mtx);
 	return 0;
-
 }
 
 /* Returns 1 if 'test' is a sibling of 'against' */
