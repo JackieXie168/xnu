@@ -142,7 +142,7 @@ BUILD_DSYM := 1
 # probes from the kernel.
 #
 CFLAGS_GEN = $(DEBUG_CFLAGS) -nostdinc \
-	-freorder-blocks -fno-builtin -fno-common \
+	-fno-builtin -fno-common \
 	-fsigned-bitfields $(OTHER_CFLAGS)
 
 CFLAGS_RELEASE 	= 
