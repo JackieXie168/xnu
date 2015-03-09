@@ -147,7 +147,7 @@ endif
 
 genassym.o: $(SOURCE_DIR)/$(COMPONENT)/$(GENASSYM_LOCATION)/genassym.c
 	@echo GENASSYM $<
-	$(_v)${KCC} $(subst -flto,,${CFLAGS}) -MD -S -o ${@} ${INCFLAGS} $<
+	$(_v)${KCC} $(subst -flto,,${CFLAGS}) -MD -S -o ${@} ${INCFLAGS} $< -no-integrated-as
 
 assym.s: genassym.o
 	$(_v)sed -e '/#DEFINITION#/!d' -e 's/^.*#DEFINITION#//' -e 's/\$$//' -e 'p' -e 's/#//2' -e 's/[^A-Za-z0-9_]*\([A-Za-z0-9_]*\)/ \1_NUM/2' genassym.o > $@
