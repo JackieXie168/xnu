@@ -8047,7 +8047,7 @@
 		1F050FDC18591DB2008F6CAE /* Project object */ = {
 			isa = PBXProject;
 			attributes = {
-				LastUpgradeCheck = 0600;
+				LastUpgradeCheck = 0700;
 				ORGANIZATIONNAME = "Andromeda Project";
 			};
 			buildConfigurationList = 1F050FDF18591DB2008F6CAE /* Build configuration list for PBXProject "Kernel" */;
@@ -8347,6 +8347,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CTF_HEADER_SEARCH_PATHS = "$(SRCROOT)/SETUP/dtrace/include $(SRCROOT)/SETUP/dtrace/libdwarf $(SRCROOT)/SETUP/dtrace/libelf";
+				ENABLE_TESTABILITY = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				USE_HEADERMAP = NO;
 				WARNING_CFLAGS = "-Wno-switch";
