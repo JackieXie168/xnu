@@ -604,7 +604,7 @@ sched_timebase_init(void)
 	clock_interval_to_absolutetime_interval(1, NSEC_PER_SEC, &abstime);
 	sched_one_second_interval = abstime;
 	
-	SCHED(timebase_init)();
+	if (sched_current_dispatch != NULL) SCHED(timebase_init)();
 	sched_realtime_timebase_init();
 }
 
