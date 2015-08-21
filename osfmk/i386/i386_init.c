@@ -490,7 +490,6 @@ i386_init(void)
 	power_management_init();
 	processor_bootstrap();
 	thread_bootstrap();
-	rtclock_init();
 
 	machine_startup();
 }
