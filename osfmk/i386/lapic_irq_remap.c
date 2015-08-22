@@ -47,7 +47,7 @@ WITH THE SOFTWARE.
 
 #define PIC2           0xA0
 #define PIC2_COMMAND   PIC2
-#define PIC2_OFFSET    0xD8
+#define PIC2_OFFSET    PIC1_OFFSET
 #define PIC2_DATA      (PIC2+1)
 
 #define PIC_EOI        0x20
@@ -85,7 +85,4 @@ void _lapic_irq_remap(void) {
 	/* Request 8086 mode on each PIC */
 	outb_inline(PIC1_DATA, 0x01); PIC_WAIT();
 	outb_inline(PIC2_DATA, 0x01); PIC_WAIT();
-
-	extern void kprintf(const char *, ...);
-	kprintf("IRQ remap complete\n");
 }
