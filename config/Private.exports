@@ -4,6 +4,8 @@ __ZTV16IOPlatformExpert
 __ZN18IODTPlatformExpert*
 __ZNK18IODTPlatformExpert*
 __ZTV18IODTPlatformExpert
+__ZN22IOPlatformExpertDevice*
+__ZNK22IOPlatformExpertDevice*
 __ZN5IOCPU*
 __ZNK5IOCPU*
 __ZTV5IOCPU
