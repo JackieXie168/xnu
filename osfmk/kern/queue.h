@@ -187,7 +187,7 @@ static __inline__ queue_entry_t
 dequeue_head(
 	queue_t	que)
 {
-	register queue_entry_t	elt = (queue_entry_t) 0;
+	queue_entry_t	elt = (queue_entry_t) 0;
 
 	if (que->next != que) {
 		elt = que->next;
@@ -203,7 +203,7 @@ static __inline__ queue_entry_t
 dequeue_tail(
 	queue_t	que)
 {
-	register queue_entry_t	elt = (queue_entry_t) 0;
+	queue_entry_t	elt = (queue_entry_t) 0;
 
 	if (que->prev != que) {
 		elt = que->prev;
@@ -237,7 +237,7 @@ insque(
 
 static __inline__ void
 remque(
-	register queue_entry_t elt)
+	queue_entry_t elt)
 {
 	(elt->next)->prev = elt->prev;
 	(elt->prev)->next = elt->next;
@@ -343,7 +343,7 @@ MACRO_END
  */
 #define queue_enter(head, elt, type, field)			\
 MACRO_BEGIN							\
-	register queue_entry_t __prev;				\
+	queue_entry_t __prev;				\
 								\
 	__prev = (head)->prev;					\
 	if ((head) == __prev) {					\
@@ -371,7 +371,7 @@ MACRO_END
  */
 #define queue_enter_first(head, elt, type, field)		\
 MACRO_BEGIN							\
-	register queue_entry_t __next;				\
+	queue_entry_t __next;				\
 								\
 	__next = (head)->next;					\
 	if ((head) == __next) {					\
@@ -400,7 +400,7 @@ MACRO_END
  */
 #define queue_insert_before(head, elt, cur, type, field)		\
 MACRO_BEGIN								\
-	register queue_entry_t __prev;					\
+	queue_entry_t __prev;					\
 									\
 	if ((head) == (queue_entry_t)(cur)) {				\
 		(elt)->field.next = (head);				\
@@ -442,7 +442,7 @@ MACRO_END
  */
 #define queue_insert_after(head, elt, cur, type, field)			\
 MACRO_BEGIN								\
-	register queue_entry_t __next;					\
+	queue_entry_t __next;					\
 									\
 	if ((head) == (queue_entry_t)(cur)) {				\
 		(elt)->field.prev = (head);				\
@@ -489,7 +489,7 @@ MACRO_END
  */
 #define	queue_remove(head, elt, type, field)			\
 MACRO_BEGIN							\
-	register queue_entry_t	__next, __prev;			\
+	queue_entry_t	__next, __prev;			\
 								\
 	__next = (elt)->field.next;				\
 	__prev = (elt)->field.prev;				\
@@ -519,7 +519,7 @@ MACRO_END
  */
 #define	queue_remove_first(head, entry, type, field)		\
 MACRO_BEGIN							\
-	register queue_entry_t	__next;				\
+	queue_entry_t	__next;				\
 								\
 	(entry) = (type)(void *) ((head)->next);		\
 	__next = (entry)->field.next;				\
@@ -545,7 +545,7 @@ MACRO_END
  */
 #define	queue_remove_last(head, entry, type, field)		\
 MACRO_BEGIN							\
-	register queue_entry_t	__prev;				\
+	queue_entry_t	__prev;				\
 								\
 	(entry) = (type)(void *) ((head)->prev);		\
 	__prev = (entry)->field.prev;				\
