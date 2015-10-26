@@ -48,3 +48,18 @@ CopyPrivateHeader corecrypto/ccrng.h
 CopyPrivateHeader corecrypto/ccrng_system.h
 CopyPrivateHeader corecrypto/ccsha1.h
 CopyPrivateHeader corecrypto/ccsha2.h
+
+# These headers must be symlinked into Kernel.framework
+# from where they exist in the user-mode SDK.
+function SymlinkUserHeader {
+    local KERNEL_DIR="${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/Versions/Current/Headers"
+    pushd $KERNEL_DIR
+    ln -sfh "../../../../../../../usr/include/$1" "$1"
+    popd
+}
+
+SymlinkUserHeader AssertMacros.h
+SymlinkUserHeader Availability.h
+SymlinkUserHeader AvailabilityInternal.h
+SymlinkUserHeader AvailabilityMacros.h
+SymlinkUserHeader TargetConditionals.h
