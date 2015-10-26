@@ -1,13 +1,13 @@
 set -e
 
 function CopyHeader {
-    install -d `dirname "${XNU_INSTALL_BASE}/usr/include/$1"`
-    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
+    mkdir -p `dirname "${XNU_INSTALL_BASE}/usr/include/$1"`
+    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
 }
 
 function CopyPrivateHeader {
-    install -d `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
-    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
+    mkdir -p `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
+    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
 }
 
 CopyHeader AssertMacros.h
