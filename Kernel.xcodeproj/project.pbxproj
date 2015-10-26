@@ -129,7 +129,6 @@
 		1FA1F2921BDDC1000013A0CA /* dwarf_util.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F1591BDDBF400013A0CA /* dwarf_util.c */; };
 		1FA1F2941BDDC1000013A0CA /* dwarf_vars.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F15B1BDDBF400013A0CA /* dwarf_vars.c */; };
 		1FA1F2961BDDC1000013A0CA /* dwarf_weaks.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F15D1BDDBF400013A0CA /* dwarf_weaks.c */; };
-		1FA1F2991BDDC1000013A0CA /* LIBDWARFCOPYRIGHT in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F1601BDDBF400013A0CA /* LIBDWARFCOPYRIGHT */; };
 		1FA1F29B1BDDC1000013A0CA /* malloc_check.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F1621BDDBF400013A0CA /* malloc_check.c */; };
 		1FA1F29D1BDDC1000013A0CA /* pro_alloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F1641BDDBF400013A0CA /* pro_alloc.c */; };
 		1FA1F29F1BDDC1000013A0CA /* pro_arange.c in Sources */ = {isa = PBXBuildFile; fileRef = 1FA1F1661BDDBF400013A0CA /* pro_arange.c */; };
@@ -8685,7 +8684,6 @@
 				1FA1F2921BDDC1000013A0CA /* dwarf_util.c in Sources */,
 				1FA1F2941BDDC1000013A0CA /* dwarf_vars.c in Sources */,
 				1FA1F2961BDDC1000013A0CA /* dwarf_weaks.c in Sources */,
-				1FA1F2991BDDC1000013A0CA /* LIBDWARFCOPYRIGHT in Sources */,
 				1FA1F29B1BDDC1000013A0CA /* malloc_check.c in Sources */,
 				1FA1F29D1BDDC1000013A0CA /* pro_alloc.c in Sources */,
 				1FA1F29F1BDDC1000013A0CA /* pro_arange.c in Sources */,
