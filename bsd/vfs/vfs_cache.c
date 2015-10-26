@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -218,6 +218,9 @@ build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs
 
 	if (first_vp == NULLVP)
 		return (EINVAL);
+		
+	if (buflen <= 1)
+		return (ENOSPC);
 
 	/*
 	 * Grab the process fd so we can evaluate fd_rdir.
@@ -339,8 +342,12 @@ again:
 			 * and disallow further path construction
 			 */
 			if ((vp->v_parent == NULLVP) && (rootvnode != vp)) {
-				/* Only '/' is allowed to have a NULL parent pointer */
-				ret = EINVAL;
+				/*
+				 * Only '/' is allowed to have a NULL parent
+				 * pointer. Upper level callers should ideally
+				 * re-drive name lookup on receiving a ENOENT.
+				 */
+				ret = ENOENT;
 
 				/* The code below will exit early if 'tvp = vp' == NULL */
 			}
@@ -1403,7 +1410,7 @@ cache_lookup_locked(vnode_t dvp, struct componentname *cnp)
 	struct namecache *ncp;
 	struct nchashhead *ncpp;
 	long namelen = cnp->cn_namelen;
-	unsigned int hashval = (cnp->cn_hash & NCHASHMASK);
+	unsigned int hashval = cnp->cn_hash;
 	
 	if (nc_disabled) {
 		return NULL;
@@ -1487,7 +1494,7 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 
 	if (cnp->cn_hash == 0)
 		cnp->cn_hash = hash_string(cnp->cn_nameptr, cnp->cn_namelen);
-	hashval = (cnp->cn_hash & NCHASHMASK);
+	hashval = cnp->cn_hash;
 
 	if (nc_disabled) {
 		return 0;
@@ -1560,12 +1567,9 @@ relook:
 
 	/*
 	 * We found a "negative" match, ENOENT notifies client of this match.
-	 * The nc_whiteout field records whether this is a whiteout.
 	 */
 	NCHSTAT(ncs_neghits);
 
-	if (ncp->nc_whiteout)
-	        cnp->cn_flags |= ISWHITEOUT;
 	NAME_CACHE_UNLOCK();
 	return (ENOENT);
 }
@@ -1702,7 +1706,6 @@ cache_enter_locked(struct vnode *dvp, struct vnode *vp, struct componentname *cn
 	ncp->nc_vp = vp;
 	ncp->nc_dvp = dvp;
 	ncp->nc_hashval = cnp->cn_hash;
-	ncp->nc_whiteout = FALSE;
 
 	if (strname == NULL)
 		ncp->nc_name = add_name_internal(cnp->cn_nameptr, cnp->cn_namelen, cnp->cn_hash, FALSE, 0);
@@ -1738,13 +1741,10 @@ cache_enter_locked(struct vnode *dvp, struct vnode *vp, struct componentname *cn
 	} else {
 	        /*
 		 * this is a negative cache entry (vp == NULL)
-		 * stick it on the negative cache list
-		 * and record the whiteout state
+		 * stick it on the negative cache list.
 		 */
 	        TAILQ_INSERT_TAIL(&neghead, ncp, nc_un.nc_negentry);
 	  
-		if (cnp->cn_flags & ISWHITEOUT)
-		        ncp->nc_whiteout = TRUE;
 		ncs_negtotal++;
 
 		if (ncs_negtotal > desiredNegNodes) {

@@ -68,8 +68,8 @@ static inline void outb_inline(unsigned short _port, unsigned char _data) {
 	asm volatile ("outb %1, %0" : : "dN" (_port), "a" (_data));
 }
 
-void _lapic_irq_remap(void) __attribute__((noinline));
-void _lapic_irq_remap(void) {
+void lapic_irq_remap(void) __attribute__((always_inline));
+void lapic_irq_remap(void) {
 	/* Cascade initialization */
 	outb_inline(PIC1_COMMAND, ICW1_INIT|ICW1_ICW4); PIC_WAIT();
 	outb_inline(PIC2_COMMAND, ICW1_INIT|ICW1_ICW4); PIC_WAIT();

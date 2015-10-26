@@ -2,7 +2,7 @@
  * Copyright (c) 2008-2011 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- *
+ * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- *
+ * 
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- *
+ * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- *
+ * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
@@ -276,6 +276,10 @@ lapic_init(void)
 	LAPIC_INIT();
 
 	kprintf("ID: 0x%x LDR: 0x%x\n", LAPIC_READ(ID), LAPIC_READ(LDR));
+	if ((LAPIC_READ(VERSION)&LAPIC_VERSION_MASK) < 0x14) {
+		panic("Local APIC version 0x%x, 0x14 or more expected\n",
+			(LAPIC_READ(VERSION)&LAPIC_VERSION_MASK));
+	}
 
 	/* Set up the lapic_id <-> cpu_number map and add this boot processor */
 	lapic_cpu_map_init();
@@ -293,7 +297,7 @@ lapic_esr_read(void)
 	return LAPIC_READ(ERROR_STATUS);
 }
 
-static void
+static void 
 lapic_esr_clear(void)
 {
 	LAPIC_WRITE(ERROR_STATUS, 0);
@@ -336,7 +340,7 @@ lapic_dump(void)
 #define IP(lvt) \
 	(LAPIC_READ(lvt)&LAPIC_LVT_IP_PLRITY_LOW)? "Low " : "High"
 
-	kprintf("LAPIC %d at %p version 0x%x\n",
+	kprintf("LAPIC %d at %p version 0x%x\n", 
 		(LAPIC_READ(ID)>>LAPIC_ID_SHIFT)&LAPIC_ID_MASK,
 		(void *) lapic_vbase,
 		LAPIC_READ(VERSION)&LAPIC_VERSION_MASK);
@@ -648,7 +652,7 @@ lapic_get_timer(
 	if (current_count)
 		*current_count = LAPIC_READ(TIMER_CURRENT_COUNT);
 	mp_enable_preemption();
-}
+} 
 
 static inline void
 _lapic_end_of_interrupt(void)
@@ -794,7 +798,7 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 		/* No EOI required here */
 		retval = 1;
 		break;
-	case LAPIC_PMC_SW_INTERRUPT:
+	case LAPIC_PMC_SW_INTERRUPT: 
 		{
 #if CONFIG_COUNTERS
 			thread_t old, new;
@@ -806,6 +810,10 @@ lapic_interrupt(int interrupt_num, x86_saved_state_t *state)
 			}
 #endif /* CONFIG_COUNTERS */
 		}
+		break;
+	case LAPIC_KICK_INTERRUPT:
+		_lapic_end_of_interrupt();
+		retval = 1;
 		break;
 	}
 

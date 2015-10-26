@@ -143,12 +143,18 @@ _dwarf_internal_printlines(Dwarf_Die die, Dwarf_Error * error)
     Dwarf_Word leb128_num;
     Dwarf_Word leb128_length;
     Dwarf_Sword advance_line;
+    Dwarf_Half attrform = 0;
+
 
     /* 
        This is the operand of the latest fixed_advance_pc extended
        opcode. */
     Dwarf_Half fixed_advance_pc;
 
+
+     /*REFERENCED*/		/* Not used in this instance of the
+				   macro */
+    int local_extension_size;
 
     /* The Dwarf_Debug this die belongs to. */
     Dwarf_Debug dbg;
@@ -180,10 +186,22 @@ _dwarf_internal_printlines(Dwarf_Die die, Dwarf_Error * error)
 
 
 
-    lres = dwarf_formudata(stmt_list_attr, &line_offset, error);
-    if (lres != DW_DLV_OK) {
-	return lres;
-    }
+  /* The list of relevant FORMs is small.
+   DW_FORM_data4, DW_FORM_data8, DW_FORM_sec_offset
+   */
+  lres = dwarf_whatform(stmt_list_attr,&attrform,error);
+  if (lres != DW_DLV_OK) {
+    return lres;
+  }
+  if (attrform != DW_FORM_data4 && attrform != DW_FORM_data8 &&
+      attrform != DW_FORM_sec_offset ) {
+    _dwarf_error(dbg, error, DW_DLE_LINE_OFFSET_BAD);
+    return (DW_DLV_ERROR);
+  }
+  lres = dwarf_global_formref(stmt_list_attr, &line_offset, error);
+  if (lres != DW_DLV_OK) {
+    return lres;
+  }
 
     if (line_offset >= dbg->de_debug_line_size) {
 	_dwarf_error(dbg, error, DW_DLE_LINE_OFFSET_BAD);

@@ -415,6 +415,7 @@ gelf_getsym_macho(Elf_Data * data, int ndx, GElf_Sym * sym, const char *base)
 {
 	const struct nlist *nsym = (const struct nlist *)(data->d_buf);
 	const char *name;
+	char *tmp;
 	
 	nsym += ndx;
 	name = base + nsym->n_un.n_strx;
@@ -462,6 +463,7 @@ gelf_getsym_macho_64(Elf_Data * data, int ndx, GElf_Sym * sym, const char *base)
 {
 	const struct nlist_64 *nsym = (const struct nlist_64 *)(data->d_buf);
 	const char *name;
+	char *tmp;
 	
 	nsym += ndx;
 	name = base + nsym->n_un.n_strx;

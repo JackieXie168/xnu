@@ -27,9 +27,6 @@
 #include <sys/types.h>
 #include <sys/time.h> /* In lieu of Solaris <sys/synch.h> */
 
-#undef NULL
-#define NULL (0) /* quiets many warnings */
-
 typedef uint8_t		uchar_t;
 typedef uint16_t	ushort_t;
 typedef uint32_t	uint_t;

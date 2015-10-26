@@ -793,7 +793,7 @@ intrinsic(char *cp, tdesc_t **rtdp)
 {
 	intr_t *intr = xcalloc(sizeof (intr_t));
 	tdesc_t *tdp;
-	int width, fmt, i;
+	int width = 0, fmt, i;
 
 	switch (*cp++) {
 	case 'b':

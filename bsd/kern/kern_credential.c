@@ -61,7 +61,7 @@
 #include <libkern/OSAtomic.h>
 
 #include <kern/task.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 #ifdef MACH_ASSERT
 # undef MACH_ASSERT
 #endif
@@ -619,9 +619,10 @@ identitysvc(__unused struct proc *p, struct identitysvc_args *uap, __unused int3
 	}
 
 	/*
-	 * Beyond this point, we must be the resolver process.
+	 * Beyond this point, we must be the resolver process. We verify this
+	 * by confirming the resolver credential and pid.
 	 */
-	if (current_proc()->p_pid != kauth_resolver_identity) {
+	if ((kauth_cred_getuid(kauth_cred_get()) != 0) || (current_proc()->p_pid != kauth_resolver_identity)) {
 		KAUTH_DEBUG("RESOLVER - call from bogus resolver %d\n", current_proc()->p_pid);
 		return(EPERM);
 	}
@@ -923,7 +924,7 @@ kauth_resolver_complete(user_addr_t message)
 	struct kauth_identity_extlookup	extl;
 	struct kauth_resolver_work *workp;
 	struct kauth_resolver_work *killp;
-	int error, result;
+	int error, result, request_flags;
 
 	/*
 	 * Copy in the mesage, including the extension field, since we are
@@ -1004,6 +1005,10 @@ kauth_resolver_complete(user_addr_t message)
 		TAILQ_FOREACH(workp, &kauth_resolver_submitted, kr_link) {
 			/* found it? */
 			if (workp->kr_seqno == extl.el_seqno) {
+				/*
+				 * Take a snapshot of the original request flags.
+				 */
+				request_flags = workp->kr_work.el_flags;
 
 				/*
 				 * Get the request of the submitted queue so
@@ -1041,13 +1046,21 @@ kauth_resolver_complete(user_addr_t message)
 				 * issue and is easily detectable by comparing
 				 * time to live on last response vs. time of
 				 * next request in the resolver logs.
+				 *
+				 * A malicious/faulty resolver could overwrite
+				 * part of a user's address space if they return
+				 * flags that mismatch the original request's flags.
 				 */
-				if (extl.el_flags & (KAUTH_EXTLOOKUP_VALID_PWNAM|KAUTH_EXTLOOKUP_VALID_GRNAM)) {
+				if ((extl.el_flags & request_flags) & (KAUTH_EXTLOOKUP_VALID_PWNAM|KAUTH_EXTLOOKUP_VALID_GRNAM)) {
 					size_t actual;	/* notused */
 
 					KAUTH_RESOLVER_UNLOCK();
 					error = copyinstr(extl.el_extend, CAST_DOWN(void *, workp->kr_extend), MAXPATHLEN, &actual);
 					KAUTH_RESOLVER_LOCK();
+				} else if (extl.el_flags &  (KAUTH_EXTLOOKUP_VALID_PWNAM|KAUTH_EXTLOOKUP_VALID_GRNAM)) {
+					error = EFAULT;
+					KAUTH_DEBUG("RESOLVER - resolver returned mismatching extension flags (%d), request contained (%d)",
+							extl.el_flags, request_flags);
 				}
 
 				/*
@@ -1117,7 +1130,7 @@ kauth_identity_init(void)
  * Parameters:	uid
  *
  * Returns:	NULL				Insufficient memory to satisfy
- *						the request
+ *						the request or bad parameters
  *		!NULL				A pointer to the allocated
  *						structure, filled in
  *
@@ -1146,8 +1159,16 @@ kauth_identity_alloc(uid_t uid, gid_t gid, guid_t *guidp, time_t guid_expiry,
 			kip->ki_valid = KI_VALID_UID;
 		}
 		if (supgrpcnt) {
+			/*
+			 * A malicious/faulty resolver could return bad values
+			 */
+			assert(supgrpcnt >= 0);
 			assert(supgrpcnt <= NGROUPS);
 			assert(supgrps != NULL);
+
+			if ((supgrpcnt < 0) || (supgrpcnt > NGROUPS) || (supgrps == NULL)) {
+				return NULL;
+			}
 			if (kip->ki_valid & KI_VALID_GID)
 				panic("can't allocate kauth identity with both gid and supplementary groups");
 			kip->ki_supgrpcnt = supgrpcnt;
@@ -4380,11 +4401,12 @@ kauth_cred_label_update(kauth_cred_t cred, struct label *label)
  *		that is returned to them, if it is not intended to be a
  *		persistent reference.
  */
+
 static
 kauth_cred_t
 kauth_cred_label_update_execve(kauth_cred_t cred, vfs_context_t ctx,
-	struct vnode *vp, struct vnode *scriptvp, struct label *scriptl,
-	struct label *execl, void *macextensions, int *disjointp)
+	struct vnode *vp, off_t offset, struct vnode *scriptvp, struct label *scriptl,
+	struct label *execl, unsigned int *csflags, void *macextensions, int *disjointp, int *labelupdateerror)
 {
 	kauth_cred_t newcred;
 	struct ucred temp_cred;
@@ -4393,9 +4415,9 @@ kauth_cred_label_update_execve(kauth_cred_t cred, vfs_context_t ctx,
 
 	mac_cred_label_init(&temp_cred);
 	mac_cred_label_associate(cred, &temp_cred);
-	*disjointp = mac_cred_label_update_execve(ctx, &temp_cred, 
-						  vp, scriptvp, scriptl, execl,
-						  macextensions);
+	mac_cred_label_update_execve(ctx, &temp_cred, 
+						  vp, offset, scriptvp, scriptl, execl, csflags,
+						  macextensions, disjointp, labelupdateerror);
 
 	newcred = kauth_cred_update(cred, &temp_cred, TRUE);
 	mac_cred_label_destroy(&temp_cred);
@@ -4479,6 +4501,8 @@ int kauth_proc_label_update(struct proc *p, struct label *label)
  *		vp			The vnode being exec'ed
  *		scriptl			The script MAC label
  *		execl			The executable MAC label
+ *		lupdateerror	The error place holder for MAC label authority 
+ *						to update about possible termination
  *
  * Returns:	0			Label update did not make credential
  *					disjoint
@@ -4489,14 +4513,13 @@ int kauth_proc_label_update(struct proc *p, struct label *label)
  *		result of this call.  The caller should not assume the process
  *		reference to the old credential still exists.
  */
-int
+ 
+void
 kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
-	struct vnode *vp, struct vnode *scriptvp, struct label *scriptl,
-	struct label *execl, void *macextensions)
+	struct vnode *vp, off_t offset, struct vnode *scriptvp, struct label *scriptl,
+	struct label *execl, unsigned int *csflags, void *macextensions, int *disjoint, int *update_return)
 {
 	kauth_cred_t my_cred, my_new_cred;
-	int disjoint = 0;
-
 	my_cred = kauth_cred_proc_ref(p);
 
 	DEBUG_CRED_ENTER("kauth_proc_label_update_execve: %p\n", my_cred);
@@ -4511,7 +4534,7 @@ kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
 		 * passed in.  The subsequent compare is safe, because it is
 		 * a pointer compare rather than a contents compare.
   		 */
-		my_new_cred = kauth_cred_label_update_execve(my_cred, ctx, vp, scriptvp, scriptl, execl, macextensions, &disjoint);
+		my_new_cred = kauth_cred_label_update_execve(my_cred, ctx, vp, offset, scriptvp, scriptl, execl, csflags, macextensions, disjoint, update_return);
 		if (my_cred != my_new_cred) {
 
 			DEBUG_CRED_CHANGE("kauth_proc_label_update_execve_unlocked CH(%d): %p/0x%08x -> %p/0x%08x\n", p->p_pid, my_cred, my_cred->cr_flags, my_new_cred, my_new_cred->cr_flags);
@@ -4540,8 +4563,6 @@ kauth_proc_label_update_execve(struct proc *p, vfs_context_t ctx,
 	}
 	/* Drop old proc reference or our extra reference */
 	kauth_cred_unref(&my_cred);
-	
-	return (disjoint);
 }
 
 #if 1

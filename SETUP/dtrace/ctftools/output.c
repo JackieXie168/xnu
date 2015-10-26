@@ -281,6 +281,8 @@ matching_iidesc(iidesc_t *iidesc, iidesc_match_t *match)
 			return (-1);
 		}
 		break;
+    default:
+        break;
 	}
 	return (0);
 }
@@ -1213,7 +1215,7 @@ write_ctf(tdata_t *td, const char *curname, const char *newname, int flags)
 	struct stat st;
 	Elf *elf = NULL;
 	Elf *telf = NULL;
-	caddr_t data = NULL;
+	caddr_t data;
 	size_t len;
 	int fd = -1;
 	int tfd = -1;
