@@ -15,6 +15,7 @@
 				1F53FA0F1BDBEE6700E75657 /* Build XNU */,
 				1F53FA101BDBEE7500E75657 /* Link Frameworks */,
 				1F53FA111BDBEE8100E75657 /* Install External Headers */,
+				1FA1F2F01BDDC48F0013A0CA /* Copy Kernel File */,
 			);
 			dependencies = (
 				1F53FA0B1BDBEE4E00E75657 /* PBXTargetDependency */,
@@ -3507,6 +3508,7 @@
 		1FA1F20A1BDDBF400013A0CA /* symbolify.py */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.python; path = symbolify.py; sourceTree = "<group>"; };
 		1FA1F20B1BDDBF400013A0CA /* xcrun_cache.sh */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.script.sh; path = xcrun_cache.sh; sourceTree = "<group>"; };
 		1FA1F2C31BDDC1120013A0CA /* libz.tbd */ = {isa = PBXFileReference; lastKnownFileType = "sourcecode.text-based-dylib-definition"; name = libz.tbd; path = usr/lib/libz.tbd; sourceTree = SDKROOT; };
+		1FA1F2EF1BDDC3F80013A0CA /* copy-kernel-executable.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "copy-kernel-executable.sh"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -8343,6 +8345,7 @@
 				1FA1F1D31BDDBF400013A0CA /* install-external-headers.sh */,
 				1FA1F1D41BDDBF400013A0CA /* link-frameworks.sh */,
 				1FA1F1D51BDDBF400013A0CA /* print-xnu-log-location.sh */,
+				1FA1F2EF1BDDC3F80013A0CA /* copy-kernel-executable.sh */,
 			);
 			path = xcodescripts;
 			sourceTree = "<group>";
@@ -8631,6 +8634,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/install-external-headers.sh\"";
+			showEnvVarsInLog = 0;
+		};
+		1FA1F2F01BDDC48F0013A0CA /* Copy Kernel File */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 8;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Copy Kernel File";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 1;
+			shellPath = /bin/sh;
+			shellScript = ". \"${SRCROOT}/SETUP/xcodescripts/copy-kernel-executable.sh\"";
 			showEnvVarsInLog = 0;
 		};
 /* End PBXShellScriptBuildPhase section */
