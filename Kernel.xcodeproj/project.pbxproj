@@ -3554,8 +3554,6 @@
 				1FA1EC2F1BDDBF3E0013A0CA /* Makefile */,
 				1FA1E4771BDDBF3B0013A0CA /* bsd */,
 				1FA1EA301BDDBF3D0013A0CA /* config */,
-				1FA1EA4B1BDDBF3D0013A0CA /* ctfconvert */,
-				1FA1EA4C1BDDBF3D0013A0CA /* ctfmerge */,
 				1FA1EA4D1BDDBF3D0013A0CA /* EXTERNAL_HEADERS */,
 				1FA1EA881BDDBF3E0013A0CA /* iokit */,
 				1FA1EB551BDDBF3E0013A0CA /* libkern */,
@@ -5503,20 +5501,6 @@
 				1FA1EA4A1BDDBF3D0013A0CA /* version.c */,
 			);
 			path = config;
-			sourceTree = "<group>";
-		};
-		1FA1EA4B1BDDBF3D0013A0CA /* ctfconvert */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = ctfconvert;
-			sourceTree = "<group>";
-		};
-		1FA1EA4C1BDDBF3D0013A0CA /* ctfmerge */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = ctfmerge;
 			sourceTree = "<group>";
 		};
 		1FA1EA4D1BDDBF3D0013A0CA /* EXTERNAL_HEADERS */ = {
