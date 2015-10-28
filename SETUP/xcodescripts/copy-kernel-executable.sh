@@ -6,3 +6,5 @@ else
     echo "Kernel file not found" 1>&2
     exit 1
 fi
+
+chmod 755 "${DSTROOT}/mach_kernel"
