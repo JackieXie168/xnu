@@ -131,6 +131,9 @@ private:
     void readPrelinkedExtensions(
         kernel_section_t * prelinkInfoSect);
     void readBooterExtensions(void);
+    OSReturn readMkextExtensions(
+        OSString * deviceTreeName,
+        OSData   * deviceTreeData);
     
     OSReturn loadKernelComponentKexts(void);
     void     loadKernelExternalComponents(void);
@@ -253,7 +256,7 @@ KLDBootstrap::readPrelinkedExtensions(
             "Can't find prelinked kexts' text segment.");
         goto finish;
     }
-
+    
 #if KASLR_KEXT_DEBUG
     unsigned long   scratchSize;
     vm_offset_t     scratchAddr;
@@ -455,6 +458,7 @@ finish:
 /*********************************************************************
 *********************************************************************/
 #define BOOTER_KEXT_PREFIX   "Driver-"
+#define BOOTER_MKEXT_PREFIX  "DriversPackage-"
 
 typedef struct _DeviceTreeBuffer {
     uint32_t paddr;
@@ -478,7 +482,7 @@ KLDBootstrap::readBooterExtensions(void)
     OSKextLog(/* kext */ NULL,
         kOSKextLogProgressLevel |
         kOSKextLogDirectoryScanFlag | kOSKextLogKextBookkeepingFlag,
-        "Reading startup extensions from booter memory.");
+        "Reading startup extensions/mkexts from booter memory.");
     
     booterMemoryMap = IORegistryEntry::fromPath( "/chosen/memory-map", gIODTPlane);
 
@@ -516,6 +520,7 @@ KLDBootstrap::readBooterExtensions(void)
     while ( ( deviceTreeName =
         OSDynamicCast(OSString, keyIterator->getNextObject() ))) {
 
+        boolean_t isMkext = FALSE;
         const char * devTreeNameCString = deviceTreeName->getCStringNoCopy();
         OSData * deviceTreeEntry = OSDynamicCast(OSData,
             propertyDict->getObject(deviceTreeName));
@@ -529,10 +534,18 @@ KLDBootstrap::readBooterExtensions(void)
             continue;
         }
 
-        /* Make sure it is a kext */
-        if (strncmp(devTreeNameCString,
-                    BOOTER_KEXT_PREFIX,
-                    CONST_STRLEN(BOOTER_KEXT_PREFIX))) {
+        /* Make sure it is either a kext or an mkext */
+        if (!strncmp(devTreeNameCString, BOOTER_KEXT_PREFIX,
+            CONST_STRLEN(BOOTER_KEXT_PREFIX))) {
+
+            isMkext = FALSE;
+
+        } else if (!strncmp(devTreeNameCString, BOOTER_MKEXT_PREFIX,
+            CONST_STRLEN(BOOTER_MKEXT_PREFIX))) {
+
+            isMkext = TRUE;
+
+        } else {
             continue;
         }
 
@@ -555,7 +568,7 @@ KLDBootstrap::readBooterExtensions(void)
             OSKextLog(/* kext */ NULL,
                 kOSKextLogErrorLevel |
                 kOSKextLogDirectoryScanFlag,
-                "Can't get virtual address for device tree entry %s.",
+                "Can't get virtual address for device tree mkext entry %s.",
                 devTreeNameCString);
             goto finish;
         }
@@ -577,12 +590,16 @@ KLDBootstrap::readBooterExtensions(void)
         }
         booterData->setDeallocFunction(osdata_phys_free);
 
-        /* Create the kext for the entry, then release it, because the
-         * kext system keeps them around until explicitly removed.
-         * Any creation/registration failures are already logged for us.
-         */
-        OSKext * newKext = OSKext::withBooterData(deviceTreeName, booterData);
-        OSSafeRelease(newKext);
+        if (isMkext) {
+            readMkextExtensions(deviceTreeName, booterData);
+        } else {
+           /* Create the kext for the entry, then release it, because the
+            * kext system keeps them around until explicitly removed.
+            * Any creation/registration failures are already logged for us.
+            */
+            OSKext * newKext = OSKext::withBooterData(deviceTreeName, booterData);
+            OSSafeRelease(newKext);
+        }
 
         booterMemoryMap->removeProperty(deviceTreeName);
 
@@ -596,6 +613,49 @@ finish:
     OSSafeRelease(booterData);
     OSSafeRelease(aKext);
     return;
+}
+
+/*********************************************************************
+*********************************************************************/
+OSReturn
+KLDBootstrap::readMkextExtensions(
+    OSString   * deviceTreeName,
+    OSData     * booterData)
+{
+    OSReturn result = kOSReturnError;
+
+    uint32_t          checksum;
+    IORegistryEntry * registryRoot = NULL;  // do not release
+    OSData          * checksumObj  = NULL;   // must release
+
+    OSKextLog(/* kext */ NULL,
+        kOSKextLogStepLevel |
+        kOSKextLogDirectoryScanFlag | kOSKextLogArchiveFlag,
+        "Reading startup mkext archive from device tree entry %s.",
+        deviceTreeName->getCStringNoCopy());
+
+   /* If we successfully read the archive,
+    * then save the mkext's checksum in the IORegistry.
+    * assumes we'll only ever have one mkext to boot
+    */
+    result = OSKext::readMkextArchive(booterData, &checksum);
+    if (result == kOSReturnSuccess) {
+
+        OSKextLog(/* kext */ NULL,
+            kOSKextLogProgressLevel |
+            kOSKextLogArchiveFlag,
+            "Startup mkext archive has checksum 0x%x.", (int)checksum);
+
+        registryRoot = IORegistryEntry::getRegistryRoot();
+        assert(registryRoot);
+        checksumObj = OSData::withBytes((void *)&checksum, sizeof(checksum));
+        assert(checksumObj);
+        if (checksumObj) {
+            registryRoot->setProperty(kOSStartupMkextCRC, checksumObj);
+        }
+    }
+    
+    return result;
 }
 
 /*********************************************************************

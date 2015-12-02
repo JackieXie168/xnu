@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -779,15 +779,6 @@ so_recv_data_stat(struct socket *so, struct mbuf *m, size_t off)
 }
 
 __private_extern__ void
-so_inc_recv_data_stat(struct socket *so, size_t pkts, size_t bytes, uint32_t tc)
-{
-	if (tc >= SO_TC_STATS_MAX)
-		tc = SO_TC_BE;
-
-	so->so_tc_stats[tc].rxpackets += pkts;
-	so->so_tc_stats[tc].rxbytes +=bytes;
-}
-__private_extern__ void
 set_tcp_stream_priority(struct socket *so)
 {
 	struct inpcb *inp = sotoinpcb(so);
@@ -802,11 +793,7 @@ set_tcp_stream_priority(struct socket *so)
 	    || SOCK_CHECK_DOM(so, PF_INET6))
 	    && SOCK_CHECK_TYPE(so, SOCK_STREAM)
 	    && SOCK_CHECK_PROTO(so, IPPROTO_TCP));
-
-	/* Return if the socket is in a terminal state */	
-	if (inp->inp_state == INPCB_STATE_DEAD)
-		return;
-
+	
 	outifp = inp->inp_last_outifp;
 	uptime = net_uptime();
 
@@ -842,16 +829,7 @@ set_tcp_stream_priority(struct socket *so)
 		 * switch the backgroung streams to use background 
 		 * congestion control algorithm. Otherwise, even background
 		 * flows can move into foreground.
-		 *
-		 * System initiated background traffic like cloud uploads
-		 * should always use background delay sensitive
-		 * algorithms. This will make the stream more resposive to
-		 * other streams on the user's network and it will
-		 * minimize the latency induced.
 		 */
-		if (IS_SO_TC_BACKGROUNDSYSTEM(so->so_traffic_class))
-			fg_active = true;
-
 		if ((sotcdb & SOTCDB_NO_SENDTCPBG) != 0 ||
 			is_local || !fg_active) {
 			if (old_cc == TCP_CC_ALGO_BACKGROUND_INDEX)

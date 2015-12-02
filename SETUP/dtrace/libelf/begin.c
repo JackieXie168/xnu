@@ -43,6 +43,7 @@
 
 static const char	armag[] = ARMAG;
 
+#if defined(__APPLE__)
 #include <crt_externs.h>
 #include <mach/mach.h>
 #include <mach-o/loader.h>
@@ -179,6 +180,7 @@ static cpu_type_t current_kernel_arch(void)
         }
         return current_arch;
 }
+#endif /* __APPLE__ */
 
 /*
  * Initialize archive member
@@ -307,6 +309,7 @@ _elf_config(Elf * elf)
 		return (elf);
 	}
 
+#if defined(__APPLE__)
 	/*
 	 * Determine if this is a Mach-o file.
 	 */
@@ -550,6 +553,7 @@ _elf_config(Elf * elf)
 		}
 		return (elf);
 	}
+#endif /* __APPLE__ */
 
 	/*
 	 * Determine if this is an Archive

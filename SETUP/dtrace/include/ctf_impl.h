@@ -30,6 +30,13 @@
 
 #pragma ident	"@(#)ctf_impl.h	1.9	06/01/07 SMI"
 
+#if !defined(__APPLE__)
+#include <sys/types.h>
+#include <sys/errno.h>
+#include <sys/sysmacros.h>
+#include <sys/ctf_api.h>
+#else /* is Apple Mac OS X */
+
 #ifdef KERNEL
 #ifndef _KERNEL
 #define _KERNEL /* Solaris vs. Darwin */
@@ -40,6 +47,7 @@
 #include <sys/errno.h>
 #include "darwin_shim.h" /* In lieu of Solaris <sys/sysmacros.h> */
 #include "ctf_api.h" /* In lieu of Solaris <sys/ctf_api.h> */
+#endif /* __APPLE__ */
 
 #ifdef _KERNEL
 

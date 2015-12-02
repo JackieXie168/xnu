@@ -60,13 +60,9 @@ extern "C" {
 
 bool OSArray::initWithCapacity(unsigned int inCapacity)
 {
-    unsigned int size;
+    int size;
 
     if (!super::init())
-        return false;
-
-    // integer overflow check
-    if (inCapacity > (UINT_MAX / sizeof(const OSMetaClassBase*)))
         return false;
 
     size = sizeof(const OSMetaClassBase *) * inCapacity;
@@ -191,21 +187,15 @@ unsigned int OSArray::setCapacityIncrement(unsigned int increment)
 unsigned int OSArray::ensureCapacity(unsigned int newCapacity)
 {
     const OSMetaClassBase **newArray;
-    unsigned int finalCapacity;
-    unsigned int oldSize, newSize;
+    int oldSize, newSize;
 
     if (newCapacity <= capacity)
         return capacity;
 
     // round up
-    finalCapacity = (((newCapacity - 1) / capacityIncrement) + 1)
+    newCapacity = (((newCapacity - 1) / capacityIncrement) + 1)
                 * capacityIncrement;
-
-    // integer overflow check
-    if ((finalCapacity < newCapacity) || (finalCapacity > (UINT_MAX / sizeof(const OSMetaClassBase*))))
-        return capacity;
-
-    newSize = sizeof(const OSMetaClassBase *) * finalCapacity;
+    newSize = sizeof(const OSMetaClassBase *) * newCapacity;
 
     newArray = (const OSMetaClassBase **) kalloc(newSize);
     if (newArray) {
@@ -217,7 +207,7 @@ unsigned int OSArray::ensureCapacity(unsigned int newCapacity)
         bzero(&newArray[capacity], newSize - oldSize);
         kfree(array, oldSize);
         array = newArray;
-        capacity = finalCapacity;
+        capacity = newCapacity;
     }
 
     return capacity;
@@ -409,8 +399,8 @@ bool OSArray::serialize(OSSerialize *s) const
     
     if (!s->addXMLStartTag(this, "array")) return false;
 
-    for (unsigned i = 0; i < count; i++) {
-        if (array[i] == NULL || !array[i]->serialize(s)) return false;
+    for (unsigned i = 0; i < count; i++) { 
+        if (!array[i]->serialize(s)) return false;
     }
 
     return s->addXMLEndTag("array");

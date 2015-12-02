@@ -38,7 +38,6 @@ extern "C" {
 #include <pexpert/pexpert.h>
 #include <kern/clock.h>
 #include <uuid/uuid.h>
-#include <sys/vnode_internal.h>
 
 // how long to wait for matching root device, secs
 #if DEBUG
@@ -472,11 +471,6 @@ kern_return_t IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
             matching->setObject("Content", astring);
             astring->release();
         }
-    }
-
-    if( gIOKitDebug & kIOWaitQuietBeforeRoot ) {
-    	IOLog( "Waiting for matching to complete\n" );
-    	IOService::getPlatform()->waitQuiet();
     }
 
     if( true && matching) {

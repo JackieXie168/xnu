@@ -65,6 +65,7 @@
  *	@(#)param.c	8.3 (Berkeley) 8/20/94
  */
 
+#include <confdep.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
@@ -80,13 +81,12 @@
 #include <sys/shm_internal.h>
 #include <sys/aio_kern.h>
 
-struct	timezone tz = { 0, 0 };
+struct	timezone tz = { TIMEZONE, PST };
 
-#define	NPROC (20 + 16 * 32)
-#define	NPROC_PER_UID (NPROC/2)
+#define	NPROC (20 + 16 * MAXUSERS)
 #define HNPROC 2500	/* based on thread_max */
 int	maxproc = NPROC;
-int	maxprocperuid = NPROC_PER_UID;
+int	maxprocperuid = NPROC/2;
 /*__private_extern__*/ int hard_maxproc = HNPROC;	/* hardcoded limit */
 int nprocs = 0; /* XXX */
 
@@ -100,6 +100,9 @@ int	maxfiles = MAXFILES;
 unsigned int	ncallout = 16 + 2*NPROC;
 unsigned int nmbclusters = NMBCLUSTERS;
 int	nport = NPROC / 2;
+
+#define MAXSOCKETS NMBCLUSTERS
+int	maxsockets = MAXSOCKETS;
 
 /*
  *  async IO (aio) configurable limits

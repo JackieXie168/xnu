@@ -28,7 +28,6 @@
 /* OSObject.cpp created by gvdl on Fri 1998-11-17 */
 
 #include <libkern/c++/OSObject.h>
-#include <libkern/c++/OSString.h>
 #include <libkern/c++/OSArray.h>
 #include <libkern/c++/OSSerialize.h>
 #include <libkern/c++/OSLib.h>
@@ -242,19 +241,14 @@ void OSObject::release(int when) const
 
 bool OSObject::serialize(OSSerialize *s) const
 {
-    char cstr[128];
-    bool ok;
+    if (s->previouslySerialized(this)) return true;
 
-    snprintf(cstr, sizeof(cstr), "%s is not serializable", getClassName(this));
+    if (!s->addXMLStartTag(this, "string")) return false;
 
-    OSString * str;
-    str = OSString::withCStringNoCopy(cstr);
-    if (!str) return false;
-
-    ok = str->serialize(s);
-    str->release();
-
-    return (ok);
+    if (!s->addString(getClassName(this))) return false;
+    if (!s->addString(" is not serializable")) return false;
+    
+    return s->addXMLEndTag("string");
 }
 
 

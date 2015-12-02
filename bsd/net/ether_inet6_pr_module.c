@@ -68,6 +68,7 @@
 #include <sys/sockio.h>
 #include <sys/sysctl.h>
 #include <sys/socketvar.h>
+#include <kern/lock.h>
 
 #include <net/dlil.h>
 #include <net/if.h>

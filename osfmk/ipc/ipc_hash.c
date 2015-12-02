@@ -65,6 +65,7 @@
 
 #include <mach/boolean.h>
 #include <mach/port.h>
+#include <kern/lock.h>
 #include <kern/kalloc.h>
 #include <ipc/port.h>
 #include <ipc/ipc_space.h>

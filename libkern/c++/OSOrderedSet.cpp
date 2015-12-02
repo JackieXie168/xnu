@@ -63,12 +63,9 @@ bool OSOrderedSet::
 initWithCapacity(unsigned int inCapacity,
                  OSOrderFunction inOrdering, void *inOrderingRef)
 {
-    unsigned int size;
+    int size;
 
     if (!super::init())
-        return false;
-
-    if (inCapacity > (UINT_MAX / sizeof(_Element)))
         return false;
 
     size = sizeof(_Element) * inCapacity;
@@ -128,19 +125,15 @@ unsigned int OSOrderedSet::setCapacityIncrement(unsigned int increment)
 unsigned int OSOrderedSet::ensureCapacity(unsigned int newCapacity)
 {
     _Element *newArray;
-    unsigned int finalCapacity, oldSize, newSize;
+    int oldSize, newSize;
 
     if (newCapacity <= capacity)
         return capacity;
 
     // round up
-    finalCapacity = (((newCapacity - 1) / capacityIncrement) + 1)
+    newCapacity = (((newCapacity - 1) / capacityIncrement) + 1)
                 * capacityIncrement;
-    if ((finalCapacity < newCapacity) ||
-        (finalCapacity > (UINT_MAX / sizeof(_Element)))) {
-        return capacity;
-    }
-    newSize = sizeof(_Element) * finalCapacity;
+    newSize = sizeof(_Element) * newCapacity;
 
     newArray = (_Element *) kalloc(newSize);
     if (newArray) {
@@ -152,7 +145,7 @@ unsigned int OSOrderedSet::ensureCapacity(unsigned int newCapacity)
         bzero(&newArray[capacity], newSize - oldSize);
         kfree(array, oldSize);
         array = newArray;
-        capacity = finalCapacity;
+        capacity = newCapacity;
     }
 
     return capacity;

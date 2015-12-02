@@ -83,7 +83,6 @@
 #include <mach/kern_return.h>
 #include <mach/port.h>
 
-#include <kern/assert.h>
 #include <kern/kern_types.h>
 
 #include <ipc/ipc_types.h>
@@ -128,7 +127,7 @@ struct ipc_port {
 
 	union {
 		ipc_kobject_t kobject;
-		ipc_importance_task_t imp_task;
+		task_t imp_task;
 		uintptr_t alias;
 	} kdata;
 		
@@ -145,9 +144,10 @@ struct ipc_port {
 		  ip_spimportant:1,	/* ... at least one is importance donating */
 		  ip_impdonation:1,	/* port supports importance donation */
 		  ip_tempowner:1,	/* dont give donations to current receiver */
+		  ip_taskptr:1,		/* ... instead give them to a specified task */
 		  ip_guarded:1,         /* port guarded (use context value as guard) */
 		  ip_strict_guard:1,	/* Strict guarding; Prevents user manipulation of context values directly */
-		  ip_reserved:2,
+		  ip_reserved:1,
 		  ip_impcount:24;	/* number of importance donations in nested queue */
 
 	mach_vm_address_t ip_context;
@@ -162,6 +162,10 @@ struct ipc_port {
 	uintptr_t	ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
 	unsigned long	ip_spares[IP_NSPARES]; /* for debugging */
 #endif	/* MACH_ASSERT */
+
+#if CONFIG_MACF_MACH
+        struct label    ip_label;
+#endif
 };
 
 
@@ -260,7 +264,20 @@ extern lck_attr_t 	ipc_lck_attr;
  *	when it is taken.
  */
 
-extern lck_spin_t ipc_port_multiple_lock_data;
+#if 1
+decl_lck_mtx_data(extern,ipc_port_multiple_lock_data)
+extern lck_mtx_ext_t	ipc_port_multiple_lock_data_ext;
+
+#define	ipc_port_multiple_lock_init()					\
+		lck_mtx_init_ext(&ipc_port_multiple_lock_data, &ipc_port_multiple_lock_data_ext, &ipc_lck_grp, &ipc_lck_attr)
+
+#define	ipc_port_multiple_lock()					\
+		lck_mtx_lock(&ipc_port_multiple_lock_data)
+
+#define	ipc_port_multiple_unlock()					\
+		lck_mtx_unlock(&ipc_port_multiple_lock_data)
+#else
+lck_spin_t ipc_port_multiple_lock_data;
 
 #define	ipc_port_multiple_lock_init()					\
 		lck_spin_init(&ipc_port_multiple_lock_data, &ipc_lck_grp, &ipc_lck_attr)
@@ -270,6 +287,7 @@ extern lck_spin_t ipc_port_multiple_lock_data;
 
 #define	ipc_port_multiple_unlock()					\
 		lck_spin_unlock(&ipc_port_multiple_lock_data)
+#endif
 
 /*
  *	The port timestamp facility provides timestamps
@@ -434,21 +452,7 @@ ipc_port_check_circularity(
 	ipc_port_t	dest);
 
 #if IMPORTANCE_INHERITANCE
-/* apply importance delta to port only */
-extern mach_port_delta_t
-ipc_port_impcount_delta(
-	ipc_port_t 		port,
-	mach_port_delta_t	delta,
-	ipc_port_t		base);
-
-/* apply importance delta to port, and return task importance for update */
-extern boolean_t
-ipc_port_importance_delta_internal(
-	ipc_port_t 		port,
-	mach_port_delta_t	*delta,
-	ipc_importance_task_t	*imp_task);
-
-/* Apply an importance delta to a port and reflect change in receiver task */
+/* Apply an importance delta to a port */
 extern boolean_t
 ipc_port_importance_delta(
 	ipc_port_t 		port,

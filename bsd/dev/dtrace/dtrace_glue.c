@@ -66,9 +66,6 @@
 #include <vm/pmap.h>
 #include <vm/vm_map.h> /* All the bits we care about are guarded by MACH_KERNEL_PRIVATE :-( */
 
-/* missing prototypes, not exported by Mach */
-extern kern_return_t task_suspend_internal(task_t);
-extern kern_return_t task_resume_internal(task_t);
 
 /*
  * pid/proc
@@ -86,7 +83,7 @@ sprlock(pid_t pid)
 		return PROC_NULL;
 	}
 
-	task_suspend_internal(p->task);
+	task_suspend(p->task);
 
 	proc_lock(p);
 
@@ -104,7 +101,7 @@ sprunlock(proc_t *p)
 
 		proc_unlock(p);
 
-		task_resume_internal(p->task);
+		task_resume(p->task);
 
 		proc_rele(p);
 	}
@@ -231,7 +228,6 @@ done:
  * cpuvar
  */
 lck_mtx_t cpu_lock;
-lck_mtx_t cyc_lock;
 lck_mtx_t mod_lock;
 
 dtrace_cpu_t *cpu_list;
@@ -286,64 +282,14 @@ crgetuid(const cred_t *cr) { cred_t copy_cr = *cr; return kauth_cred_getuid(&cop
  */
 
 typedef struct wrap_timer_call {
-	/* node attributes */
-	cyc_handler_t		hdlr;
-	cyc_time_t		when;
-	uint64_t		deadline;
-	int			cpuid;
-	boolean_t		suspended;
-	struct timer_call	call;
-
-	/* next item in the linked list */
-	LIST_ENTRY(wrap_timer_call) entries;
+	cyc_handler_t hdlr;
+	cyc_time_t when;
+	uint64_t deadline;
+	struct timer_call call;
 } wrap_timer_call_t;
 
-#define WAKEUP_REAPER		0x7FFFFFFFFFFFFFFFLL
-#define NEARLY_FOREVER		0x7FFFFFFFFFFFFFFELL
-
-/* CPU going online/offline notifications */
-void (*dtrace_cpu_state_changed_hook)(int, boolean_t) = NULL;
-void dtrace_cpu_state_changed(int, boolean_t);
-
-void
-dtrace_install_cpu_hooks(void) {
-	dtrace_cpu_state_changed_hook = dtrace_cpu_state_changed;
-}
-
-void
-dtrace_cpu_state_changed(int cpuid, boolean_t is_running) {
-#pragma unused(cpuid)
-	wrap_timer_call_t	*wrapTC = NULL;
-	boolean_t		suspend = (is_running ? FALSE : TRUE);
-	dtrace_icookie_t	s;
-
-	/* Ensure that we're not going to leave the CPU */
-	s = dtrace_interrupt_disable();
-	assert(cpuid == cpu_number());
-
-	LIST_FOREACH(wrapTC, &(cpu_list[cpu_number()].cpu_cyc_list), entries) {
-		assert(wrapTC->cpuid == cpu_number());
-		if (suspend) {
-			assert(!wrapTC->suspended);
-			/* If this fails, we'll panic anyway, so let's do this now. */
-			if (!timer_call_cancel(&wrapTC->call))
-				panic("timer_call_set_suspend() failed to cancel a timer call");
-			wrapTC->suspended = TRUE;
-		} else {
-			/* Rearm the timer, but ensure it was suspended first. */
-			assert(wrapTC->suspended);
-			clock_deadline_for_periodic_event(wrapTC->when.cyt_interval, mach_absolute_time(),
-			                                  &wrapTC->deadline);
-			timer_call_enter1(&wrapTC->call, (void*) wrapTC, wrapTC->deadline,
-		                          TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL);
-			wrapTC->suspended = FALSE;
-		}
-
-	}
-
-	/* Restore the previous interrupt state. */
-	dtrace_interrupt_enable(s);
-}
+#define WAKEUP_REAPER 0x7FFFFFFFFFFFFFFFLL
+#define NEARLY_FOREVER 0x7FFFFFFFFFFFFFFELL
 
 static void
 _timer_call_apply_cyclic( void *ignore, void *vTChdl )
@@ -355,13 +301,16 @@ _timer_call_apply_cyclic( void *ignore, void *vTChdl )
 
 	clock_deadline_for_periodic_event( wrapTC->when.cyt_interval, mach_absolute_time(), &(wrapTC->deadline) );
 	timer_call_enter1( &(wrapTC->call), (void *)wrapTC, wrapTC->deadline, TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL );
+
+	/* Did timer_call_remove_cyclic request a wakeup call when this timer call was re-armed? */
+	if (wrapTC->when.cyt_interval == WAKEUP_REAPER)
+		thread_wakeup((event_t)wrapTC);
 }
 
 static cyclic_id_t
 timer_call_add_cyclic(wrap_timer_call_t *wrapTC, cyc_handler_t *handler, cyc_time_t *when)
 {
 	uint64_t now;
-	dtrace_icookie_t s;
 
 	timer_call_setup( &(wrapTC->call),  _timer_call_apply_cyclic, NULL );
 	wrapTC->hdlr = *handler;
@@ -373,34 +322,25 @@ timer_call_add_cyclic(wrap_timer_call_t *wrapTC, cyc_handler_t *handler, cyc_tim
 	wrapTC->deadline = now;
 
 	clock_deadline_for_periodic_event( wrapTC->when.cyt_interval, now, &(wrapTC->deadline) );
-
-	/* Insert the timer to the list of the running timers on this CPU, and start it. */
-	s = dtrace_interrupt_disable();
-		wrapTC->cpuid = cpu_number();
-		LIST_INSERT_HEAD(&cpu_list[wrapTC->cpuid].cpu_cyc_list, wrapTC, entries);
-		timer_call_enter1(&wrapTC->call, (void*) wrapTC, wrapTC->deadline,
-		                  TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL);
-		wrapTC->suspended = FALSE;
-	dtrace_interrupt_enable(s);
+	timer_call_enter1( &(wrapTC->call), (void *)wrapTC, wrapTC->deadline, TIMER_CALL_SYS_CRITICAL | TIMER_CALL_LOCAL );
 
 	return (cyclic_id_t)wrapTC;
 }
 
-/*
- * Executed on the CPU the timer is running on.
- */
 static void
 timer_call_remove_cyclic(cyclic_id_t cyclic)
 {
 	wrap_timer_call_t *wrapTC = (wrap_timer_call_t *)cyclic;
 
-	assert(wrapTC);
-	assert(cpu_number() == wrapTC->cpuid);
+	while (!timer_call_cancel(&(wrapTC->call))) {
+		int ret = assert_wait(wrapTC, THREAD_UNINT);
+		ASSERT(ret == THREAD_WAITING);
 
-	if (!timer_call_cancel(&wrapTC->call))
-		panic("timer_call_remove_cyclic() failed to cancel a timer call");
+		wrapTC->when.cyt_interval = WAKEUP_REAPER;
 
-	LIST_REMOVE(wrapTC, entries);	
+		ret = thread_block(THREAD_CONTINUE_NULL);
+		ASSERT(ret == THREAD_AWAKENED);
+	}
 }
 
 static void *
@@ -426,10 +366,7 @@ cyclic_timer_remove(cyclic_id_t cyclic)
 {
 	ASSERT( cyclic != CYCLIC_NONE );
 
-	/* Removing a timer call must be done on the CPU the timer is running on. */
-	wrap_timer_call_t *wrapTC = (wrap_timer_call_t *) cyclic;
-	dtrace_xcall(wrapTC->cpuid, (dtrace_xcall_t) timer_call_remove_cyclic, (void*) cyclic);
-
+	timer_call_remove_cyclic( cyclic );
 	_FREE((void *)cyclic, M_TEMP);
 }
 
@@ -483,15 +420,11 @@ _cyclic_remove_omni(cyclic_id_list_t cyc_list)
 	t += sizeof(cyc_omni_handler_t);
 	cyc_list = (cyclic_id_list_t)(uintptr_t)t;
 
-	/*
-	 * If the processor was offline when dtrace started, we did not allocate
-	 * a cyclic timer for this CPU.
-	 */
-	if ((cid = cyc_list[cpu_number()]) != CYCLIC_NONE) {
-		oarg = timer_call_get_cyclic_arg(cid);
-		timer_call_remove_cyclic(cid);
-		(omni->cyo_offline)(omni->cyo_arg, CPU, oarg);
-	}
+	cid = cyc_list[cpu_number()];
+	oarg = timer_call_get_cyclic_arg(cid);
+
+	timer_call_remove_cyclic( cid );
+	(omni->cyo_offline)(omni->cyo_arg, CPU, oarg);
 }
 
 void
@@ -862,34 +795,23 @@ dt_kmem_free(void *buf, size_t size)
 
 void* dt_kmem_alloc_aligned(size_t size, size_t align, int kmflag)
 {
-	void *mem, **addr_to_free;
-	intptr_t mem_aligned;
-	size_t *size_to_free, hdr_size;
+	void* buf;
+	intptr_t p;
+	void** buf_backup;
 
-	/* Must be a power of two. */
-	assert(align != 0);
-	assert((align & (align - 1)) == 0);
+	buf = dt_kmem_alloc(align + sizeof(void*) + size, kmflag);
 
-	/*
-	 * We are going to add a header to the allocation. It contains
-	 * the address to free and the total size of the buffer.
-	 */
-	hdr_size = sizeof(size_t) + sizeof(void*);
-	mem = dt_kmem_alloc(size + align + hdr_size, kmflag);
-	if (mem == NULL)
+	if(!buf)
 		return NULL;
 
-	mem_aligned = (intptr_t) (((intptr_t) mem + align + hdr_size) & ~(align - 1));
+	p = (intptr_t)buf;
+	p += sizeof(void*);				/* now we have enough room to store the backup */
+	p = P2ROUNDUP(p, align);			/* and now we're aligned */
 
-	/* Write the address to free in the header. */
-	addr_to_free = (void**) (mem_aligned - sizeof(void*));
-	*addr_to_free = mem;
+	buf_backup = (void**)(p - sizeof(void*));
+	*buf_backup = buf;				/* back up the address we need to free */
 
-	/* Write the size to free in the header. */
-	size_to_free = (size_t*) (mem_aligned - hdr_size);
-	*size_to_free = size + align + hdr_size;
-
-	return (void*) mem_aligned;
+	return (void*)p;
 }
 
 void* dt_kmem_zalloc_aligned(size_t size, size_t align, int kmflag)
@@ -909,14 +831,14 @@ void* dt_kmem_zalloc_aligned(size_t size, size_t align, int kmflag)
 void dt_kmem_free_aligned(void* buf, size_t size)
 {
 #pragma unused(size)
-	intptr_t ptr = (intptr_t) buf;
-	void **addr_to_free = (void**) (ptr - sizeof(void*));
-	size_t *size_to_free = (size_t*) (ptr - (sizeof(size_t) + sizeof(void*)));
+	intptr_t p;
+	void** buf_backup;
 
-	if (buf == NULL)
-		return;
+	p = (intptr_t)buf;
+	p -= sizeof(void*);
+	buf_backup = (void**)(p);
 
-	dt_kmem_free(*addr_to_free, *size_to_free);
+	dt_kmem_free(*buf_backup, size + ((char*)buf - (char*)*buf_backup));
 }
 
 /*

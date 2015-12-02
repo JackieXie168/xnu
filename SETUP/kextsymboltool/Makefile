@@ -18,7 +18,9 @@ ifneq ($(HOST_SPARSE_SDKROOT),/)
 LDFLAGS += -lmacho
 endif
 
-.SparseSDK: ALWAYS
+.PHONY: force
+
+.SparseSDK: force
 	$(_v)echo '$(HOST_SPARSE_SDKROOT)' | cmp -s - $@ || echo '$(HOST_SPARSE_SDKROOT)' > $@
 
 kextsymboltool: $(OBJS) .SparseSDK

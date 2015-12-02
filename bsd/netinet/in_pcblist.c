@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2010-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2010-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,22 +95,25 @@
 #define	ADVANCE64(p, n) (void*)((char *)(p) + ROUNDUP64(n))
 #endif
 
+static void sotoxsocket_n(struct socket *, struct xsocket_n *);
+static void sbtoxsockbuf_n(struct sockbuf *, struct xsockbuf_n *);
+static void sbtoxsockstat_n(struct socket *, struct xsockstat_n *);
 static void inpcb_to_xinpcb_n(struct inpcb *, struct xinpcb_n *);
 static void tcpcb_to_xtcpcb_n(struct tcpcb *, struct xtcpcb_n *);
 
-__private_extern__ void
+static void
 sotoxsocket_n(struct socket *so, struct xsocket_n *xso)
 {
 	xso->xso_len = sizeof (struct xsocket_n);
 	xso->xso_kind = XSO_SOCKET;
 
 	if (so != NULL) {
-		xso->xso_so = (uint64_t)VM_KERNEL_ADDRPERM(so);
+		xso->xso_so = (u_int64_t)(uintptr_t)so;
 		xso->so_type = so->so_type;
 		xso->so_options = so->so_options;
 		xso->so_linger = so->so_linger;
 		xso->so_state = so->so_state;
-		xso->so_pcb = (uint64_t)VM_KERNEL_ADDRPERM(so->so_pcb);
+		xso->so_pcb = (u_int64_t)(uintptr_t)so->so_pcb;
 		if (so->so_proto) {
 			xso->xso_protocol = SOCK_PROTO(so);
 			xso->xso_family = SOCK_DOM(so);
@@ -125,12 +128,10 @@ sotoxsocket_n(struct socket *so, struct xsocket_n *xso)
 		xso->so_pgid = so->so_pgid;
 		xso->so_oobmark = so->so_oobmark;
 		xso->so_uid = kauth_cred_getuid(so->so_cred);
-		xso->so_last_pid = so->last_pid;
-		xso->so_e_pid = so->e_pid;
 	}
 }
 
-__private_extern__ void
+static void
 sbtoxsockbuf_n(struct sockbuf *sb, struct xsockbuf_n *xsb)
 {
 	xsb->xsb_len = sizeof (struct xsockbuf_n);
@@ -150,7 +151,7 @@ sbtoxsockbuf_n(struct sockbuf *sb, struct xsockbuf_n *xsb)
 	}
 }
 
-__private_extern__ void
+static void
 sbtoxsockstat_n(struct socket *so, struct xsockstat_n *xst)
 {
 	int i;
@@ -171,10 +172,10 @@ inpcb_to_xinpcb_n(struct inpcb *inp, struct xinpcb_n *xinp)
 {
 	xinp->xi_len = sizeof (struct xinpcb_n);
 	xinp->xi_kind = XSO_INPCB;
-	xinp->xi_inpp = (uint64_t)VM_KERNEL_ADDRPERM(inp);
+	xinp->xi_inpp = (u_int64_t)(uintptr_t)inp;
 	xinp->inp_fport = inp->inp_fport;
 	xinp->inp_lport = inp->inp_lport;
-	xinp->inp_ppcb = (uint64_t)VM_KERNEL_ADDRPERM(inp->inp_ppcb);
+	xinp->inp_ppcb = (u_int64_t)(uintptr_t)inp->inp_ppcb;
 	xinp->inp_gencnt = inp->inp_gencnt;
 	xinp->inp_flags = inp->inp_flags;
 	xinp->inp_flow = inp->inp_flow;
@@ -189,24 +190,23 @@ inpcb_to_xinpcb_n(struct inpcb *inp, struct xinpcb_n *xinp)
 	xinp->inp_depend6.inp6_ifindex = 0;
 	xinp->inp_depend6.inp6_hops = inp->inp_depend6.inp6_hops;
 	xinp->inp_flowhash = inp->inp_flowhash;
-	xinp->inp_flags2 = inp->inp_flags2;
 }
 
 __private_extern__ void
 tcpcb_to_xtcpcb_n(struct tcpcb *tp, struct xtcpcb_n *xt)
 {
+	int i;
+
 	xt->xt_len = sizeof (struct xtcpcb_n);
 	xt->xt_kind = XSO_TCPCB;
 
-	xt->t_segq = (uint32_t)VM_KERNEL_ADDRPERM(tp->t_segq.lh_first);
+	xt->t_segq = (u_int32_t)(uintptr_t)tp->t_segq.lh_first;
 	xt->t_dupacks = tp->t_dupacks;
-	xt->t_timer[TCPT_REXMT_EXT] = tp->t_timer[TCPT_REXMT];
-	xt->t_timer[TCPT_PERSIST_EXT] = tp->t_timer[TCPT_PERSIST];
-	xt->t_timer[TCPT_KEEP_EXT] = tp->t_timer[TCPT_KEEP];
-	xt->t_timer[TCPT_2MSL_EXT] = tp->t_timer[TCPT_2MSL];
+	for (i = 0; i < TCPT_NTIMERS_EXT; i++)
+		xt->t_timer[i] = tp->t_timer[i];
 	xt->t_state = tp->t_state;
 	xt->t_flags = tp->t_flags;
-	xt->t_force = (tp->t_flagsext & TF_FORCE) ? 1 : 0;
+	xt->t_force = tp->t_force;
 	xt->snd_una = tp->snd_una;
 	xt->snd_max = tp->snd_max;
 	xt->snd_nxt = tp->snd_nxt;
@@ -394,16 +394,14 @@ done:
 }
 
 __private_extern__ void
-inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
+inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t wildcardok,
     bitstr_t *bitfield, struct inpcbinfo *pcbinfo)
 {
 	struct inpcb *inp;
 	struct socket *so;
 	inp_gen_t gencnt;
-	bool iswildcard, wildcardok, nowakeok;
+	uint32_t iswildcard;
 
-	wildcardok = ((flags & INPCB_GET_PORTS_USED_WILDCARDOK) != 0);
-	nowakeok = ((flags & INPCB_GET_PORTS_USED_NOWAKEUPOK) != 0);
 	lck_rw_lock_shared(pcbinfo->ipi_lock);
 	gencnt = pcbinfo->ipi_gencnt;
 	for (inp = LIST_FIRST(pcbinfo->ipi_listhead); inp;
@@ -429,10 +427,6 @@ inpcb_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
 		    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr)));
 
 		if (!wildcardok && iswildcard)
-			continue;
-
-		if ((so->so_options & SO_NOWAKEFROMSLEEP) &&
-			!nowakeok)
 			continue;
 
 		if (!iswildcard &&

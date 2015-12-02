@@ -30,7 +30,9 @@
 #include <string.h>
 #include <sys/cdefs.h>
 
-#include <kern/locks.h>
+__BEGIN_DECLS
+#include <kern/lock.h>
+__END_DECLS
 
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSLib.h>
@@ -463,7 +465,7 @@ void OSSymbol::initialize()
     pool = new OSSymbolPool;
     assert(pool);
 
-    if (pool && !pool->init()) {
+    if (!pool->init()) {
         delete pool;
         assert(false);
     };

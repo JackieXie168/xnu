@@ -86,7 +86,6 @@
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_notify.h>
 #include <ipc/ipc_table.h>
-#include <ipc/ipc_importance.h>
 #include <security/mac_mach_internal.h>
 
 /* Allow IPC to generate mach port guard exceptions */
@@ -1690,6 +1689,10 @@ ipc_right_copyin_check(
 {
 	ipc_entry_bits_t bits;
 	ipc_port_t port;
+#if CONFIG_MACF_MACH
+	task_t self = current_task();
+	int rc = 0;
+#endif
 
 	bits= entry->ie_bits;
 	assert(is_active(space));
@@ -1698,21 +1701,54 @@ ipc_right_copyin_check(
 	    case MACH_MSG_TYPE_MAKE_SEND:
 		if ((bits & MACH_PORT_TYPE_RECEIVE) == 0)
 			return FALSE;
+
+#if CONFIG_MACF_MACH
+		port = (ipc_port_t) entry->ie_object;
+		ip_lock(port);
+		tasklabel_lock(self);
+		rc = mac_port_check_make_send(&self->maclabel, &port->ip_label);                tasklabel_unlock(self);
+		ip_unlock(port);
+		if (rc)
+			return FALSE;
+#endif
 		break;
 
 	    case MACH_MSG_TYPE_MAKE_SEND_ONCE:
 		if ((bits & MACH_PORT_TYPE_RECEIVE) == 0)
 			return FALSE;
+
+#if CONFIG_MACF_MACH
+		port = (ipc_port_t) entry->ie_object;
+		ip_lock(port);
+		tasklabel_lock(self);
+		rc = mac_port_check_make_send_once(&self->maclabel, &port->ip_label);
+		tasklabel_unlock(self);
+		ip_unlock(port);
+		if (rc)
+			return FALSE;
+#endif
 		break;
 
 	    case MACH_MSG_TYPE_MOVE_RECEIVE:
 		if ((bits & MACH_PORT_TYPE_RECEIVE) == 0)
 			return FALSE;
+
+#if CONFIG_MACF_MACH
+		port = (ipc_port_t) entry->ie_object;
+		ip_lock(port);
+		tasklabel_lock(self);
+		rc = mac_port_check_move_receive(&self->maclabel, &port->ip_label);
+		tasklabel_unlock(self);
+		ip_unlock(port);
+		if (rc)
+                        return FALSE;
+#endif
 		break;
 
 	    case MACH_MSG_TYPE_COPY_SEND:
 	    case MACH_MSG_TYPE_MOVE_SEND:
 	    case MACH_MSG_TYPE_MOVE_SEND_ONCE: {
+		boolean_t active;
 
 		if (bits & MACH_PORT_TYPE_DEAD_NAME)
 			break;
@@ -1723,12 +1759,35 @@ ipc_right_copyin_check(
 		port = (ipc_port_t) entry->ie_object;
 		assert(port != IP_NULL);
 
-		/*
-		 * active status peek to avoid checks that will be skipped
-		 * on copyin for dead ports.  Lock not held, so will not be
-		 * atomic (but once dead, there's no going back).
-		 */
-		if (!ip_active(port)) {
+		ip_lock(port);
+		active = ip_active(port);
+#if CONFIG_MACF_MACH
+		tasklabel_lock(self);
+		switch (msgt_name) {
+		case MACH_MSG_TYPE_COPY_SEND:
+			rc = mac_port_check_copy_send(&self->maclabel,
+			    &port->ip_label);
+			break;
+		case MACH_MSG_TYPE_MOVE_SEND:
+			rc = mac_port_check_move_send(&self->maclabel,
+			    &port->ip_label);
+			break;
+		case MACH_MSG_TYPE_MOVE_SEND_ONCE:
+			rc = mac_port_check_move_send_once(&self->maclabel,
+			    &port->ip_label);
+			break;
+		default:
+			panic("ipc_right_copyin_check: strange rights");
+		}
+		tasklabel_unlock(self);
+		if (rc) {
+			ip_unlock(port);
+			return FALSE;
+		}
+#endif
+		ip_unlock(port);
+
+		if (!active) {
 			break;
 		}
 
@@ -1790,7 +1849,11 @@ ipc_right_copyin(
 {
 	ipc_entry_bits_t bits;
 	ipc_port_t port;
-
+#if CONFIG_MACF_MACH
+	task_t self = current_task();
+	int    rc;
+#endif
+	
 	*releasep = IP_NULL;
 
 #if IMPORTANCE_INHERITANCE
@@ -1815,6 +1878,16 @@ ipc_right_copyin(
 		assert(port->ip_receiver_name == name);
 		assert(port->ip_receiver == space);
 
+#if CONFIG_MACF_MACH
+		tasklabel_lock(self);
+		rc = mac_port_check_make_send(&self->maclabel, &port->ip_label);
+		tasklabel_unlock(self);
+		if (rc) {
+			ip_unlock(port);
+			return KERN_NO_ACCESS;
+		}
+#endif
+
 		port->ip_mscount++;
 		port->ip_srights++;
 		ip_reference(port);
@@ -1838,6 +1911,16 @@ ipc_right_copyin(
 		assert(port->ip_receiver_name == name);
 		assert(port->ip_receiver == space);
 
+#if CONFIG_MACF_MACH
+		tasklabel_lock(self);
+		rc = mac_port_check_make_send_once(&self->maclabel, &port->ip_label);
+		tasklabel_unlock(self);
+		if (rc) {
+			ip_unlock(port);
+			return KERN_NO_ACCESS;
+		}
+#endif
+
 		port->ip_sorights++;
 		ip_reference(port);
 		ip_unlock(port);
@@ -1860,6 +1943,17 @@ ipc_right_copyin(
 		assert(ip_active(port));
 		assert(port->ip_receiver_name == name);
 		assert(port->ip_receiver == space);
+
+#if CONFIG_MACF_MACH
+		tasklabel_lock(self);
+		rc = mac_port_check_move_receive(&self->maclabel,
+						 &port->ip_label);
+		tasklabel_unlock(self);
+		if (rc) {
+			ip_unlock(port);
+			return KERN_NO_ACCESS;
+		}
+#endif
 
 		if (bits & MACH_PORT_TYPE_SEND) {
 			assert(IE_BITS_TYPE(bits) ==
@@ -1896,7 +1990,7 @@ ipc_right_copyin(
 		 * destination port (see ipc_port_check_circularity()).
 		 */
 		if (port->ip_tempowner == 0) {
-			assert(IIT_NULL == port->ip_imp_task);
+			assert(port->ip_taskptr == 0);
 
 			/* ports in limbo have to be tempowner */
 			port->ip_tempowner = 1;
@@ -1932,6 +2026,16 @@ ipc_right_copyin(
 			goto copy_dead;
 		}
 		/* port is locked and active */
+
+#if CONFIG_MACF_MACH
+		tasklabel_lock(self);
+		rc = mac_port_check_copy_send(&self->maclabel, &port->ip_label);
+		tasklabel_unlock(self);
+		if (rc) {
+			ip_unlock(port);
+			return KERN_NO_ACCESS;
+		}
+#endif
 
 		if ((bits & MACH_PORT_TYPE_SEND) == 0) {
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND_ONCE);
@@ -1974,6 +2078,17 @@ ipc_right_copyin(
 			goto move_dead;
 		}
 		/* port is locked and active */
+
+#if CONFIG_MACF_MACH
+		tasklabel_lock (self);
+		rc = mac_port_check_copy_send (&self->maclabel, &port->ip_label);
+		tasklabel_unlock (self);
+		if (rc)
+		  {
+		    ip_unlock (port);
+		    return KERN_NO_ACCESS;
+		  }
+#endif
 
 		if ((bits & MACH_PORT_TYPE_SEND) == 0) {
 			assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND_ONCE);
@@ -2039,6 +2154,17 @@ ipc_right_copyin(
 			goto move_dead;
 		}
 		/* port is locked and active */
+
+#if CONFIG_MACF_MACH
+		tasklabel_lock (self);
+		rc = mac_port_check_copy_send (&self->maclabel, &port->ip_label);
+		tasklabel_unlock (self);
+		if (rc)
+		  {
+		    ip_unlock (port);
+		    return KERN_NO_ACCESS;
+		  }
+#endif
 
 		if ((bits & MACH_PORT_TYPE_SEND_ONCE) == 0) {
 			assert(bits & MACH_PORT_TYPE_SEND);
@@ -2186,7 +2312,7 @@ ipc_right_copyin_undo(
 }
 
 /*
- *	Routine:	ipc_right_copyin_two_move_sends
+ *	Routine:	ipc_right_copyin_two
  *	Purpose:
  *		Like ipc_right_copyin with MACH_MSG_TYPE_MOVE_SEND
  *		and deadok == FALSE, except that this moves two
@@ -2198,9 +2324,9 @@ ipc_right_copyin_undo(
  *		KERN_SUCCESS		Acquired an object.
  *		KERN_INVALID_RIGHT	Name doesn't denote correct right.
  */
-static
+
 kern_return_t
-ipc_right_copyin_two_move_sends(
+ipc_right_copyin_two(
 	ipc_space_t		space,
 	mach_port_name_t	name,
 	ipc_entry_t		entry,
@@ -2212,6 +2338,10 @@ ipc_right_copyin_two_move_sends(
 	mach_port_urefs_t urefs;
 	ipc_port_t port;
 	ipc_port_t request = IP_NULL;
+#if CONFIG_MACF_MACH
+	task_t self = current_task();
+	int    rc;
+#endif
 
 	*releasep = IP_NULL;
 
@@ -2234,6 +2364,16 @@ ipc_right_copyin_two_move_sends(
 		goto invalid_right;
 	}
 	/* port is locked and active */
+
+#if CONFIG_MACF_MACH
+	tasklabel_lock(self);
+	rc = mac_port_check_copy_send(&self->maclabel, &port->ip_label);
+	tasklabel_unlock(self);
+	if (rc) {
+		ip_unlock(port);
+		return KERN_NO_ACCESS;
+	}
+#endif
 
 	assert(port->ip_srights > 0);
 
@@ -2278,188 +2418,6 @@ ipc_right_copyin_two_move_sends(
 	return KERN_INVALID_RIGHT;
 }
 
-
-/*
- *	Routine:	ipc_right_copyin_two
- *	Purpose:
- *		Like ipc_right_copyin with two dispositions,
- *		each of which results in a send or send-once right,
- *		and deadok = FALSE.
- *	Conditions:
- *		The space is write-locked and active.
- *		The object is returned with two refs/rights.
- *	Returns:
- *		KERN_SUCCESS		Acquired an object.
- *		KERN_INVALID_RIGHT	Name doesn't denote correct right(s).
- *		KERN_INVALID_CAPABILITY	Name doesn't denote correct right for msgt_two.
- */
-kern_return_t
-ipc_right_copyin_two(
-	ipc_space_t		space,
-	mach_port_name_t	name,
-	ipc_entry_t		entry,
-	mach_msg_type_name_t	msgt_one,
-	mach_msg_type_name_t	msgt_two,
-	ipc_object_t		*objectp,
-	ipc_port_t		*sorightp,
-	ipc_port_t		*releasep)
-{
-	queue_head_t links_data;
-	queue_t links = &links_data;
-	kern_return_t kr;
-
-#if IMPORTANCE_INHERITANCE
-	int assertcnt = 0;
-#endif
-
-	queue_init(links);
-
-	assert(MACH_MSG_TYPE_PORT_ANY_SEND(msgt_one));
-	assert(MACH_MSG_TYPE_PORT_ANY_SEND(msgt_two));
-	
-
-	/*
-	 * Pre-validate the second disposition is possible all by itself.
-	 */
-	if (!ipc_right_copyin_check(space, name, entry, msgt_two)) {
-		return KERN_INVALID_CAPABILITY;
-	}
-
-	/*
-	 *	This is a little tedious to make atomic, because
-	 *	there are 25 combinations of valid dispositions.
-	 *	However, most are easy.
-	 */
-
-	/*
-	 *	If either is move-sonce, then there must be an error.
-	 */
-	if (msgt_one == MACH_MSG_TYPE_MOVE_SEND_ONCE ||
-	    msgt_two == MACH_MSG_TYPE_MOVE_SEND_ONCE) {
-		return KERN_INVALID_RIGHT;
-	}
-
-	if ((msgt_one == MACH_MSG_TYPE_MAKE_SEND) ||
-	    (msgt_one == MACH_MSG_TYPE_MAKE_SEND_ONCE) ||
-	    (msgt_two == MACH_MSG_TYPE_MAKE_SEND) ||
-	    (msgt_two == MACH_MSG_TYPE_MAKE_SEND_ONCE)) {
-		/*
-		 *	One of the dispositions needs a receive right.
-		 *
-		 *	If the copyin below succeeds, we know the receive
-		 *	right is there (because the pre-validation of
-		 *	the second disposition already succeeded in our
-		 *	caller).
-		 *
-		 *	Hence the port is not in danger of dying.
-		 */
-		ipc_object_t object_two;
-
-#if IMPORTANCE_INHERITANCE
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_one, FALSE,
-				      objectp, sorightp, releasep,
-				      &assertcnt, links);
-		assert(assertcnt == 0);
-#else
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_one, FALSE,
-				      objectp, sorightp, releasep,
-				      links);
-#endif /* IMPORTANCE_INHERITANCE */
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-
-		assert(IO_VALID(*objectp));
-		assert(*sorightp == IP_NULL);
-		assert(*releasep == IP_NULL);
-
-		/*
-		 *	Now copyin the second (previously validated)
-		 *	disposition.  The result can't be a dead port,
-		 *	as no valid disposition can make us lose our
-		 *	receive right.
-		 */
-#if IMPORTANCE_INHERITANCE
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_two, FALSE,
-				      &object_two, sorightp, releasep,
-				      &assertcnt, links);
-		assert(assertcnt == 0);
-#else
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_two, FALSE,
-				      &object_two, sorightp, releasep,
-				      links);
-#endif /* IMPORTANCE_INHERITANCE */
-		assert(kr == KERN_SUCCESS);
-		assert(*sorightp == IP_NULL);
-		assert(*releasep == IP_NULL);
-		assert(object_two == *objectp);
-		assert(entry->ie_bits & MACH_PORT_TYPE_RECEIVE);
-
-	} else if ((msgt_one == MACH_MSG_TYPE_MOVE_SEND) &&
-		   (msgt_two == MACH_MSG_TYPE_MOVE_SEND)) {
-		/*
-		 *	This is an easy case.  Just use our
-		 *	handy-dandy special-purpose copyin call
-		 *	to get two send rights for the price of one.
-		 */
-		kr = ipc_right_copyin_two_move_sends(space, name, entry,
-						     objectp, sorightp, 
-						     releasep);
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-
-	} else {
-		mach_msg_type_name_t msgt_name;
-
-		/*
-		 *	Must be either a single move-send and a
-		 *	copy-send, or two copy-send dispositions.
-		 *	Use the disposition with the greatest side
-		 *	effects for the actual copyin - then just
-		 *	duplicate the send right you get back.
-		 */
-		if (msgt_one == MACH_MSG_TYPE_MOVE_SEND ||
-		    msgt_two == MACH_MSG_TYPE_MOVE_SEND) {
-			msgt_name = MACH_MSG_TYPE_MOVE_SEND;
-		} else {
-			msgt_name = MACH_MSG_TYPE_COPY_SEND;
-		}
-
-#if IMPORTANCE_INHERITANCE
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_name, FALSE,
-				      objectp, sorightp, releasep,
-				      &assertcnt, links);
-		assert(assertcnt == 0);
-#else
-		kr = ipc_right_copyin(space, name, entry,
-				      msgt_name, FALSE,
-				      objectp, sorightp, releasep,
-				      links);
-#endif /* IMPORTANCE_INHERITANCE */
-		if (kr != KERN_SUCCESS) {
-			return kr;
-		}
-
-		/*
-		 *	Copy the right we got back.  If it is dead now,
-		 *	that's OK.  Neither right will be usable to send
-		 *	a message anyway.
-		 */
-		(void)ipc_port_copy_send((ipc_port_t)*objectp);
-	}
-
-	assert(queue_empty(links));
-
-	return KERN_SUCCESS;
-}
-
-
 /*
  *	Routine:	ipc_right_copyout
  *	Purpose:
@@ -2495,6 +2453,9 @@ ipc_right_copyout(
 {
 	ipc_entry_bits_t bits;
 	ipc_port_t port;
+#if CONFIG_MACF_MACH
+	int rc;
+#endif
 
 	bits = entry->ie_bits;
 
@@ -2511,6 +2472,19 @@ ipc_right_copyout(
 		assert(IE_BITS_TYPE(bits) == MACH_PORT_TYPE_NONE);
 		assert(port->ip_sorights > 0);
 
+#if CONFIG_MACF_MACH
+		if (space->is_task) {
+			tasklabel_lock(space->is_task);
+			rc = mac_port_check_hold_send_once(&space->is_task->maclabel,
+							   &port->ip_label);
+			tasklabel_unlock(space->is_task);
+
+			if (rc) {
+				ip_unlock(port);
+				return KERN_NO_ACCESS;
+			}
+		}
+#endif
 		/* transfer send-once right and ref to entry */
 		ip_unlock(port);
 
@@ -2520,6 +2494,20 @@ ipc_right_copyout(
 
 	    case MACH_MSG_TYPE_PORT_SEND:
 		assert(port->ip_srights > 0);
+
+#if CONFIG_MACF_MACH
+		if (space->is_task) {
+			tasklabel_lock(space->is_task);
+			rc = mac_port_check_hold_send(&space->is_task->maclabel,
+						      &port->ip_label);
+			tasklabel_unlock(space->is_task);
+
+			if (rc) {
+				ip_unlock(port);
+				return KERN_NO_ACCESS;
+			}
+		}
+#endif
 
 		if (bits & MACH_PORT_TYPE_SEND) {
 			mach_port_urefs_t urefs = IE_BITS_UREFS(bits);
@@ -2581,6 +2569,20 @@ ipc_right_copyout(
 		assert(port->ip_receiver_name == MACH_PORT_NULL);
 		dest = port->ip_destination;
 
+#if CONFIG_MACF_MACH
+		if (space->is_task) {
+			tasklabel_lock(space->is_task);
+			rc = mac_port_check_hold_receive(&space->is_task->maclabel,
+							 &port->ip_label);
+			tasklabel_unlock(space->is_task);
+
+			if (rc) {
+				ip_unlock(port);
+				return KERN_NO_ACCESS;
+			}
+		}
+#endif
+
 		port->ip_receiver_name = name;
 		port->ip_receiver = space;
 
@@ -2617,7 +2619,8 @@ ipc_right_copyout(
 			 * getting enqueued.
 			 */
 			ip_lock(dest);
-			ipc_port_impcount_delta(dest, 0 - assertcnt, IP_NULL);
+			assert(dest->ip_impcount >= assertcnt);
+			dest->ip_impcount -= assertcnt;
 			ip_unlock(dest);
 #endif /* IMPORTANCE_INHERITANCE */
 			ip_release(dest);

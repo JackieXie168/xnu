@@ -35,7 +35,11 @@
 #ifndef	_ASM
 #include <sys/types.h>
 
+#if !defined(__APPLE__)
+#include <sys/elftypes.h>
+#else /* is Apple Mac OS X */
 #include "elftypes.h" /* In lieu of Solaris <sys/types.h> */
+#endif /* __APPLE__ */
 
 #endif
 
@@ -527,8 +531,10 @@ typedef enum {
 	RD_PREINIT,		/* the Initial rendezvous before .init */
 	RD_POSTINIT,		/* the Second rendezvous after .init */
 	RD_DLACTIVITY,		/* a dlopen or dlclose has happened */
+#if defined(__APPLE__)
 	RD_DYLD_LOST,		/* communication with target dyld was lost */
 	RD_DYLD_EXIT		/* target exited. */
+#endif
 } rd_event_e;
 
 struct r_debug {

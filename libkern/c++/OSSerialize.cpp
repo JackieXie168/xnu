@@ -36,7 +36,6 @@ __END_DECLS
 #include <libkern/c++/OSContainers.h>
 #include <libkern/c++/OSLib.h>
 #include <libkern/c++/OSDictionary.h>
-#include <libkern/OSSerializeBinary.h>
 
 #define super OSObject
 
@@ -66,17 +65,8 @@ char * OSSerialize::text() const
 
 void OSSerialize::clearText()
 {
-	if (binary)
-	{
-		length = sizeof(kOSSerializeBinarySignature);
-		bzero(&data[length], capacity - length);
-		endCollection = true;
-	}
-    else
-    {
-		bzero((void *)data, capacity);
-		length = 1;
-    }
+	bzero((void *)data, capacity);
+	length = 1;
 	tag = 0;
 	tags->flushCollection();
 }
@@ -85,8 +75,6 @@ bool OSSerialize::previouslySerialized(const OSMetaClassBase *o)
 {
 	char temp[16];
 	OSString *tagString;
-
-	if (binary) return (binarySerialize(o));
 
 	// look it up
 	tagString = (OSString *)tags->getObject((const OSSymbol *) o);
@@ -113,11 +101,6 @@ bool OSSerialize::previouslySerialized(const OSMetaClassBase *o)
 
 bool OSSerialize::addXMLStartTag(const OSMetaClassBase *o, const char *tagString)
 {
-	if (binary)
-    {
-		printf("class %s: xml serialize\n", o->getMetaClass()->getClassName());
-		return (false);
-	}
 
 	if (!addChar('<')) return false;
 	if (!addString(tagString)) return false;
@@ -141,12 +124,6 @@ bool OSSerialize::addXMLEndTag(const char *tagString)
 
 bool OSSerialize::addChar(const char c)
 {
-	if (binary)
-    {
-		printf("xml serialize\n");
-		return (false);
-	}
-
 	// add char, possibly extending our capacity
 	if (length >= capacity && length >=ensureCapacity(capacity+capacityIncrement))
 		return false;

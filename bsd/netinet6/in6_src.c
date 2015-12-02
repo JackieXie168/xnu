@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -104,7 +104,7 @@
 #include <sys/sysctl.h>
 #include <sys/kauth.h>
 #include <sys/priv.h>
-#include <kern/locks.h>
+#include <kern/lock.h>
 
 #include <net/if.h>
 #include <net/if_types.h>
@@ -220,13 +220,8 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 
 	if (inp != NULL) {
 		mopts = inp->in6p_moptions;
-		if (INP_NO_CELLULAR(inp))
+		if (inp->inp_flags & INP_NO_IFT_CELLULAR)
 			ip6oa.ip6oa_flags |= IP6OAF_NO_CELLULAR;
-		if (INP_NO_EXPENSIVE(inp))
-			ip6oa.ip6oa_flags |= IP6OAF_NO_EXPENSIVE;
-		if (INP_AWDL_UNRESTRICTED(inp))
-			ip6oa.ip6oa_flags |= IP6OAF_AWDL_UNRESTRICTED;
-
 	} else {
 		mopts = NULL;
 	}
@@ -279,7 +274,8 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		}
 		IFA_LOCK_SPIN(&ia6->ia_ifa);
 		if ((ia6->ia6_flags & (IN6_IFF_ANYCAST | IN6_IFF_NOTREADY)) ||
-		    (inp && inp_restricted_send(inp, ia6->ia_ifa.ifa_ifp))) {
+		    ((ip6oa.ip6oa_flags & IP6OAF_NO_CELLULAR) &&
+		    IFNET_IS_CELLULAR(ia6->ia_ifa.ifa_ifp))) {
 			IFA_UNLOCK(&ia6->ia_ifa);
 			IFA_REMREF(&ia6->ia_ifa);
 			*errorp = EHOSTUNREACH;
@@ -358,10 +354,10 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 
 		/* Rule 1: Prefer same address */
 		if (IN6_ARE_ADDR_EQUAL(&dst, &ia->ia_addr.sin6_addr))
-			BREAK(IP6S_SRCRULE_1); /* there should be no better candidate */
+			BREAK(1); /* there should be no better candidate */
 
 		if (ia_best == NULL)
-			REPLACE(IP6S_SRCRULE_0);
+			REPLACE(0);
 
 		/* Rule 2: Prefer appropriate scope */
 		if (dst_scope < 0)
@@ -369,12 +365,12 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		new_scope = in6_addrscope(&ia->ia_addr.sin6_addr);
 		if (IN6_ARE_SCOPE_CMP(best_scope, new_scope) < 0) {
 			if (IN6_ARE_SCOPE_CMP(best_scope, dst_scope) < 0)
-				REPLACE(IP6S_SRCRULE_2);
-			NEXTSRC(IP6S_SRCRULE_2);
+				REPLACE(2);
+			NEXTSRC(2);
 		} else if (IN6_ARE_SCOPE_CMP(new_scope, best_scope) < 0) {
 			if (IN6_ARE_SCOPE_CMP(new_scope, dst_scope) < 0)
-				NEXTSRC(IP6S_SRCRULE_2);
-			REPLACE(IP6S_SRCRULE_2);
+				NEXTSRC(2);
+			REPLACE(2);
 		}
 
 		/*
@@ -383,10 +379,10 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		 */
 		if (!IFA6_IS_DEPRECATED(ia_best, secs) &&
 		    IFA6_IS_DEPRECATED(ia, secs))
-			NEXTSRC(IP6S_SRCRULE_3);
+			NEXTSRC(3);
 		if (IFA6_IS_DEPRECATED(ia_best, secs) &&
 		    !IFA6_IS_DEPRECATED(ia, secs))
-			REPLACE(IP6S_SRCRULE_3);
+			REPLACE(3);
 
 		/*
 		 * RFC 4429 says that optimistic addresses are equivalent to
@@ -394,10 +390,10 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		 */
 		if ((ia_best->ia6_flags & IN6_IFF_OPTIMISTIC) == 0 &&
 		    (ia->ia6_flags & IN6_IFF_OPTIMISTIC) != 0)
-			NEXTSRC(IP6S_SRCRULE_3);
+			NEXTSRC(3);
 		if ((ia_best->ia6_flags & IN6_IFF_OPTIMISTIC) != 0 &&
 		    (ia->ia6_flags & IN6_IFF_OPTIMISTIC) == 0)
-			REPLACE(IP6S_SRCRULE_3);
+			REPLACE(3);
 
 		/* Rule 4: Prefer home addresses */
 		/*
@@ -407,53 +403,9 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 
 		/* Rule 5: Prefer outgoing interface */
 		if (ia_best->ia_ifp == ifp && ia->ia_ifp != ifp)
-			NEXTSRC(IP6S_SRCRULE_5);
+			NEXTSRC(5);
 		if (ia_best->ia_ifp != ifp && ia->ia_ifp == ifp)
-			REPLACE(IP6S_SRCRULE_5);
-
-		/* Rule 5.5: Prefer addresses in a prefix advertised by the next hop. */
-		if (ro != NULL && ro->ro_rt != NULL && ia_best->ia6_ndpr != NULL &&
-		    ia->ia6_ndpr != NULL) {
-			struct rtentry *rta, *rtb;
-			int op;
-
-			NDPR_LOCK(ia_best->ia6_ndpr);
-			rta = ia_best->ia6_ndpr->ndpr_rt;
-			if (rta != NULL)
-				RT_ADDREF(rta);
-			NDPR_UNLOCK(ia_best->ia6_ndpr);
-
-			NDPR_LOCK(ia->ia6_ndpr);
-			rtb = ia->ia6_ndpr->ndpr_rt;
-			if (rtb != NULL)
-				RT_ADDREF(rtb);
-			NDPR_UNLOCK(ia->ia6_ndpr);
-
-			if (rta == NULL || rtb == NULL)
-				op = 0;
-			else if (rta == ro->ro_rt && rtb != ro->ro_rt)
-				op = 1;
-			else if (rta != ro->ro_rt && rtb == ro->ro_rt)
-				op = 2;
-			else
-				op = 0;
-
-			if (rta != NULL)
-				RT_REMREF(rta);
-			if (rtb != NULL)
-				RT_REMREF(rtb);
-
-			switch (op) {
-			case 1:
-				NEXTSRC(IP6S_SRCRULE_5_5);
-				break;
-			case 2:
-				REPLACE(IP6S_SRCRULE_5_5);
-				break;
-			default:
-				break;
-			}
-		}
+			REPLACE(5);
 
 		/*
 		 * Rule 6: Prefer matching label
@@ -465,17 +417,17 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 			new_policy = in6_addrsel_lookup_policy(&ia->ia_addr);
 			if (dst_policy->label == best_policy->label &&
 			    dst_policy->label != new_policy->label)
-				NEXTSRC(IP6S_SRCRULE_6);
+				NEXTSRC(6);
 			if (dst_policy->label != best_policy->label &&
 			    dst_policy->label == new_policy->label)
-				REPLACE(IP6S_SRCRULE_6);
+				REPLACE(6);
 		}
 
 		/*
-		 * Rule 7: Prefer temporary addresses.
+		 * Rule 7: Prefer public addresses.
 		 * We allow users to reverse the logic by configuring
-		 * a sysctl variable, so that transparency conscious users can
-		 * always prefer stable addresses.
+		 * a sysctl variable, so that privacy conscious users can
+		 * always prefer temporary addresses.
 		 * Don't use temporary addresses for local destinations or
 		 * for multicast addresses unless we were passed in an option.
 		 */
@@ -494,37 +446,44 @@ in6_selectsrc(struct sockaddr_in6 *dstsock, struct ip6_pktopts *opts,
 		if (!(ia_best->ia6_flags & IN6_IFF_TEMPORARY) &&
 		    (ia->ia6_flags & IN6_IFF_TEMPORARY)) {
 			if (prefer_tempaddr)
-				REPLACE(IP6S_SRCRULE_7);
+				REPLACE(7);
 			else
-				NEXTSRC(IP6S_SRCRULE_7);
+				NEXTSRC(7);
 		}
 		if ((ia_best->ia6_flags & IN6_IFF_TEMPORARY) &&
 		    !(ia->ia6_flags & IN6_IFF_TEMPORARY)) {
 			if (prefer_tempaddr)
-				NEXTSRC(IP6S_SRCRULE_7);
+				NEXTSRC(7);
 			else
-				REPLACE(IP6S_SRCRULE_7);
+				REPLACE(7);
 		}
 
 		/*
-		 * Rule 7x: prefer addresses on alive interfaces.
+		 * Rule 8: prefer addresses on alive interfaces.
 		 * This is a KAME specific rule.
 		 */
 		if ((ia_best->ia_ifp->if_flags & IFF_UP) &&
 		    !(ia->ia_ifp->if_flags & IFF_UP))
-			NEXTSRC(IP6S_SRCRULE_7x);
+			NEXTSRC(8);
 		if (!(ia_best->ia_ifp->if_flags & IFF_UP) &&
 		    (ia->ia_ifp->if_flags & IFF_UP))
-			REPLACE(IP6S_SRCRULE_7x);
+			REPLACE(8);
 
 		/*
-		 * Rule 8: Use longest matching prefix.
+		 * Rule 14: Use longest matching prefix.
+		 * Note: in the address selection draft, this rule is
+		 * documented as "Rule 8".  However, since it is also
+		 * documented that this rule can be overridden, we assign
+		 * a large number so that it is easy to assign smaller numbers
+		 * to more preferred rules.
 		 */
 		new_matchlen = in6_matchlen(&ia->ia_addr.sin6_addr, &dst);
 		if (best_matchlen < new_matchlen)
-			REPLACE(IP6S_SRCRULE_8);
+			REPLACE(14);
 		if (new_matchlen < best_matchlen)
-			NEXTSRC(IP6S_SRCRULE_8);
+			NEXTSRC(14);
+
+		/* Rule 15 is reserved. */
 
 		/*
 		 * Last resort: just keep the current candidate.
@@ -562,8 +521,9 @@ out:
 
 	lck_rw_done(&in6_ifaddr_rwlock);
 
-	if (ia_best != NULL && inp && 
-	    inp_restricted_send(inp, ia_best->ia_ifa.ifa_ifp)) {
+	if (ia_best != NULL &&
+	    (ip6oa.ip6oa_flags & IP6OAF_NO_CELLULAR) &&
+	    IFNET_IS_CELLULAR(ia_best->ia_ifa.ifa_ifp)) {
 		IFA_REMREF(&ia_best->ia_ifa);
 		ia_best = NULL;
 		*errorp = EHOSTUNREACH;
@@ -1055,30 +1015,21 @@ validateroute:
 	}
 
 done:
-	/*
-	 * Check for interface restrictions.
-	 */
-#define	CHECK_RESTRICTIONS(_ip6oa, _ifp)			\
-	((((_ip6oa)->ip6oa_flags & IP6OAF_NO_CELLULAR) && 	\
-	    IFNET_IS_CELLULAR(_ifp)) || 			\
-	(((_ip6oa)->ip6oa_flags & IP6OAF_NO_EXPENSIVE) && 	\
-	    IFNET_IS_EXPENSIVE(_ifp)) ||			\
-	(!((_ip6oa)->ip6oa_flags & IP6OAF_AWDL_UNRESTRICTED) &&	\
-	    IFNET_IS_AWDL_RESTRICTED(_ifp))) 
-
-	if (error == 0 && ip6oa != NULL &&
-	    ((ifp && CHECK_RESTRICTIONS(ip6oa, ifp)) ||
-	    (route && route->ro_rt && 
-	    CHECK_RESTRICTIONS(ip6oa, route->ro_rt->rt_ifp)))) {
-		if (route != NULL && route->ro_rt != NULL) {
-			ROUTE_RELEASE(route);
-			route = NULL;
+	if (error == 0) {
+		if (ip6oa != NULL &&
+		    (ip6oa->ip6oa_flags & IP6OAF_NO_CELLULAR) &&
+		    ((ifp != NULL && IFNET_IS_CELLULAR(ifp)) ||
+		    (route != NULL && route->ro_rt != NULL &&
+		    IFNET_IS_CELLULAR(route->ro_rt->rt_ifp)))) {
+			if (route != NULL && route->ro_rt != NULL) {
+				ROUTE_RELEASE(route);
+				route = NULL;
+			}
+			ifp = NULL;	/* ditch ifp; keep ifp0 */
+			error = EHOSTUNREACH;
+			ip6oa->ip6oa_retflags |= IP6OARF_IFDENIED;
 		}
-		ifp = NULL;	/* ditch ifp; keep ifp0 */
-		error = EHOSTUNREACH;
-		ip6oa->ip6oa_retflags |= IP6OARF_IFDENIED;
 	}
-#undef CHECK_RESTRICTIONS
 
 	/*
 	 * If the interface is disabled for IPv6, then ENETDOWN error.
@@ -1276,26 +1227,13 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 			lck_rw_lock_exclusive(pcbinfo->ipi_lock);
 			socket_lock(inp->inp_socket, 0);
 		}
-
-		/*
-		 * Check if a local port was assigned to the inp while
-		 * this thread was waiting for the pcbinfo lock
-		 */
-		if (inp->inp_lport != 0) {
-			VERIFY(inp->inp_flags2 & INP2_INHASHLIST);
-			lck_rw_done(pcbinfo->ipi_lock);
-
-			/*
-			 * It is not an error if another thread allocated
-			 * a port
-			 */
-			return (0);
-		}
 	}
 
 	/* XXX: this is redundant when called from in6_pcbbind */
 	if ((so->so_options & (SO_REUSEADDR|SO_REUSEPORT)) == 0)
 		wild = INPLOOKUP_WILDCARD;
+
+	inp->inp_flags |= INP_ANONPORT;
 
 	if (inp->inp_flags & INP_HIGHPORT) {
 		first = ipport_hifirstauto;	/* sysctl */
@@ -1374,14 +1312,10 @@ in6_pcbsetport(struct in6_addr *laddr, struct inpcb *inp, struct proc *p,
 	}
 
 	inp->inp_lport = lport;
-	inp->inp_flags |= INP_ANONPORT;
-
 	if (in_pcbinshash(inp, 1) != 0) {
 		inp->in6p_laddr = in6addr_any;
-		inp->in6p_last_outifp = NULL;
-
 		inp->inp_lport = 0;
-		inp->inp_flags &= ~INP_ANONPORT;
+		inp->in6p_last_outifp = NULL;
 		if (!locked)
 			lck_rw_done(pcbinfo->ipi_lock);
 		return (EAGAIN);
@@ -1417,10 +1351,11 @@ void
 addrsel_policy_init(void)
 {
 	/*
-	 * Default address selection policy based on RFC 6724.
+	 * Default address selection policy based on RFC 3484 and
+	 * draft-arifumi-6man-rfc3484-revise-03.
 	 */
 	static const struct in6_addrpolicy defaddrsel[] = {
-		/* Loopback -- prefix=::1/128, precedence=50, label=0 */
+		/* localhost */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1432,11 +1367,27 @@ addrsel_policy_init(void)
 				.sin6_addr   = IN6MASK128,
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
-			.preced   = 50,
+			.preced   = 60,
 			.label    = 0
 		},
 
-		/* Unspecified -- prefix=::/0, precedence=40, label=1 */
+		/* ULA */
+		{
+			.addr = {
+				.sin6_family = AF_INET6,
+				.sin6_addr   = {{{ 0xfc }}},
+				.sin6_len    = sizeof (struct sockaddr_in6)
+			},
+			.addrmask = {
+				.sin6_family = AF_INET6,
+				.sin6_addr   = IN6MASK7,
+				.sin6_len    = sizeof (struct sockaddr_in6)
+			},
+			.preced   = 50,
+			.label    = 1
+		},
+
+		/* any IPv6 src */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1449,10 +1400,9 @@ addrsel_policy_init(void)
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
 			.preced   = 40,
-			.label    = 1
-		},
+			.label    = 2 },
 
-		/* IPv4 Mapped -- prefix=::ffff:0:0/96, precedence=35, label=4 */
+		/* any IPv4 src */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1464,11 +1414,11 @@ addrsel_policy_init(void)
 				.sin6_addr   = IN6MASK96,
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
-			.preced   = 35,
-			.label    = 4
+			.preced   = 30,
+			.label    = 3
 		},
 
-		/* 6to4 -- prefix=2002::/16, precedence=30, label=2 */
+		/* 6to4 */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1480,11 +1430,11 @@ addrsel_policy_init(void)
 				.sin6_addr   = IN6MASK16,
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
-			.preced   = 30,
-			.label    = 2
+			.preced   = 20,
+			.label    = 4
 		},
 
-		/* Teredo -- prefix=2001::/32, precedence=5, label=5 */
+		/* Teredo */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1496,27 +1446,11 @@ addrsel_policy_init(void)
 				.sin6_addr   = IN6MASK32,
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
-			.preced   = 5,
+			.preced   = 10,
 			.label    = 5
 		},
 
-		/* Unique Local (ULA) -- prefix=fc00::/7, precedence=3, label=13 */
-		{
-			.addr = {
-				.sin6_family = AF_INET6,
-				.sin6_addr   = {{{ 0xfc }}},
-				.sin6_len    = sizeof (struct sockaddr_in6)
-			},
-			.addrmask = {
-				.sin6_family = AF_INET6,
-				.sin6_addr   = IN6MASK7,
-				.sin6_len    = sizeof (struct sockaddr_in6)
-			},
-			.preced   = 3,
-			.label    = 13
-		},
-
-		/* IPv4 Compatible -- prefix=::/96, precedence=1, label=3 */
+		/* v4 compat addresses */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1529,10 +1463,10 @@ addrsel_policy_init(void)
 				.sin6_len    = sizeof (struct sockaddr_in6)
 			},
 			.preced   = 1,
-			.label    = 3
+			.label    = 10
 		},
 
-		/* Site-local (deprecated) -- prefix=fec0::/10, precedence=1, label=11 */
+		/* site-local (deprecated) */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1548,7 +1482,7 @@ addrsel_policy_init(void)
 			.label    = 11
 		},
 
-		/* 6bone (deprecated) -- prefix=3ffe::/16, precedence=1, label=12 */
+		/* 6bone (deprecated) */
 		{
 			.addr = {
 				.sin6_family = AF_INET6,
@@ -1834,7 +1768,7 @@ in6_embedscope(struct in6_addr *in6, const struct sockaddr_in6 *sin6,
 		scopeid = scope6_addr2default(in6);
 #endif
 
-	if (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
+	if (IN6_IS_SCOPE_LINKLOCAL(in6)) {
 		struct in6_pktinfo *pi;
 		struct ifnet *im6o_multicast_ifp = NULL;
 
@@ -1919,7 +1853,7 @@ in6_recoverscope(
 	 */
 
 	sin6->sin6_scope_id = 0;
-	if (IN6_IS_SCOPE_LINKLOCAL(in6) || IN6_IS_ADDR_MC_INTFACELOCAL(in6)) {
+	if (IN6_IS_SCOPE_LINKLOCAL(in6)) {
 		/*
 		 * KAME assumption: link id == interface id
 		 */

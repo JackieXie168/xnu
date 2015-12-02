@@ -45,6 +45,7 @@
 #ifdef MACH_KERNEL_PRIVATE
 
 #include <kern/queue.h>
+#include <kern/lock.h>
 #include <kern/wait_queue.h>
 
 typedef struct semaphore {

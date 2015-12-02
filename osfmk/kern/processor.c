@@ -158,12 +158,9 @@ processor_init(
 	processor->current_thmode = TH_MODE_NONE;
 	processor->cpu_id = cpu_id;
 	timer_call_setup(&processor->quantum_timer, thread_quantum_expire, processor);
-	processor->quantum_end = UINT64_MAX;
 	processor->deadline = UINT64_MAX;
 	processor->timeslice = 0;
-	processor->processor_primary = processor; /* no SMT relationship known at this point */
-	processor->processor_secondary = NULL;
-	processor->is_SMT = FALSE;
+	processor->processor_meta = PROCESSOR_META_NULL;
 	processor->processor_self = IP_NULL;
 	processor_data_init(processor);
 	processor->processor_list = NULL;
@@ -190,26 +187,21 @@ processor_init(
 }
 
 void
-processor_set_primary(
+processor_meta_init(
 	processor_t		processor,
 	processor_t		primary)
 {
-	assert(processor->processor_primary == primary || processor->processor_primary == processor);
-	/* Re-adjust primary point for this (possibly) secondary processor */
-	processor->processor_primary = primary;
+	processor_meta_t	pmeta = primary->processor_meta;
 
-	assert(primary->processor_secondary == NULL || primary->processor_secondary == processor);
-	if (primary != processor) {
-		/* Link primary to secondary, assumes a 2-way SMT model
-		 * We'll need to move to a queue if any future architecture
-		 * requires otherwise.
-		 */
-		assert(processor->processor_secondary == NULL);
-		primary->processor_secondary = processor;
-		/* Mark both processors as SMT siblings */
-		primary->is_SMT = TRUE;
-		processor->is_SMT = TRUE;
+	if (pmeta == PROCESSOR_META_NULL) {
+		pmeta = kalloc(sizeof (*pmeta));
+
+		queue_init(&pmeta->idle_queue);
+
+		pmeta->primary = primary;
 	}
+
+	processor->processor_meta = pmeta;
 }
 
 processor_set_t
@@ -229,12 +221,6 @@ processor_set_t
 pset_create(
 	pset_node_t			node)
 {
-#if defined(CONFIG_SCHED_MULTIQ)
-	/* multiq scheduler is not currently compatible with multiple psets */
-	if (sched_groups_enabled)
-		return processor_pset(master_processor);
-#endif /* defined(CONFIG_SCHED_MULTIQ) */
-
 	processor_set_t		*prev, pset = kalloc(sizeof (*pset));
 
 	if (pset != PROCESSOR_SET_NULL) {
@@ -269,8 +255,9 @@ pset_init(
 
 	queue_init(&pset->active_queue);
 	queue_init(&pset->idle_queue);
-	queue_init(&pset->idle_secondary_queue);
 	pset->online_processor_count = 0;
+	pset_pri_init_hint(pset, PROCESSOR_NULL);
+	pset_count_init_hint(pset, PROCESSOR_NULL);
 	pset->cpu_set_low = pset->cpu_set_hi = 0;
 	pset->cpu_set_count = 0;
 	pset->pending_AST_cpu_mask = 0;

@@ -71,7 +71,6 @@
 class OSNumber : public OSObject
 {
     OSDeclareDefaultStructors(OSNumber)
-    friend class OSSerialize;
 
 protected:
     unsigned long long value;

@@ -494,6 +494,7 @@ OSMetaClass::~OSMetaClass()
 /*********************************************************************
 * Empty overrides.
 *********************************************************************/
+void * OSMetaClass::operator new(__unused size_t size) { return 0; }
 void OSMetaClass::retain() const { }
 void OSMetaClass::release() const { }
 void OSMetaClass::release(__unused int when) const { }

@@ -29,6 +29,7 @@
  * @OSF_COPYRIGHT@
  */
 
+#include <platforms.h>
 
 #include <mach/mach_types.h>
 
@@ -94,13 +95,6 @@ rtc_lapic_set_timer(uint64_t deadline, uint64_t now)
 	} else {
 		lapic_set_timer(FALSE, one_shot, divide_by_1, 0);
 	}
-
-	KERNEL_DEBUG_CONSTANT(
-		DECR_SET_APIC_DEADLINE | DBG_FUNC_NONE,
-		now, deadline,
-		set, LAPIC_READ(TIMER_CURRENT_COUNT),
-		0);
-
 	return set;
 }
 

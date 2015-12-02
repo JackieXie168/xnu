@@ -54,6 +54,9 @@ typedef struct fbt_probe {
 	char			fbtp_name[MAX_FBTP_NAME_CHARS];
 	struct modctl	*fbtp_ctl;
 	int		fbtp_loadcnt;
+#if !defined(__APPLE__)
+	int		fbtp_symndx;
+#endif
 	struct fbt_probe *fbtp_next;
 } fbt_probe_t;
 

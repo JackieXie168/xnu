@@ -1473,7 +1473,10 @@ semexit(struct proc *p)
 		/* Maybe we should build a list of semakptr's to wake
 		 * up, finish all access to data structures, release the
 		 * subsystem lock, and wake all the processes.  Something
-		 * to think about.
+		 * to think about.  It wouldn't buy us anything unless
+		 * wakeup had the potential to block, or the syscall
+		 * funnel state was changed to allow multiple threads
+		 * in the BSD code at once.
 		 */
 #ifdef SEM_WAKEUP
 			sem_wakeup((caddr_t)semakptr);

@@ -85,6 +85,10 @@
 #include <netinet/ip6.h>
 #endif
 
+#if MROUTING
+#include <netinet/ip_mroute.h>
+#endif /* MROUTING */
+
 #include <net/if_gif.h>
 
 #include <net/net_osdep.h>

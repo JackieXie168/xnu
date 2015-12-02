@@ -151,6 +151,12 @@ struct tcphdr tcp_savetcp;
 
 tcp_cc	tcp_ccgen;
 
+#if IPSEC
+extern int ipsec_bypass;
+#endif
+
+extern int32_t total_sbmb_cnt;
+
 struct	tcpstat tcpstat;
 
 static int log_in_vain = 0;
@@ -184,6 +190,16 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, drop_synfin, CTLFLAG_RW | CTLFLAG_LOCKED,
 
 SYSCTL_NODE(_net_inet_tcp, OID_AUTO, reass, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
     "TCP Segment Reassembly Queue");
+
+__private_extern__ int tcp_reass_maxseg = 0;
+SYSCTL_INT(_net_inet_tcp_reass, OID_AUTO, maxsegments, CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tcp_reass_maxseg, 0,
+    "Global maximum number of TCP Segments in Reassembly Queue");
+
+__private_extern__ int tcp_reass_qsize = 0;
+SYSCTL_INT(_net_inet_tcp_reass, OID_AUTO, cursegments, CTLFLAG_RD | CTLFLAG_LOCKED,
+    &tcp_reass_qsize, 0,
+    "Global number of TCP Segments currently in Reassembly Queue");
 
 static int tcp_reass_overflows = 0;
 SYSCTL_INT(_net_inet_tcp_reass, OID_AUTO, overflows, CTLFLAG_RD | CTLFLAG_LOCKED,
@@ -263,6 +279,19 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, obey_ifef_nowindowscale, CTLFLAG_RW | CTLFLA
 	&tcp_obey_ifef_nowindowscale, 0, "");
 #endif
 
+/* This limit will determine when the receive socket buffer tuning will
+ * kick in. Currently it will start when the bw*delay measured in 
+ * last RTT is more than half of the current hiwat on the buffer.
+ */
+uint32_t tcp_rbuf_hiwat_shift = 1;
+
+/* This limit will determine when the socket buffer will be increased
+ * to accommodate an application reading slowly. When the amount of 
+ * space left in the buffer is less than one forth of the bw*delay
+ * measured in last RTT.
+ */
+uint32_t tcp_rbuf_win_shift = 2;
+
 extern int tcp_TCPTV_MIN;
 extern int tcp_acc_iaj_high;
 extern int tcp_acc_iaj_react_limit;
@@ -290,8 +319,7 @@ static inline int tcp_stretch_ack_enable(struct tcpcb *tp);
 static inline void tcp_adaptive_rwtimo_check(struct tcpcb *, int);
 
 #if TRAFFIC_MGT
-static inline void update_iaj_state(struct tcpcb *tp, uint32_t tlen,
-	int reset_size);
+static inline void update_iaj_state(struct tcpcb *tp, uint32_t tlen, int reset_size);
 void compute_iaj(struct tcpcb *tp, int nlropkts, int lro_delay_factor);
 static void compute_iaj_meat(struct tcpcb *tp, uint32_t cur_iaj);
 #endif /* TRAFFIC_MGT */
@@ -309,11 +337,10 @@ static inline void tcp_sbrcv_tstmp_check(struct tcpcb *tp);
 static inline void tcp_sbrcv_reserve(struct tcpcb *tp, struct sockbuf *sb,
 	u_int32_t newsize, u_int32_t idealsize);
 static void tcp_bad_rexmt_restore_state(struct tcpcb *tp, struct tcphdr *th);
+static int tcp_detect_bad_rexmt(struct tcpcb *tp, struct tcpopt *to);
 static void tcp_compute_rtt(struct tcpcb *tp, struct tcpopt *to, 
 	struct tcphdr *th);
-static void tcp_early_rexmt_check(struct tcpcb *tp, struct tcphdr *th);
-static void tcp_bad_rexmt_check(struct tcpcb *tp, struct tcphdr *th,
-	struct tcpopt *to);
+
 /*
  * Constants used for resizing receive socket buffer 
  * when timestamps are not supported 
@@ -327,6 +354,9 @@ static void tcp_bad_rexmt_check(struct tcpcb *tp, struct tcphdr *th,
  */
 #define TCP_EARLY_REXMT_WIN (60 * TCP_RETRANSHZ) /* 60 seconds */
 #define TCP_EARLY_REXMT_LIMIT 10
+
+extern void	add_to_time_wait(struct tcpcb *, uint32_t delay);
+extern void postevent(struct socket *, struct sockbuf *, int);
 
 extern  void    ipfwsyslog( int level, const char *format,...);
 extern int fw_verbose;
@@ -359,6 +389,7 @@ static int tcp_dropdropablreq(struct socket *head);
 static void tcp_newreno_partial_ack(struct tcpcb *tp, struct tcphdr *th);
 
 static void update_base_rtt(struct tcpcb *tp, uint32_t rtt);
+uint32_t get_base_rtt(struct tcpcb *tp);
 void tcp_set_background_cc(struct socket *so);
 void tcp_set_foreground_cc(struct socket *so);
 static void tcp_set_new_cc(struct socket *so, uint16_t cc_index);
@@ -566,10 +597,8 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	int dowakeup = 0;
 	struct mbuf *oodata = NULL;
 	int copy_oodata = 0;
-	u_int16_t qlimit;
 	boolean_t cell = IFNET_IS_CELLULAR(ifp);
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
-	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 
 	/*
 	 * Call with th==0 after become established to
@@ -578,12 +607,21 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	if (th == NULL)
 		goto present;
 	
-	/*
-	 * If the reassembly queue already has entries or if we are going 
-	 * to add a new one, then the connection has reached a loss state. 
+	/* If the reassembly queue already has entries or if we are going to add 
+	 * a new one, then the connection has reached a loss state. 
 	 * Reset the stretch-ack algorithm at this point.
 	 */
-	tcp_reset_stretch_ack(tp);
+	if ((tp->t_flags & TF_STRETCHACK) != 0)
+		tcp_reset_stretch_ack(tp);
+
+	/* When the connection reaches a loss state, we need to send more acks
+	 * for a period of time so that the sender's congestion window will
+	 * open. Wait until we see some packets on the connection before 
+	 * stretching acks again.
+	 */
+	tp->t_flagsext |= TF_RCVUNACK_WAITSS;
+	tp->rcv_waitforss = 0;
+
 
 #if TRAFFIC_MGT
 	if (tp->acc_iaj > 0)
@@ -597,10 +635,8 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	 * queue.  Always keep one global queue entry spare to be able to
 	 * process the missing segment.
 	 */
-	qlimit = min(max(100, so->so_rcv.sb_hiwat >> 10),
-	    tcp_autorcvbuf_max >> 10); 
 	if (th->th_seq != tp->rcv_nxt &&
-	    (tp->t_reassqlen + 1) >= qlimit) {
+	    tcp_reass_qsize + 1 >= tcp_reass_maxseg) {
 		tcp_reass_overflows++;
 		tcpstat.tcps_rcvmemdrop++;
 		m_freem(m);
@@ -609,13 +645,13 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	}
 
 	/* Allocate a new queue entry. If we can't, just drop the pkt. XXX */
-	te = (struct tseg_qent *) zalloc(tcp_reass_zone);
+	te = (struct tseg_qent *) zalloc_noblock(tcp_reass_zone);
 	if (te == NULL) {
 		tcpstat.tcps_rcvmemdrop++;
 		m_freem(m);
 		return (0);
 	}
-	tp->t_reassqlen++;
+	tcp_reass_qsize++;
 
 	/*
 	 * Find a segment which begins after this one does.
@@ -640,19 +676,15 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 				tcpstat.tcps_rcvduppack++;
 				tcpstat.tcps_rcvdupbyte += *tlenp;
 				if (nstat_collect) {
-					nstat_route_rx(inp->inp_route.ro_rt,
-					    1, *tlenp,
-					    NSTAT_RX_FLAG_DUPLICATE);
-					INP_ADD_STAT(inp, cell, wifi, wired,
-					    rxpackets, 1);
-					INP_ADD_STAT(inp, cell, wifi, wired,
-					    rxbytes, *tlenp);
+					nstat_route_rx(inp->inp_route.ro_rt, 1, *tlenp, NSTAT_RX_FLAG_DUPLICATE);
+					INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
+					INP_ADD_STAT(inp, cell, wifi, rxbytes, *tlenp);
 					tp->t_stat.rxduplicatebytes += *tlenp;
 				}
 				m_freem(m);
 				zfree(tcp_reass_zone, te);
 				te = NULL;
-				tp->t_reassqlen--;
+				tcp_reass_qsize--;
 				/*
 				 * Try to present any queued data
 				 * at the left window edge to the user.
@@ -669,10 +701,9 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 	tcpstat.tcps_rcvoopack++;
 	tcpstat.tcps_rcvoobyte += *tlenp;
 	if (nstat_collect) {
-		nstat_route_rx(inp->inp_route.ro_rt, 1, *tlenp,
-		    NSTAT_RX_FLAG_OUT_OF_ORDER);
-		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, *tlenp);
+		nstat_route_rx(inp->inp_route.ro_rt, 1, *tlenp, NSTAT_RX_FLAG_OUT_OF_ORDER);
+		INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
+		INP_ADD_STAT(inp, cell, wifi, rxbytes, *tlenp);
 		tp->t_stat.rxoutoforderbytes += *tlenp;
 	}
 
@@ -695,7 +726,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, int *tlenp, struct mbuf *m,
 		LIST_REMOVE(q, tqe_q);
 		m_freem(q->tqe_m);
 		zfree(tcp_reass_zone, q);
-		tp->t_reassqlen--;
+		tcp_reass_qsize--;
 		q = nq;
 	}
 
@@ -743,11 +774,7 @@ present:
 			goto msg_unordered_delivery;
 
 		return (0);
-	}
-
-	/* lost packet was recovered, so ooo data can be returned */
-	tcpstat.tcps_recovered_pkts++;
-
+	}	
 	do {
 		tp->rcv_nxt += q->tqe_len;
 		flags = q->tqe_th->th_flags & TH_FIN;
@@ -780,7 +807,7 @@ present:
 			}
 		}
 		zfree(tcp_reass_zone, q);
-		tp->t_reassqlen--;
+		tcp_reass_qsize--;
 		q = nq;
 	} while (q && q->tqe_th->th_seq == tp->rcv_nxt);
 
@@ -844,8 +871,8 @@ tcp_reduce_congestion_window(
 	ENTER_FASTRECOVERY(tp);
 	tp->snd_recover = tp->snd_max;
 	tp->t_timer[TCPT_REXMT] = 0;
-	tp->t_timer[TCPT_PTO] = 0;
 	tp->t_rtttime = 0;
+	tp->ecn_flags |= TE_SENDCWR;
 	tp->snd_cwnd = tp->snd_ssthresh +
 		 tp->t_maxseg * tcprexmtthresh;
 }
@@ -940,8 +967,6 @@ tcp_cansbgrow(struct sockbuf *sb)
 	if ((total_sbmb_cnt < mblim) &&
 		(sb->sb_hiwat < sbspacelim)) {
 		return(1);
-	} else {
-		OSIncrementAtomic64(&sbmb_limreached);
 	}
 	return(0);
 }
@@ -987,13 +1012,12 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 	/*
 	 * Do not grow the receive socket buffer if
 	 * - auto resizing is disabled, globally or on this socket
-	 * - the high water mark already reached the maximum
+	 * - the high water mark has already reached the maximum
 	 * - the stream is in background and receive side is being 
 	 * throttled
 	 * - if there are segments in reassembly queue indicating loss,
 	 * do not need to increase recv window during recovery as more 
-	 * data is not going to be sent. A duplicate ack sent during
-	 * recovery should not change the receive window
+	 * data is not going to be sent.
 	 */
 	if (tcp_do_autorcvbuf == 0 ||
 		(sbrcv->sb_flags & SB_AUTOSIZE) == 0 ||
@@ -1018,8 +1042,8 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 		 * Timestamp option is not supported on this connection.
 		 * If the connection reached a state to indicate that
 		 * the receive socket buffer needs to grow, increase
-		 * the high water mark.
-		 */
+		 * the high water mark. 
+		 */ 
 		if (TSTMP_GEQ(tcp_now, 
 			tp->rfbuf_ts + TCPTV_RCVNOTS_QUANTUM)) {
 			if (tp->rfbuf_cnt >= TCP_RCVNOTS_BYTELEVEL) {
@@ -1030,46 +1054,38 @@ tcp_sbrcv_grow(struct tcpcb *tp, struct sockbuf *sbrcv,
 		} else {
 			tp->rfbuf_cnt += pktlen;
 			return;
-		}
+		}	
 	} else if (to->to_tsecr != 0) {
-		/*
-		 * If the timestamp shows that one RTT has
+		/* If the timestamp shows that one RTT has
 		 * completed, we can stop counting the
 		 * bytes. Here we consider increasing
-		 * the socket buffer if the bandwidth measured in
-		 * last rtt, is more than half of sb_hiwat, this will
-		 * help to scale the buffer according to the bandwidth
-		 * on the link.
+		 * the socket buffer if it fits the following 
+		 * criteria: 
+		 * 1. the bandwidth measured in last rtt, is more 
+		 * than half of sb_hiwat, this will help to scale the
+		 * buffer according to the bandwidth on the link.
+		 * 2. the space left in sbrcv is less than 
+		 * one forth of the bandwidth measured in last rtt, this
+		 * will help to accommodate an application reading slowly.
 		 */
 		if (TSTMP_GEQ(to->to_tsecr, tp->rfbuf_ts)) {
-			if (tp->rfbuf_cnt > (sbrcv->sb_hiwat -
-				(sbrcv->sb_hiwat >> 1))) {
-				int32_t rcvbuf_inc, min_incr;
+			if ((tp->rfbuf_cnt > (sbrcv->sb_hiwat -
+				(sbrcv->sb_hiwat >> tcp_rbuf_hiwat_shift)) ||
+				(sbrcv->sb_hiwat - sbrcv->sb_cc) <
+				(tp->rfbuf_cnt >> tcp_rbuf_win_shift))) {
+				u_int32_t rcvbuf_inc; 
 				/*
-				 * Increment the receive window by a
-				 * multiple of maximum sized segments.
-				 * This will prevent a connection from 
-				 * sending smaller segments on wire if it
-				 * is limited by the receive window.
+				 * Increment the receive window by a multiple of
+				 * maximum sized segments. This will prevent a 
+				 * connection from sending smaller segments on 
+				 * wire if it is limited by the receive window.
 				 *
-				 * Set the ideal size based on current
-				 * bandwidth measurements. We set the 
-				 * ideal size on receive socket buffer to
-				 * be twice the bandwidth delay product.
+				 * Set the ideal size based on current bandwidth 
+				 * measurements. We set the ideal size on receive 
+				 * socket buffer to be twice the bandwidth delay 
+				 * product.
 				 */
-				rcvbuf_inc = (tp->rfbuf_cnt << 1)
-				    - sbrcv->sb_hiwat;
-
-				/*
-				 * Make the increment equal to 8 segments
-				 * at least
-				 */
-				min_incr = tp->t_maxseg << tcp_autorcvbuf_inc_shift;
-				if (rcvbuf_inc < min_incr)
-				    rcvbuf_inc = min_incr;
-
-				rcvbuf_inc = 
-				    (rcvbuf_inc / tp->t_maxseg) * tp->t_maxseg;
+				rcvbuf_inc = tp->t_maxseg << tcp_autorcvbuf_inc_shift;
 				tcp_sbrcv_reserve(tp, sbrcv,
 					sbrcv->sb_hiwat + rcvbuf_inc, 
 					(tp->rfbuf_cnt * 2));
@@ -1193,7 +1209,7 @@ tcp_sbrcv_tstmp_check(struct tcpcb *tp) {
 static inline int
 tcp_stretch_ack_enable(struct tcpcb *tp)
 {
- 	if (!(tp->t_flagsext & (TF_NOSTRETCHACK|TF_DISABLE_STRETCHACK)) &&
+ 	if (!(tp->t_flagsext & TF_NOSTRETCHACK) &&
 		tp->rcv_by_unackwin >= (maxseg_unacked * tp->t_maxseg) &&
 		TSTMP_GT(tp->rcv_unackwin + tcp_maxrcvidle, tcp_now) &&
 		(!(tp->t_flagsext & TF_RCVUNACK_WAITSS) ||
@@ -1204,8 +1220,7 @@ tcp_stretch_ack_enable(struct tcpcb *tp)
 	return(0);
 }
 
-/*
- * Reset the state related to stretch-ack algorithm. This will make
+/* Reset the state related to stretch-ack algorithm. This will make
  * the receiver generate an ack every other packet. The receiver
  * will start re-evaluating the rate at which packets come to decide 
  * if it can benefit by lowering the ack traffic.
@@ -1216,15 +1231,6 @@ tcp_reset_stretch_ack(struct tcpcb *tp)
 	tp->t_flags &= ~(TF_STRETCHACK);
 	tp->rcv_by_unackwin = 0;
 	tp->rcv_unackwin = tcp_now + tcp_rcvunackwin;
-
-	/*
-	 * When there is packet loss or packet re-ordering or CWR due to
-	 * ECN, the sender's congestion window is reduced. In these states,
-	 * generate an ack for every other packet for some time to allow
-	 * the sender's congestion window to grow. 
-	 */
-	tp->t_flagsext |= TF_RCVUNACK_WAITSS;
-	tp->rcv_waitforss = 0;
 }
 
 /*
@@ -1239,30 +1245,21 @@ tcp_reset_stretch_ack(struct tcpcb *tp)
  * This function will return 1 if it is a spurious retransmit, 
  * 0 otherwise. 
  */
-int
-tcp_detect_bad_rexmt(struct tcpcb *tp, struct tcphdr *th, 
-	struct tcpopt *to, u_int32_t rxtime)
+static int
+tcp_detect_bad_rexmt(struct tcpcb *tp, struct tcpopt *to)
 {
 	int32_t tdiff, bad_rexmt_win;
+	tdiff = (int32_t)(tcp_now - tp->t_rxtstart);
 	bad_rexmt_win = (tp->t_srtt >> (TCP_RTT_SHIFT + 1));
 
-	/* If the ack has ECN CE bit, then cwnd has to be adjusted */
-	if ((tp->ecn_flags & (TE_ECN_ON)) == (TE_ECN_ON)
-	    && (th->th_flags & TH_ECE))
-		return (0);
-	if (TSTMP_SUPPORTED(tp)) {
-		if (rxtime > 0 && (to->to_flags & TOF_TS)
-		    && to->to_tsecr != 0 
-		    && TSTMP_LT(to->to_tsecr, rxtime))
-		    return (1);
-	} else {
-		if ((tp->t_rxtshift == 1 
-		    || (tp->t_flagsext & TF_SENT_TLPROBE))
-		    && rxtime > 0) {
-			tdiff = (int32_t)(tcp_now - rxtime);
-			if (tdiff < bad_rexmt_win)
-				return(1);
-		}
+	if (TSTMP_SUPPORTED(tp) && tp->t_rxtstart > 0 &&
+		(to->to_flags & TOF_TS) != 0 && 
+		to->to_tsecr != 0 && 
+		TSTMP_LT(to->to_tsecr, tp->t_rxtstart)) {
+		return (1);
+	} else if (tp->t_rxtshift == 1 && 
+		tdiff < bad_rexmt_win) {
+		return(1);
 	}
 	return(0);
 }
@@ -1298,7 +1295,6 @@ tcp_bad_rexmt_restore_state(struct tcpcb *tp, struct tcphdr *th)
 		if (tp->t_flags & TF_WASFRECOVERY)
 			ENTER_FASTRECOVERY(tp);
 	}
-	tp->snd_cwnd = max(tp->snd_cwnd, TCP_CC_CWND_INIT_BYTES);
 	tp->snd_recover = tp->snd_recover_prev;
 	tp->snd_nxt = tp->snd_max;
 	tp->t_rxtshift = 0;
@@ -1317,169 +1313,6 @@ tcp_bad_rexmt_restore_state(struct tcpcb *tp, struct tcphdr *th)
 	tp->t_flagsext |= TF_RECOMPUTE_RTT;
 	tp->t_badrexmt_time = tcp_now;
 	tp->t_rtttime = 0;
-}
-
-/*
- * If the previous packet was sent in retransmission timer, and it was
- * not needed, then restore the congestion window to the state before that
- * transmission.
- *
- * If the last packet was sent in tail loss probe timeout, check if that
- * recovered the last packet. If so, that will indicate a real loss and
- * the congestion window needs to be lowered.
- */
-static void
-tcp_bad_rexmt_check(struct tcpcb *tp, struct tcphdr *th, struct tcpopt *to)
-{
-	if (tp->t_rxtshift > 0 &&
-	    tcp_detect_bad_rexmt(tp, th, to, tp->t_rxtstart)) {
-		++tcpstat.tcps_sndrexmitbad;
-		tcp_bad_rexmt_restore_state(tp, th);
-		tcp_ccdbg_trace(tp, th, TCP_CC_BAD_REXMT_RECOVERY);
-	} else if ((tp->t_flagsext & TF_SENT_TLPROBE)
-	    && tp->t_tlphighrxt > 0
-	    && SEQ_GEQ(th->th_ack, tp->t_tlphighrxt)
-	    && !tcp_detect_bad_rexmt(tp, th, to, tp->t_tlpstart)) {
-		/*
-		 * The tail loss probe recovered the last packet and 
-		 * we need to adjust the congestion window to take
-		 * this loss into account.
-		 */
-		++tcpstat.tcps_tlp_recoverlastpkt;
-		if (!IN_FASTRECOVERY(tp)) {
-			tcp_reduce_congestion_window(tp);
-			EXIT_FASTRECOVERY(tp);
-		}
-		tcp_ccdbg_trace(tp, th, TCP_CC_TLP_RECOVER_LASTPACKET);
-	}
-
-	tp->t_flagsext &= ~(TF_SENT_TLPROBE);
-	tp->t_tlphighrxt = 0;
-	tp->t_tlpstart = 0;
-
-	/*
-	 * check if the latest ack was for a segment sent during PMTU
-	 * blackhole detection. If the timestamp on the ack is before
-	 * PMTU blackhole detection, then revert the size of the max
-	 * segment to previous size.
-	 */
-	if (tp->t_rxtshift > 0 && (tp->t_flags & TF_BLACKHOLE) &&
-	    tp->t_pmtud_start_ts > 0 && TSTMP_SUPPORTED(tp)) {
-		if ((to->to_flags & TOF_TS) && to->to_tsecr != 0 
-		    && TSTMP_LT(to->to_tsecr, tp->t_pmtud_start_ts)) {
-			tcp_pmtud_revert_segment_size(tp);
-		}
-	}
-	if (tp->t_pmtud_start_ts > 0)
-		tp->t_pmtud_start_ts = 0;
-}
-
-/*
- * Check if early retransmit can be attempted according to RFC 5827.
- *
- * If packet reordering is detected on a connection, fast recovery will
- * be delayed until it is clear that the packet was lost and not reordered.
- * But reordering detection is done only when SACK is enabled.
- *
- * On connections that do not support SACK, there is a limit on the number
- * of early retransmits that can be done per minute. This limit is needed
- * to make sure that too many packets are not retransmitted when there is
- * packet reordering.
- */
-static void
-tcp_early_rexmt_check (struct tcpcb *tp, struct tcphdr *th)
-{
-	u_int32_t obytes, snd_off;
-	int32_t snd_len;
-	struct socket *so = tp->t_inpcb->inp_socket;
-
-	if (early_rexmt && (SACK_ENABLED(tp) ||
-	    tp->t_early_rexmt_count < TCP_EARLY_REXMT_LIMIT) &&
-	    SEQ_GT(tp->snd_max, tp->snd_una) &&
-	    (tp->t_dupacks == 1 || 
-	    (SACK_ENABLED(tp) && 
-	    !TAILQ_EMPTY(&tp->snd_holes)))) {
-		/*
-		 * If there are only a few outstanding 
-		 * segments on the connection, we might need
-		 * to lower the retransmit threshold. This
-		 * will allow us to do Early Retransmit as 
-		 * described in RFC 5827.
-		 */
-		if (SACK_ENABLED(tp) && 
-		    !TAILQ_EMPTY(&tp->snd_holes)) {
-			obytes = (tp->snd_max - tp->snd_fack) +
-				tp->sackhint.sack_bytes_rexmit;
-		} else {
-			obytes = (tp->snd_max - tp->snd_una);	
-		}
-
-		/*
-		 * In order to lower retransmit threshold the 
-		 * following two conditions must be met.
-		 * 1. the amount of outstanding data is less 
-		 * than 4*SMSS bytes
-		 * 2. there is no unsent data ready for 
-		 * transmission or the advertised window 
-		 * will limit sending new segments.
-		 */
-		snd_off = tp->snd_max - tp->snd_una;
-		snd_len = min(so->so_snd.sb_cc, tp->snd_wnd) - snd_off;
-		if (obytes < (tp->t_maxseg << 2) && 
-		    snd_len <= 0) {
-			u_int32_t osegs;
-
-			osegs = obytes / tp->t_maxseg;
-			if ((osegs * tp->t_maxseg) < obytes)
-				osegs++;
-
-			/* 
-			 * Since the connection might have already 
-			 * received some dupacks, we add them to
-			 * to the outstanding segments count to get
-			 * the correct retransmit threshold.
-			 *
-			 * By checking for early retransmit after 
-			 * receiving some duplicate acks when SACK
-			 * is supported, the connection will 
-			 * enter fast recovery even if multiple 
-			 * segments are lost in the same window.
-			 */
-			osegs += tp->t_dupacks;
-			if (osegs < 4) {
-				tp->t_rexmtthresh = 
-				    ((osegs - 1) > 1) ? (osegs - 1) : 1;
-				tp->t_rexmtthresh =
-				    min(tp->t_rexmtthresh, tcprexmtthresh);
-				tp->t_rexmtthresh =
-				    max(tp->t_rexmtthresh, tp->t_dupacks);
-
-				if (tp->t_early_rexmt_count == 0)
-					tp->t_early_rexmt_win = tcp_now;
-
-				if (tp->t_flagsext & TF_SENT_TLPROBE) {
-					tcpstat.tcps_tlp_recovery++;
-					tcp_ccdbg_trace(tp, th,
-					    TCP_CC_TLP_RECOVERY);
-				} else {
-					tcpstat.tcps_early_rexmt++;
-					tp->t_early_rexmt_count++;
-					tcp_ccdbg_trace(tp, th,
-					    TCP_CC_EARLY_RETRANSMIT);
-				}
-			}
-		}
-	}
-
-	/*
-	 * If we ever sent a TLP probe, the acknowledgement will trigger
-	 * early retransmit because the value of snd_fack will be close
-	 * to snd_max. This will take care of adjustments to the
-	 * congestion window. So we can reset TF_SENT_PROBE flag.
-	 */
-	tp->t_flagsext &= ~(TF_SENT_TLPROBE);
-	tp->t_tlphighrxt = 0;
-	tp->t_tlpstart = 0;
 }
 
 void
@@ -1512,7 +1345,7 @@ tcp_input(m, off0)
 #endif
 	struct m_tag *fwd_tag;
 	u_char ip_ecn = IPTOS_ECN_NOTECT;
-	unsigned int ifscope;
+	unsigned int ifscope, nocell = 0;
 	uint8_t isconnected, isdisconnected;
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
 	int pktf_sw_lro_pkt = (m->m_pkthdr.pkt_flags & PKTF_SW_LRO_PKT) ? 1 : 0;
@@ -1524,8 +1357,6 @@ tcp_input(m, off0)
 #endif /* MPTCP */
 	boolean_t cell = IFNET_IS_CELLULAR(ifp);
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
-	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
-	struct tcp_respond_args tra;
 
 #define TCP_INC_VAR(stat, npkts) do {			\
 		stat += npkts;				\
@@ -1803,24 +1634,40 @@ findpcb:
 	 */
 	if (inp != NULL && (inp->inp_flags & INP_BOUND_IF))
 		ifscope = inp->inp_boundifp->if_index;
-#if NECP
-	if (inp != NULL && (
+
+	/*
+	 * If the PCB is present and the socket isn't allowed to use
+	 * the cellular interface, indicate it as such for tcp_respond.
+	 */
+	if (inp != NULL && (inp->inp_flags & INP_NO_IFT_CELLULAR))
+		nocell = 1;
+
+#if IPSEC
+	if (ipsec_bypass == 0)  {
 #if INET6
-		isipv6 ? !necp_socket_is_allowed_to_send_recv_v6(inp,
-			th->th_dport, th->th_sport, &ip6->ip6_dst,
-			&ip6->ip6_src, ifp, NULL) :
-#endif
-		!necp_socket_is_allowed_to_send_recv_v4(inp, th->th_dport,
-			th->th_sport, &ip->ip_dst, &ip->ip_src,
-			ifp, NULL))) {
-		if (in_pcb_checkstate(inp, WNT_RELEASE, 0)
-		    == WNT_STOPUSING) {
-			inp = NULL;	/* pretend we didn't find it */
-		}
-		IF_TCP_STATINC(ifp, badformatipsec);
-		goto dropnosock;
+		if (isipv6) {
+		       	if (inp != NULL && ipsec6_in_reject_so(m, inp->inp_socket)) {
+				IPSEC_STAT_INCREMENT(ipsec6stat.in_polvio);
+				if (in_pcb_checkstate(inp, WNT_RELEASE, 0) == WNT_STOPUSING) 
+					inp = NULL;	// pretend we didn't find it 
+
+				IF_TCP_STATINC(ifp, badformatipsec);
+
+				goto dropnosock;
+			}
+		} else
+#endif /* INET6 */
+			if (inp != NULL && ipsec4_in_reject_so(m, inp->inp_socket)) {
+			  	IPSEC_STAT_INCREMENT(ipsecstat.in_polvio);
+				if (in_pcb_checkstate(inp, WNT_RELEASE, 0) == WNT_STOPUSING) 
+					inp = NULL;	// pretend we didn't find it 
+
+				IF_TCP_STATINC(ifp, badformatipsec);
+
+				goto dropnosock;
+			}
 	}
-#endif /* NECP */
+#endif /*IPSEC*/
 
 	/*
 	 * If the state is CLOSED (i.e., TCB does not exist) then
@@ -1969,19 +1816,15 @@ findpcb:
 			struct inpcb *oinp = sotoinpcb(so);
 #endif /* INET6 */
 			struct ifnet *head_ifscope;
-			unsigned int head_nocell, head_recvanyif,
-				     head_noexpensive, head_awdl_unrestricted;
+			unsigned int head_nocell, head_recvanyif;
 
 			/* Get listener's bound-to-interface, if any */
 			head_ifscope = (inp->inp_flags & INP_BOUND_IF) ?
 			    inp->inp_boundifp : NULL;
 			/* Get listener's no-cellular information, if any */
-			head_nocell = INP_NO_CELLULAR(inp);
+			head_nocell = (inp->inp_flags & INP_NO_IFT_CELLULAR) ? 1 : 0;
 			/* Get listener's recv-any-interface, if any */
 			head_recvanyif = (inp->inp_flags & INP_RECV_ANYIF);
-			/* Get listener's no-expensive information, if any */
-			head_noexpensive = INP_NO_EXPENSIVE(inp);
-			head_awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp);
 
 			/*
 			 * If the state is LISTEN then ignore segment if it contains an RST.
@@ -2144,14 +1987,11 @@ findpcb:
 				inp->inp_flags &= ~INP_BOUND_IF;
 			}
 			/*
-			 * Inherit restrictions from listener.
+			 * Inherit INP_NO_IFT_CELLULAR from listener.
 			 */
-			if (head_nocell)
-				inp_set_nocellular(inp);
-			if (head_noexpensive)
-				inp_set_noexpensive(inp);
-			if (head_awdl_unrestricted)
-				inp_set_awdl_unrestricted(inp);
+			if (head_nocell) {
+				inp->inp_flags |= INP_NO_IFT_CELLULAR;
+			}
 			/*
 			 * Inherit {IN,IN6}_RECV_ANYIF from listener.
 			 */
@@ -2229,7 +2069,7 @@ findpcb:
 				struct tcpcb *, tp, int32_t, TCPS_LISTEN);
 			tp->t_state = TCPS_LISTEN;
 			tp->t_flags |= tp0->t_flags & (TF_NOPUSH|TF_NOOPT|TF_NODELAY);
-			tp->t_flagsext |= (tp0->t_flagsext & (TF_RXTFINDROP|TF_NOTIMEWAIT));
+			tp->t_flagsext |= (tp0->t_flagsext & TF_RXTFINDROP);
 			tp->t_keepinit = tp0->t_keepinit;
 			tp->t_keepcnt = tp0->t_keepcnt;
 			tp->t_keepintvl = tp0->t_keepintvl;
@@ -2247,8 +2087,7 @@ findpcb:
 			KERNEL_DEBUG(DBG_FNC_TCP_NEWCONN | DBG_FUNC_END,0,0,0,0,0);
 		}
 	}
-	lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx,
-		LCK_MTX_ASSERT_OWNED);
+	lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
 
 	if (tp->t_state == TCPS_ESTABLISHED && tlen > 0) {
 		/* 
@@ -2309,12 +2148,11 @@ findpcb:
 	/* 
 	 * If we received an  explicit notification of congestion in 
 	 * ip tos ecn bits or by the CWR bit in TCP header flags, reset
-	 * the ack-strteching state. We need to handle ECN notification if
-	 * an ECN setup SYN was sent even once.
+	 * the ack-strteching state.
 	 */
-	if (tp->t_state == TCPS_ESTABLISHED
-	    && (tp->ecn_flags & TE_SETUPSENT)
-	    && (ip_ecn == IPTOS_ECN_CE || (thflags & TH_CWR)))
+	if (tp->t_state == TCPS_ESTABLISHED && 
+		(ip_ecn == IPTOS_ECN_CE || 
+		(thflags & TH_CWR)))
 		tcp_reset_stretch_ack(tp);
 
 	/* 
@@ -2492,16 +2330,27 @@ findpcb:
 			    SEQ_LEQ(th->th_ack, tp->snd_max) &&
 			    tp->snd_cwnd >= tp->snd_ssthresh &&
 			    (!IN_FASTRECOVERY(tp) && 
-			    ((!(SACK_ENABLED(tp)) && 
-			    tp->t_dupacks < tp->t_rexmtthresh) ||
-			    (SACK_ENABLED(tp) && to.to_nsacks == 0 &&
-			    TAILQ_EMPTY(&tp->snd_holes))))) {
+			    ((!(SACK_ENABLED(tp)) && tp->t_dupacks < tp->t_rexmtthresh) ||
+			     (SACK_ENABLED(tp) && to.to_nsacks == 0 &&
+			      TAILQ_EMPTY(&tp->snd_holes))))) {
 				/*
 				 * this is a pure ack for outstanding data.
 				 */
 				++tcpstat.tcps_predack;
 
-				tcp_bad_rexmt_check(tp, th, &to),
+				/*
+				 * "bad retransmit" recovery
+				 */
+				if (tp->t_rxtshift > 0 &&
+					tcp_detect_bad_rexmt(tp, &to)) {
+					++tcpstat.tcps_sndrexmitbad;
+					tcp_bad_rexmt_restore_state(tp, th);
+
+					DTRACE_TCP5(cc, void, NULL, 
+						struct inpcb *, tp->t_inpcb,
+						struct tcpcb *, tp, struct tcphdr *, th,
+						int32_t, TCP_CC_BAD_REXMT_RECOVERY);
+				}
 
 				/* Recalculate the RTT */
 				tcp_compute_rtt(tp, &to, th);
@@ -2514,9 +2363,13 @@ findpcb:
 				 * avoidance phase. The calculations in this function 
 				 * assume that snd_una is not updated yet. 
 				 */
-				if (CC_ALGO(tp)->congestion_avd != NULL)
-					CC_ALGO(tp)->congestion_avd(tp, th);
-				tcp_ccdbg_trace(tp, th, TCP_CC_INSEQ_ACK_RCVD);
+				if (CC_ALGO(tp)->inseq_ack_rcvd != NULL)
+					CC_ALGO(tp)->inseq_ack_rcvd(tp, th);
+
+				DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+					struct tcpcb *, tp, struct tcphdr *, th,
+					int32_t, TCP_CC_INSEQ_ACK_RCVD);
+
 				sbdrop(&so->so_snd, acked);
 				if (so->so_flags & SOF_ENABLE_MSGS) {
 					VERIFY(acked <= so->so_msg_state->msg_serial_bytes);
@@ -2551,14 +2404,10 @@ findpcb:
 				 * are ready to send, let tcp_output
 				 * decide between more output or persist.
 				 */
-				if (tp->snd_una == tp->snd_max) {
+				if (tp->snd_una == tp->snd_max)
 					tp->t_timer[TCPT_REXMT] = 0;
-					tp->t_timer[TCPT_PTO] = 0;
-				} else if (tp->t_timer[TCPT_PERSIST] == 0) {
-					tp->t_timer[TCPT_REXMT] =
-					    OFFSET_FROM_START(tp,
-					    tp->t_rxtcur);
-				}
+				else if (tp->t_timer[TCPT_PERSIST] == 0)
+					tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 
 				if ((tp->t_flagsext & TF_MEASURESNDBW) != 0 &&
 					tp->t_bwmeas != NULL)
@@ -2625,14 +2474,12 @@ findpcb:
 			tcpstat.tcps_rcvbyte += tlen;
 			if (nstat_collect) {
 				if (m->m_pkthdr.pkt_flags & PKTF_SW_LRO_PKT) {
-					INP_ADD_STAT(inp, cell, wifi, wired, 
-					    rxpackets, m->m_pkthdr.lro_npkts);
+					INP_ADD_STAT(inp, cell, wifi, rxpackets,
+					    m->m_pkthdr.lro_npkts);
 				} else {
-					INP_ADD_STAT(inp, cell, wifi, wired,
-					    rxpackets, 1);
+					INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
 				}
-				INP_ADD_STAT(inp, cell, wifi, wired,rxbytes,
-				    tlen);
+				INP_ADD_STAT(inp, cell, wifi, rxbytes, tlen);
 			}
 
 			/*
@@ -2700,8 +2547,7 @@ findpcb:
 	 * Receive window is amount of space in rcv queue,
 	 * but not less than advertised window.
 	 */
-	lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx,
-	    LCK_MTX_ASSERT_OWNED);
+	lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
 	win = tcp_sbspace(tp);
 	if (win < 0)
 		win = 0;
@@ -2743,8 +2589,7 @@ findpcb:
 		register struct sockaddr_in6 *sin6;
 #endif
 
-		lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx,
-		    LCK_MTX_ASSERT_OWNED);
+		lck_mtx_assert(&((struct inpcb *)so->so_pcb)->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
 #if INET6
 		if (isipv6) {
 			MALLOC(sin6, struct sockaddr_in6 *, sizeof *sin6,
@@ -2900,14 +2745,6 @@ findpcb:
 		}
 		if (thflags & TH_RST) {
 			if ((thflags & TH_ACK) != 0) {
-#if MPTCP
-				if ((so->so_flags & SOF_MPTCP_FASTJOIN) &&
-					SEQ_GT(th->th_ack, tp->iss+1)) {
-					so->so_flags &= ~SOF_MPTCP_FASTJOIN;
-					/* ignore the RST and retransmit SYN */
-					goto drop;
-				}
-#endif /* MPTCP */
 				soevent(so, 
 				    (SO_FILT_HINT_LOCKED |
 				    SO_FILT_HINT_CONNRESET));
@@ -2928,7 +2765,6 @@ findpcb:
 			if ((thflags & (TH_ECE | TH_CWR)) == (TH_ECE)) {
 				/* ECN-setup SYN-ACK */
 				tp->ecn_flags |= TE_SETUPRECEIVED;
-				tcpstat.tcps_ecn_setup++;
 			}
 			else {
 				/* non-ECN-setup SYN-ACK */
@@ -2993,11 +2829,6 @@ findpcb:
 			if ((!(tp->t_mpflags & TMPF_MPTCP_TRUE)) &&
 			    (tp->t_mpflags & TMPF_SENT_JOIN)) {
 				isconnected = FALSE;
-				/* Start data xmit if fastjoin */
-				if (mptcp_fastjoin && (so->so_flags & SOF_MPTCP_FASTJOIN)) {
-					soevent(so, (SO_FILT_HINT_LOCKED | 
-					    SO_FILT_HINT_MPFASTJ));
-				}
 			} else
 #endif /* MPTCP */
 				isconnected = TRUE;
@@ -3210,10 +3041,8 @@ trimthenstep6:
 			if (nstat_collect) {
 				nstat_route_rx(tp->t_inpcb->inp_route.ro_rt, 
 					1, tlen, NSTAT_RX_FLAG_DUPLICATE);
-				INP_ADD_STAT(inp, cell, wifi, wired,
-				    rxpackets, 1);
-				INP_ADD_STAT(inp, cell, wifi, wired,
-				    rxbytes, tlen);
+				INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
+				INP_ADD_STAT(inp, cell, wifi, rxbytes, tlen);
 				tp->t_stat.rxduplicatebytes += tlen;
 			}
 			if (tlen)
@@ -3278,8 +3107,8 @@ trimthenstep6:
 		if (nstat_collect) {
 			nstat_route_rx(tp->t_inpcb->inp_route.ro_rt, 1, 
 				todrop, NSTAT_RX_FLAG_DUPLICATE);
-			INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
-			INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, todrop);
+			INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
+			INP_ADD_STAT(inp, cell, wifi, rxbytes, todrop);
 			tp->t_stat.rxduplicatebytes += todrop;
 		}
 		drop_hdrlen += todrop;	/* drop from the top afterwards */
@@ -3492,10 +3321,17 @@ trimthenstep6:
 		}
 		if (SACK_ENABLED(tp) &&
 		    (to.to_nsacks > 0 || !TAILQ_EMPTY(&tp->snd_holes)))
-			tcp_sack_doack(tp, &to, th, &sack_bytes_acked);
-
+			tcp_sack_doack(tp, &to, th->th_ack, &sack_bytes_acked);
 #if MPTCP
 		if ((tp->t_mpuna) && (SEQ_GEQ(th->th_ack, tp->t_mpuna))) {
+#if 0			
+			if ((tp->t_mpflags & TMPF_MPTCP_TRUE) &&
+			    !(tp->t_mpflags & TMPF_MPTCP_READY)) {
+				printf("%s: fallback? %x %x \n", __func__,
+				    th->th_ack, tp->t_mpuna);
+				tp->t_mpuna = 0;    
+			}
+#endif			
 			if (tp->t_mpflags & TMPF_PREESTABLISHED) {
 				/* MP TCP establishment succeeded */
 				tp->t_mpuna = 0;
@@ -3508,7 +3344,7 @@ trimthenstep6:
 						so->so_flags |= SOF_MPTCP_TRUE;
 						if (mptcp_dbg >= MP_ERR_DEBUG)
 							printf("MPTCP SUCCESS"
-							    " %s \n",__func__);
+							    "%s \n",__func__);
 						tp->t_timer[TCPT_JACK_RXMT] = 0;
 						tp->t_mprxtshift = 0;
 						isconnected = TRUE;
@@ -3518,6 +3354,7 @@ trimthenstep6:
 				} else {
 					isconnected = TRUE;
 					tp->t_mpflags &= ~TMPF_SENT_KEYS;
+					
 				}
 			}
 		}
@@ -3552,46 +3389,97 @@ process_dupack:
 				if (to.to_flags & TOF_MPTCP) {
 					goto drop;
 				}
-
-				if ((isconnected) && (tp->t_mpflags & TMPF_JOINED_FLOW)) {
-					if (mptcp_dbg >= MP_ERR_DEBUG)
-						printf("%s:  bypass ack recovery\n",__func__);
-					break;
-				}
 #endif /* MPTCP */
-				/*
-				 * If a duplicate acknowledgement was seen
-				 * after ECN, it indicates packet loss in
-				 * addition to ECN. Reset INRECOVERY flag
-				 * so that we can process partial acks
-				 * correctly
-				 */
-				if (tp->ecn_flags & TE_INRECOVERY)
-					tp->ecn_flags &= ~TE_INRECOVERY;
-
 				tcpstat.tcps_rcvdupack++;
 				++tp->t_dupacks;
-
-				/*
-				 * Check if we need to reset the limit on
-				 * early retransmit
+				/* 
+				 * Check if we need to reset the limit on early 
+				 * retransmit
 				 */
-				if (tp->t_early_rexmt_count > 0 &&
-				    TSTMP_GEQ(tcp_now,
-				    (tp->t_early_rexmt_win +
-				    TCP_EARLY_REXMT_WIN)))
+				if (TSTMP_GEQ(tcp_now, 
+					(tp->t_early_rexmt_win + TCP_EARLY_REXMT_WIN)))
 					tp->t_early_rexmt_count = 0;
 
 				/* 
 				 * Is early retransmit needed? We check for
 				 * this when the connection is waiting for
-				 * duplicate acks to enter fast recovery.
+				 * more duplicate acks to enter fast recovery.
 				 */
-				if (!IN_FASTRECOVERY(tp))
-					tcp_early_rexmt_check(tp, th);
+				if (early_rexmt && 
+					tp->t_early_rexmt_count < TCP_EARLY_REXMT_LIMIT &&
+					!IN_FASTRECOVERY(tp) &&
+					SEQ_GT(tp->snd_max, tp->snd_una) &&
+					(tp->t_dupacks == 1 || 
+					(SACK_ENABLED(tp) && 
+					!TAILQ_EMPTY(&tp->snd_holes)))) {
+					/*
+					 * If there are only a few outstanding 
+					 * segments on the connection, we might need
+					 * to lower the retransmit threshold. This
+					 * will allow us to do Early Retransmit as 
+					 * described in RFC 5827.
+					 */
+					u_int32_t obytes, snd_off;
+					int32_t snd_len;
+					if (SACK_ENABLED(tp) && 
+						!TAILQ_EMPTY(&tp->snd_holes)) {
+						obytes = (tp->snd_max - tp->snd_fack) +
+							tp->sackhint.sack_bytes_rexmit;
+					} else {
+						obytes = (tp->snd_max - tp->snd_una);	
+					}
 
+					/* In order to lower retransmit threshold the 
+					 * following two conditions must be met.
+					 * 1. the amount of outstanding data is less 
+					 * than 4*SMSS bytes
+					 * 2. there is no unsent data ready for 
+					 * transmission or the advertised window 
+					 * will limit sending new segments.
+					 */
+					snd_off = tp->snd_max - tp->snd_una;
+					snd_len = min(so->so_snd.sb_cc, tp->snd_wnd) - snd_off;
+					if (obytes < (tp->t_maxseg << 2) && 
+						snd_len <= 0) {
+						u_int32_t osegs;
+
+
+						osegs = obytes / tp->t_maxseg;
+						if ((osegs * tp->t_maxseg) < obytes)
+							osegs++;
+
+						/* 
+						 * Since the connection might have already 
+						 * received some dupacks, we add them to
+						 * to the outstanding segments count to get
+						 * the correct retransmit threshold.
+						 *
+						 * By checking for early retransmit after 
+						 * receiving some duplicate acks when SACK
+						 * is supported, the connection will be able 
+						 * to enter fast recovery even if multiple 
+						 * segments are lost in the same window.
+						 */
+						osegs += tp->t_dupacks;
+						if (osegs < 4) {
+							tcpstat.tcps_early_rexmt++;
+							tp->t_rexmtthresh = ((osegs - 1) > 1) ? 
+								(osegs - 1) : 1;
+							tp->t_rexmtthresh = min(tp->t_rexmtthresh,
+								tcprexmtthresh);
+							tp->t_rexmtthresh = max(tp->t_rexmtthresh,
+								tp->t_dupacks);
+							DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+								struct tcpcb *, tp, struct tcphdr *, th,
+								int32_t, TCP_CC_EARLY_RETRANSMIT);
+							if (tp->t_early_rexmt_count == 0)
+								tp->t_early_rexmt_win = tcp_now;
+							tp->t_early_rexmt_count++;
+						}
+					}
+				}
 				/*
-				 * If we've seen exactly rexmt threshold 
+				 * If we've seen exactly our rexmt threshold 
 				 * of duplicate acks, assume a packet
 				 * has been dropped and retransmit it.
 				 * Kludge snd_nxt & the congestion
@@ -3611,32 +3499,12 @@ process_dupack:
 				 * network.
 				 */
 				if (tp->t_timer[TCPT_REXMT] == 0 ||
-				    (th->th_ack != tp->snd_una
-				    && sack_bytes_acked == 0)) {
+				    (th->th_ack != tp->snd_una && sack_bytes_acked == 0)) {
 					tp->t_dupacks = 0;
 					tp->t_rexmtthresh = tcprexmtthresh;
 				} else if (tp->t_dupacks > tp->t_rexmtthresh ||
-					IN_FASTRECOVERY(tp)) {
-
-					/*
-					 * If this connection was seeing packet
-					 * reordering, then recovery might be
-					 * delayed to disambiguate between
-					 * reordering and loss
-					 */
-					if (SACK_ENABLED(tp) && !IN_FASTRECOVERY(tp) &&
-					    (tp->t_flagsext & 
-					    (TF_PKTS_REORDERED|TF_DELAY_RECOVERY)) ==
-					    (TF_PKTS_REORDERED|TF_DELAY_RECOVERY)) {
-						/*
-						 * Since the SACK information is already
-						 * updated, this ACK will be dropped
-						 */
-						break;
-					}
-
-					if (SACK_ENABLED(tp) 
-					    && IN_FASTRECOVERY(tp)) {
+					  IN_FASTRECOVERY(tp)) {
+					if (SACK_ENABLED(tp) && IN_FASTRECOVERY(tp)) {
 						int awnd;
 						
 						/*
@@ -3655,7 +3523,9 @@ process_dupack:
 					} else
 						tp->snd_cwnd += tp->t_maxseg;
 
-					tcp_ccdbg_trace(tp, th, TCP_CC_IN_FASTRECOVERY);
+					DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+						struct tcpcb *, tp, struct tcphdr *, th,
+						int32_t, TCP_CC_IN_FASTRECOVERY);
 
 					(void) tcp_output(tp);
 					goto drop;
@@ -3673,8 +3543,6 @@ process_dupack:
 						if (IN_FASTRECOVERY(tp)) {
 							tp->t_dupacks = 0;
 							break;
-						} else if (tp->t_flagsext & TF_DELAY_RECOVERY) {
-							break;
 						}
 					} else {
 						if (SEQ_LEQ(th->th_ack,
@@ -3684,33 +3552,6 @@ process_dupack:
 						}
 					}
 					
-					tp->snd_recover = tp->snd_max;
-					tp->t_timer[TCPT_PTO] = 0;
-					tp->t_rtttime = 0;
-
-					/*
-					 * If the connection has seen pkt
-					 * reordering, delay recovery until
-					 * it is clear that the packet
-					 * was lost.
-					 */
-					if (SACK_ENABLED(tp) &&
-					    (tp->t_flagsext &
-					    (TF_PKTS_REORDERED|TF_DELAY_RECOVERY))
-					    == TF_PKTS_REORDERED &&
-					    !IN_FASTRECOVERY(tp) &&
-					    tp->t_reorderwin > 0 &&
-					    tp->t_state == TCPS_ESTABLISHED) {
-						tp->t_timer[TCPT_DELAYFR] =
-						    OFFSET_FROM_START(tp,
-						    tp->t_reorderwin);
-						tp->t_flagsext |= TF_DELAY_RECOVERY;
-						tcpstat.tcps_delay_recovery++;
-						tcp_ccdbg_trace(tp, th,
-						    TCP_CC_DELAY_FASTRECOVERY);
-						break;
-					}
-
 					/*
 					 * If the current tcp cc module has 
 					 * defined a hook for tasks to run
@@ -3719,27 +3560,20 @@ process_dupack:
 					if (CC_ALGO(tp)->pre_fr != NULL)
 						CC_ALGO(tp)->pre_fr(tp);
 					ENTER_FASTRECOVERY(tp);
+					tp->snd_recover = tp->snd_max;
 					tp->t_timer[TCPT_REXMT] = 0;
-					if ((tp->ecn_flags & TE_ECN_ON)
-					    == TE_ECN_ON) 
+					tp->t_rtttime = 0;
+					if ((tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON) {
 						tp->ecn_flags |= TE_SENDCWR;
-
+					}
 					if (SACK_ENABLED(tp)) {
 						tcpstat.tcps_sack_recovery_episode++;
 						tp->sack_newdata = tp->snd_nxt;
 						tp->snd_cwnd = tp->t_maxseg;
 
-						/*
-						 * Enable probe timeout to detect 
-						 * a tail loss in the recovery
-						 * window.
-						 */
-						tp->t_timer[TCPT_PTO] =
-						    OFFSET_FROM_START(tp,
-						    max(10, (tp->t_srtt >> TCP_RTT_SHIFT)));
-
-						tcp_ccdbg_trace(tp, th,
-						    TCP_CC_ENTER_FASTRECOVERY);
+						DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+							struct tcpcb *, tp, struct tcphdr *, th,
+							int32_t, TCP_CC_ENTER_FASTRECOVERY);
 
 						(void) tcp_output(tp);
 						goto drop;
@@ -3751,8 +3585,9 @@ process_dupack:
 					     tp->t_maxseg * tp->t_dupacks;
 					if (SEQ_GT(onxt, tp->snd_nxt))
 						tp->snd_nxt = onxt;
-					tcp_ccdbg_trace(tp, th,
-					    TCP_CC_ENTER_FASTRECOVERY);
+					DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+						struct tcpcb *, tp, struct tcphdr *, th,
+						int32_t, TCP_CC_ENTER_FASTRECOVERY);
 					goto drop;
 				} else if (limited_txmt && 
 					ALLOW_LIMITED_TRANSMIT(tp) &&
@@ -3767,7 +3602,9 @@ process_dupack:
 					tcpstat.tcps_limited_txt++;
 					(void) tcp_output(tp);
 
-					tcp_ccdbg_trace(tp, th, TCP_CC_LIMITED_TRANSMIT);
+					DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+						struct tcpcb *, tp, struct tcphdr *, th,
+						int32_t, TCP_CC_LIMITED_TRANSMIT);
 					
 					/* Reset snd_cwnd back to normal */
 					tp->snd_cwnd -= incr;
@@ -3784,50 +3621,26 @@ process_dupack:
 		 */
 		if (IN_FASTRECOVERY(tp)) {
 			if (SEQ_LT(th->th_ack, tp->snd_recover)) {
-				/*
-				 * If we received an ECE and entered 
-				 * recovery, the subsequent ACKs should
-				 * not be treated as partial acks.
-				 */
-				if (tp->ecn_flags & TE_INRECOVERY)
-					goto process_ACK;
-
 				if (SACK_ENABLED(tp))
 					tcp_sack_partialack(tp, th);
 				else
 					tcp_newreno_partial_ack(tp, th);			
-				tcp_ccdbg_trace(tp, th, TCP_CC_PARTIAL_ACK);
+				
+				DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+					struct tcpcb *, tp, struct tcphdr *, th,
+					int32_t, TCP_CC_PARTIAL_ACK);
 			} else {
 				EXIT_FASTRECOVERY(tp);
 				if (CC_ALGO(tp)->post_fr != NULL)
 					CC_ALGO(tp)->post_fr(tp, th);
-
-				tcp_ccdbg_trace(tp, th,
-				    TCP_CC_EXIT_FASTRECOVERY);
-			}
-		} else if ((tp->t_flagsext & 
-			(TF_PKTS_REORDERED|TF_DELAY_RECOVERY))
-			== (TF_PKTS_REORDERED|TF_DELAY_RECOVERY)) {
-			/*
-			 * If the ack acknowledges upto snd_recover or if
-			 * it acknowledges all the snd holes, exit
-			 * recovery and cancel the timer. Otherwise,
-			 * this is a partial ack. Wait for recovery timer
-			 * to enter recovery. The snd_holes have already
-			 * been updated.
-			 */
-			if (SEQ_GEQ(th->th_ack, tp->snd_recover) ||
-			    TAILQ_EMPTY(&tp->snd_holes)) {
-				tp->t_timer[TCPT_DELAYFR] = 0;
-				tp->t_flagsext &= ~TF_DELAY_RECOVERY;
-				EXIT_FASTRECOVERY(tp);
-				tcp_ccdbg_trace(tp, th,
-				    TCP_CC_EXIT_FASTRECOVERY);
+				DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+					struct tcpcb *, tp, struct tcphdr *, th,
+					int32_t, TCP_CC_EXIT_FASTRECOVERY);
 			}
 		} else {
 			/*
-			 * We were not in fast recovery. Reset the
-			 * duplicate ack counter.
+			 * We were not in fast recovery. Reset the duplicate ack
+			 * counter.
 			 */
 			tp->t_dupacks = 0;
 			tp->t_rexmtthresh = tcprexmtthresh;
@@ -3865,11 +3678,19 @@ process_ACK:
 		 * If the last packet was a retransmit, make sure
 		 * it was not spurious.
 		 *
-		 * This will also take care of congestion window
-		 * adjustment if a last packet was recovered due to a
-		 * tail loss probe.
+		 * If the ack has ECE bit set, skip bad 
+		 * retransmit recovery.
 		 */
-		tcp_bad_rexmt_check(tp, th, &to);
+		if (tp->t_rxtshift > 0 &&
+			(thflags & TH_ECE) == 0 &&
+			tcp_detect_bad_rexmt(tp, &to)) {
+			++tcpstat.tcps_sndrexmitbad;
+			tcp_bad_rexmt_restore_state(tp, th);
+
+			DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+				struct tcpcb *, tp, struct tcphdr *, th,
+				int32_t, TCP_CC_BAD_REXMT_RECOVERY);
+		}
 
 		/* Recalculate the RTT */
 		tcp_compute_rtt(tp, &to, th);
@@ -3882,30 +3703,28 @@ process_ACK:
 		 */
 		if (th->th_ack == tp->snd_max) {
 			tp->t_timer[TCPT_REXMT] = 0;
-			tp->t_timer[TCPT_PTO] = 0;
 			needoutput = 1;
 		} else if (tp->t_timer[TCPT_PERSIST] == 0)
-			tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp,
-			    tp->t_rxtcur);
+			tp->t_timer[TCPT_REXMT] = OFFSET_FROM_START(tp, tp->t_rxtcur);
 
 		/*
-		 * If no data (only SYN) was ACK'd, skip rest of ACK
-		 * processing.
+		 * If no data (only SYN) was ACK'd,
+		 *    skip rest of ACK processing.
 		 */
 		if (acked == 0)
 			goto step6;
 
-
 		if ((thflags & TH_ECE) != 0 &&
 			((tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON)) {
 			/*
-			 * Reduce the congestion window if we haven't
-			 * done so.
+			 * Reduce the congestion window if we haven't done so.
 			 */
-			if (!IN_FASTRECOVERY(tp)) {
+			if (!SACK_ENABLED(tp) && !IN_FASTRECOVERY(tp) &&
+				SEQ_GEQ(th->th_ack, tp->snd_recover)) {
 				tcp_reduce_congestion_window(tp);
-				tp->ecn_flags |= (TE_INRECOVERY|TE_SENDCWR);
-				tcp_ccdbg_trace(tp, th, TCP_CC_ECN_RCVD);
+				DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+					struct tcpcb *, tp, struct tcphdr *, th, 
+					int32_t, TCP_CC_ECN_RCVD);
 			}
 		}
 
@@ -3920,7 +3739,10 @@ process_ACK:
 		if (!IN_FASTRECOVERY(tp)) {
 			if (CC_ALGO(tp)->ack_rcvd != NULL)
 				CC_ALGO(tp)->ack_rcvd(tp, th);
-			tcp_ccdbg_trace(tp, th, TCP_CC_ACK_RCVD);
+			
+			DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+				struct tcpcb *, tp, struct tcphdr *, th,
+				int32_t, TCP_CC_ACK_RCVD);
 		}
 		if (acked > so->so_snd.sb_cc) {
 			tp->snd_wnd -= so->so_snd.sb_cc;
@@ -4015,11 +3837,7 @@ process_ACK:
 					int32_t, TCPS_TIME_WAIT);
 				tp->t_state = TCPS_TIME_WAIT;
 				tcp_canceltimers(tp);
-				if (tp->t_flagsext & TF_NOTIMEWAIT) {
-					tp->t_flags |= TF_CLOSING;
-				} else {
-					add_to_time_wait(tp, 2 * tcp_msl);
-				}
+				add_to_time_wait(tp, 2 * tcp_msl);
 				isconnected = FALSE;
 				isdisconnected = TRUE;
 			}
@@ -4060,11 +3878,11 @@ process_ACK:
 		 * ack is ok.
 		 */ 
 		if (sack_ackadv == 1 &&
-		    tp->t_state == TCPS_ESTABLISHED && 
-		    SACK_ENABLED(tp) && sack_bytes_acked > 0 && 
-		    to.to_nsacks > 0 && tp->t_dupacks == 0 &&
-		    SEQ_LEQ(th->th_ack, tp->snd_una) && tlen == 0 &&
-		    !(tp->t_flagsext & TF_PKTS_REORDERED)) {
+			tp->t_state == TCPS_ESTABLISHED && 
+			SACK_ENABLED(tp) &&
+			sack_bytes_acked > 0 && 
+			tp->t_dupacks == 0 &&
+			SEQ_LEQ(th->th_ack, tp->snd_una) && tlen == 0) {
 			tcpstat.tcps_sack_ackadv++;
 			goto process_dupack;
 		}
@@ -4229,14 +4047,12 @@ dodata:
 			tcpstat.tcps_rcvbyte += tlen;
 			if (nstat_collect) {
 				if (m->m_pkthdr.pkt_flags & PKTF_SW_LRO_PKT) {
-					INP_ADD_STAT(inp, cell, wifi, wired, 
-					    rxpackets, m->m_pkthdr.lro_npkts);
+					INP_ADD_STAT(inp, cell, wifi, rxpackets,
+					    m->m_pkthdr.lro_npkts);
 				} else {
-					INP_ADD_STAT(inp, cell, wifi, wired,
-					    rxpackets, 1);
+					INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
 				}
-				INP_ADD_STAT(inp, cell, wifi, wired,
-				    rxbytes, tlen);
+				INP_ADD_STAT(inp, cell, wifi, rxbytes, tlen);
 			}
 			tcp_sbrcv_grow(tp, &so->so_rcv, &to, tlen);
 			so_recv_data_stat(so, m, drop_hdrlen);
@@ -4340,12 +4156,13 @@ dodata:
 				int32_t, TCPS_TIME_WAIT);
 			tp->t_state = TCPS_TIME_WAIT;
 			tcp_canceltimers(tp);
-			tp->t_flags |= TF_ACKNOW;
-			if (tp->t_flagsext & TF_NOTIMEWAIT) {
-				tp->t_flags |= TF_CLOSING;
-			} else {
-				add_to_time_wait(tp, 2 * tcp_msl);
+			if (tp->cc_recv != 0 &&
+				((int)(tcp_now - tp->t_starttime)) < tcp_msl) {
+				/* For transaction client, force ACK now. */
+				tp->t_flags |= TF_ACKNOW;
+			    	tp->t_unacksegs = 0;
 			}
+			add_to_time_wait(tp, 2 * tcp_msl);
 			soisdisconnected(so);
 			break;
 
@@ -4450,19 +4267,16 @@ dropwithreset:
 		tcp_trace(TA_DROP, ostate, tp, (void *)tcp_saveipgen,
 			  &tcp_savetcp, 0);
 #endif
-	bzero(&tra, sizeof(tra));
-	tra.ifscope = ifscope;
-	tra.awdl_unrestricted = 1;
 	if (thflags & TH_ACK)
 		/* mtod() below is safe as long as hdr dropping is delayed */
 		tcp_respond(tp, mtod(m, void *), th, m, (tcp_seq)0, th->th_ack,
-		    TH_RST, &tra);
+		    TH_RST, ifscope, nocell);
 	else {
 		if (thflags & TH_SYN)
 			tlen++;
 		/* mtod() below is safe as long as hdr dropping is delayed */
 		tcp_respond(tp, mtod(m, void *), th, m, th->th_seq+tlen,
-		    (tcp_seq)0, TH_RST|TH_ACK, &tra);
+		    (tcp_seq)0, TH_RST|TH_ACK, ifscope, nocell);
 	}
 	/* destroy temporarily created socket */
 	if (dropsocket) {
@@ -4699,7 +4513,7 @@ tcp_compute_rtt(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th)
 		TSTMP_GEQ(tcp_now, to->to_tsecr)) {
 		tcp_xmit_timer(tp, tcp_now - to->to_tsecr, 
 			to->to_tsecr, th->th_ack);
-	} else if (tp->t_rtttime != 0 && SEQ_GT(th->th_ack, tp->t_rtseq)) {
+	} else if (tp->t_rtttime && SEQ_GT(th->th_ack, tp->t_rtseq)) {
 		tcp_xmit_timer(tp, tcp_now - tp->t_rtttime, 0,
 			th->th_ack);
 	}
@@ -4879,9 +4693,9 @@ tcp_maxmtu6(struct rtentry *rt)
  * size (usually 512 or the default IP max size, but no more than the mtu
  * of the interface), as we can't discover anything about intervening
  * gateways or networks.  We also initialize the congestion/slow start
- * window. While looking at the routing entry, we also initialize 
- * other path-dependent parameters from pre-set or cached values 
- * in the routing entry.
+ * window to be a single segment if the destination isn't local.
+ * While looking at the routing entry, we also initialize other path-dependent
+ * parameters from pre-set or cached values in the routing entry.
  *
  * Also take into account the space needed for options that we
  * send regularly.  Make maxseg shorter by that amount to assure
@@ -4945,10 +4759,9 @@ tcp_mss(tp, offer, input_ifscope)
 	ifp = rt->rt_ifp;
 	/*
 	 * Slower link window correction:
-	 * If a value is specificied for slowlink_wsize use it for
-	 * PPP links believed to be on a serial modem (speed <128Kbps).
-	 * Excludes 9600bps as it is the default value adversized
-	 * by pseudo-devices over ppp.
+	 * If a value is specificied for slowlink_wsize use it for PPP links
+	 * believed to be on a serial modem (speed <128Kbps). Excludes 9600bps as
+	 * it is the default value adversized by pseudo-devices over ppp.
 	 */
 	if (ifp->if_type == IFT_PPP && slowlink_wsize > 0 && 
 	    ifp->if_baudrate > 9600 && ifp->if_baudrate <= 128000) {
@@ -5088,14 +4901,15 @@ tcp_mss(tp, offer, input_ifscope)
 		/*
 		 * There's some sort of gateway or interface
 		 * buffer limit on the path.  Use this to set
-		 * slow-start threshold, but set the threshold to
-		 * no less than 2*mss.
+		 * the slow start threshhold, but set the
+		 * threshold to no less than 2*mss.
 		 */
 		tp->snd_ssthresh = max(2 * mss, rt->rt_rmx.rmx_ssthresh);
 		tcpstat.tcps_usedssthresh++;
 	} else {
 		tp->snd_ssthresh = TCP_MAXWIN << TCP_MAX_WINSHIFT;
 	}
+
 
 	/*
 	 * Set the slow-start flight size depending on whether this
@@ -5104,7 +4918,8 @@ tcp_mss(tp, offer, input_ifscope)
 	if (CC_ALGO(tp)->cwnd_init != NULL)
 		CC_ALGO(tp)->cwnd_init(tp);
 
-	tcp_ccdbg_trace(tp, NULL, TCP_CC_CWND_INIT);
+	DTRACE_TCP5(cc, void, NULL, struct inpcb *, tp->t_inpcb, struct tcpcb *, tp,
+		struct tcphdr *, NULL, int32_t, TCP_CC_CWND_INIT);
 
 	/* Route locked during lookup above */
 	RT_UNLOCK(rt);
@@ -5180,7 +4995,6 @@ tcp_newreno_partial_ack(tp, th)
 		tcp_seq onxt = tp->snd_nxt;
 		u_int32_t  ocwnd = tp->snd_cwnd;
 		tp->t_timer[TCPT_REXMT] = 0;
-		tp->t_timer[TCPT_PTO] = 0;
 		tp->t_rtttime = 0;
 		tp->snd_nxt = th->th_ack;
 		/*
@@ -5413,10 +5227,7 @@ tcp_set_background_cc(struct socket *so)
 void
 tcp_set_foreground_cc(struct socket *so)
 {
-	if (tcp_use_newreno)
-		tcp_set_new_cc(so, TCP_CC_ALGO_NEWRENO_INDEX);
-	else
-		tcp_set_new_cc(so, TCP_CC_ALGO_CUBIC_INDEX);
+	tcp_set_new_cc(so, TCP_CC_ALGO_NEWRENO_INDEX);
 }
 
 static void
@@ -5433,12 +5244,20 @@ tcp_set_new_cc(struct socket *so, uint16_t cc_index)
 			CC_ALGO(tp)->cleanup(tp);
 		tp->tcp_cc_index = cc_index;
 
-		tcp_cc_allocate_state(tp);
-
-		if (CC_ALGO(tp)->switch_to != NULL)
-			CC_ALGO(tp)->switch_to(tp, old_cc_index);
-
-		tcp_ccdbg_trace(tp, NULL, TCP_CC_CHANGE_ALGO);
+		/* Decide if the connection is just starting or if
+		 * we have sent some packets on it.
+		 */
+		if (tp->snd_nxt > tp->iss) {
+			/* Already sent some packets */
+			if (CC_ALGO(tp)->switch_to != NULL)
+				CC_ALGO(tp)->switch_to(tp, old_cc_index);
+		} else {	
+			if (CC_ALGO(tp)->init != NULL)
+				CC_ALGO(tp)->init(tp);
+		}
+		DTRACE_TCP5(cc, void, NULL, struct inpcb *, inp,
+			struct tcpcb *, tp, struct tcphdr *, NULL,
+			int32_t, TCP_CC_CHANGE_ALGO);
 	}
 }
 
@@ -5698,8 +5517,7 @@ tcp_input_checksum(int af, struct mbuf *m, struct tcphdr *th, int off, int tlen)
 	return (0);
 }
 
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_STATS, stats,
-    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_STATS, stats, CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
     tcp_getstat, "S,tcpstat", "TCP statistics (struct tcpstat, netinet/tcp_var.h)");
 
 static int

@@ -27,7 +27,6 @@
  */
 
 #include <kern/debug.h>
-#include <kern/kalloc.h>
 #include <sys/param.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -52,7 +51,8 @@
 #define REQ_CONFIG               (9)
 #define REQ_PERIOD              (10)
 #define REQ_ACTIONID            (11)
-#define REQ_SW_INC              (14)
+#define REQ_FORCE_ALL_CTRS      (12)
+#define REQ_DISABLE_WHITELIST   (13)
 
 /* Type-munging casts */
 typedef int (*getint_t)(void);
@@ -62,7 +62,6 @@ typedef int (*setint_t)(int);
 static int kpc_initted = 0;
 
 /* locking and buffer for large data requests */
-#define SYSCTL_BUFFER_SIZE (33 * sizeof(uint64_t))
 static lck_grp_attr_t *sysctl_buffer_lckgrp_attr = NULL;
 static lck_grp_t      *sysctl_buffer_lckgrp = NULL;
 static lck_mtx_t       sysctl_buffer_lock;
@@ -71,9 +70,8 @@ static void           *sysctl_buffer = NULL;
 typedef int (*setget_func_t)(int);
 
 /* init our stuff */
-extern void kpc_arch_init(void);
-extern void kpc_common_init(void);
 extern void kpc_thread_init(void); /* osfmk/kern/kpc_thread.c */
+extern void kpc_arch_init(void);
 
 void
 kpc_init(void)
@@ -84,7 +82,6 @@ kpc_init(void)
 	lck_mtx_init(&sysctl_buffer_lock, sysctl_buffer_lckgrp, LCK_ATTR_NULL);
 
 	kpc_arch_init();
-	kpc_common_init();
 	kpc_thread_init();
 
 	kpc_initted = 1;
@@ -100,21 +97,6 @@ sysctl_get_int( struct sysctl_oid *oidp, struct sysctl_req *req,
 	/* copy out the old value */
 	error = sysctl_handle_int(oidp, &value, 0, req);
     
-	return error;
-}
-
-static int
-sysctl_set_int( struct sysctl_req *req, int (*set_func)(int))
-{
-	int error = 0;
-	int value = 0;
-    
-	error = SYSCTL_IN( req, &value, sizeof(value) );
-	if( error )
-		return error;
-    
-	error = set_func( value );
-
 	return error;
 }
 
@@ -139,7 +121,6 @@ sysctl_getset_int( struct sysctl_oid *oidp, struct sysctl_req *req,
 	return error;
 }
 
-
 static int
 sysctl_setget_int( struct sysctl_req *req,
                    int (*setget_func)(int) )
@@ -162,13 +143,7 @@ static int
 kpc_sysctl_acquire_buffer(void)
 {
 	if( sysctl_buffer == NULL )
-	{
-		sysctl_buffer = kalloc(SYSCTL_BUFFER_SIZE);
-		if( sysctl_buffer )
-		{
-			bzero( sysctl_buffer, SYSCTL_BUFFER_SIZE );
-		}
-	}
+		sysctl_buffer = kpc_counterbuf_alloc();
 
 	if( !sysctl_buffer )
 	{
@@ -280,7 +255,7 @@ sysctl_get_bigarray( struct sysctl_req *req,
                      int (*get_fn)(uint32_t, uint32_t*, void*) )
 {
 	int error = 0;
-	uint32_t bufsize = SYSCTL_BUFFER_SIZE;
+	uint32_t bufsize = KPC_MAX_COUNTERS * sizeof(uint64_t); /* XXX? */
 	uint32_t arg = 0;
 
 	/* get the argument */
@@ -335,7 +310,7 @@ sysctl_getset_bigarray( struct sysctl_req *req,
                         int (*set_fn)(uint32_t, void*) )
 {
 	int error = 0;
-	uint32_t bufsize = SYSCTL_BUFFER_SIZE;
+	uint32_t bufsize = KPC_MAX_COUNTERS * sizeof(uint64_t); /* XXX? */
 	uint32_t regsize = 0;
 	uint64_t arg;
 
@@ -495,11 +470,6 @@ kpc_sysctl SYSCTL_HANDLER_ARGS
 		                               sysctl_kpc_set_actionid );
 		break;
 
-
-	case REQ_SW_INC:
-		ret = sysctl_set_int( req, (setget_func_t)kpc_set_sw_inc );
-		break;		
-
 	default:
 		ret = ENOENT;
 		break;
@@ -544,11 +514,6 @@ SYSCTL_PROC(_kpc, OID_AUTO, counter_count,
             (void*)REQ_COUNTER_COUNT, 
             sizeof(int), kpc_sysctl, "S", "Counter count");
 
-SYSCTL_PROC(_kpc, OID_AUTO, sw_inc,
-            CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_ANYBODY,
-            (void*)REQ_SW_INC, 
-            sizeof(int), kpc_sysctl, "S", "Software increment");
-
 /* arrays */
 SYSCTL_PROC(_kpc, OID_AUTO, thread_counters,
             CTLFLAG_RD|CTLFLAG_WR|CTLFLAG_ANYBODY,
@@ -585,5 +550,3 @@ SYSCTL_PROC(_kpc, OID_AUTO, actionid,
             (void*)REQ_ACTIONID, 
             sizeof(uint32_t), kpc_sysctl, 
             "QU", "Set counter actionids");
-
-

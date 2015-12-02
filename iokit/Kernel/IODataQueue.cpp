@@ -26,16 +26,10 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
-#define DISABLE_DATAQUEUE_WARNING
-
 #include <IOKit/IODataQueue.h>
-
-#undef DISABLE_DATAQUEUE_WARNING
-
 #include <IOKit/IODataQueueShared.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
-#include <libkern/OSAtomic.h>
 
 #ifdef enqueue
 #undef enqueue
@@ -85,10 +79,6 @@ Boolean IODataQueue::initWithCapacity(UInt32 size)
         return false;
     }
 
-    if (size > UINT32_MAX - DATA_QUEUE_MEMORY_HEADER_SIZE) {
-        return false;
-    }
-    
     allocSize = round_page(size + DATA_QUEUE_MEMORY_HEADER_SIZE);
 
     if (allocSize < size) {
@@ -99,34 +89,16 @@ Boolean IODataQueue::initWithCapacity(UInt32 size)
     if (dataQueue == 0) {
         return false;
     }
-    bzero(dataQueue, allocSize);
 
     dataQueue->queueSize    = size;
-//  dataQueue->head         = 0;
-//  dataQueue->tail         = 0;
-
-    if (!notifyMsg) {
-        notifyMsg = IOMalloc(sizeof(mach_msg_header_t));
-        if (!notifyMsg)
-            return false;
-    }
-    bzero(notifyMsg, sizeof(mach_msg_header_t));
+    dataQueue->head         = 0;
+    dataQueue->tail         = 0;
 
     return true;
 }
 
 Boolean IODataQueue::initWithEntries(UInt32 numEntries, UInt32 entrySize)
 {
-    // Checking overflow for (numEntries + 1)*(entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE):
-    //  check (entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE)
-    if ((entrySize > UINT32_MAX - DATA_QUEUE_ENTRY_HEADER_SIZE) ||
-        //  check (numEntries + 1)
-        (numEntries > UINT32_MAX-1) ||
-        //  check (numEntries + 1)*(entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE)
-        (entrySize + DATA_QUEUE_ENTRY_HEADER_SIZE > UINT32_MAX/(numEntries+1))) {
-        return false;
-    }
-    
     return (initWithCapacity((numEntries + 1) * (DATA_QUEUE_ENTRY_HEADER_SIZE + entrySize)));
 }
 
@@ -134,12 +106,6 @@ void IODataQueue::free()
 {
     if (dataQueue) {
         IOFreeAligned(dataQueue, round_page(dataQueue->queueSize + DATA_QUEUE_MEMORY_HEADER_SIZE));
-        dataQueue = NULL;
-
-        if (notifyMsg) {
-            IOFree(notifyMsg, sizeof(mach_msg_header_t));
-            notifyMsg = NULL;
-        }
     }
 
     super::free();
@@ -154,20 +120,10 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
     const UInt32       entrySize = dataSize + DATA_QUEUE_ENTRY_HEADER_SIZE;
     IODataQueueEntry * entry;
 
-    // Check for overflow of entrySize
-    if (dataSize > UINT32_MAX - DATA_QUEUE_ENTRY_HEADER_SIZE) {
-        return false;
-    }
-    // Check for underflow of (dataQueue->queueSize - tail)
-    if (dataQueue->queueSize < tail) {
-        return false;
-    }
-
     if ( tail >= head )
     {
         // Is there enough room at the end for the entry?
-        if ((entrySize <= UINT32_MAX - tail) &&
-            ((tail + entrySize) <= dataQueue->queueSize) )
+        if ( (tail + entrySize) <= dataQueue->queueSize )
         {
             entry = (IODataQueueEntry *)((UInt8 *)dataQueue->queue + tail);
 
@@ -177,10 +133,10 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
             // The tail can be out of bound when the size of the new entry
             // exactly matches the available space at the end of the queue.
             // The tail can range from 0 to dataQueue->queueSize inclusive.
-            
-            OSAddAtomic(entrySize, (SInt32 *)&dataQueue->tail);
+
+            dataQueue->tail += entrySize;
         }
-        else if ( head > entrySize )     // Is there enough room at the beginning?
+        else if ( head > entrySize ) 	// Is there enough room at the beginning?
         {
             // Wrap around to the beginning, but do not allow the tail to catch
             // up to the head.
@@ -197,11 +153,11 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
             }
 
             memcpy(&dataQueue->queue->data, data, dataSize);
-            OSCompareAndSwap(dataQueue->tail, entrySize, &dataQueue->tail);
+            dataQueue->tail = entrySize;
         }
         else
         {
-            return false;    // queue is full
+            return false;	// queue is full
         }
     }
     else
@@ -215,17 +171,17 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
 
             entry->size = dataSize;
             memcpy(&entry->data, data, dataSize);
-            OSAddAtomic(entrySize, (SInt32 *)&dataQueue->tail);
+            dataQueue->tail += entrySize;
         }
         else
         {
-            return false;    // queue is full
+            return false;	// queue is full
         }
     }
 
     // Send notification (via mach message) that data is available.
 
-    if ( ( head == tail )                                                   /* queue was empty prior to enqueue() */
+    if ( ( head == tail )                /* queue was empty prior to enqueue() */
     ||   ( dataQueue->head == tail ) )   /* queue was emptied during enqueue() */
     {
         sendDataAvailableNotification();
@@ -236,26 +192,34 @@ Boolean IODataQueue::enqueue(void * data, UInt32 dataSize)
 
 void IODataQueue::setNotificationPort(mach_port_t port)
 {
-    mach_msg_header_t * msgh = (mach_msg_header_t *) notifyMsg;
+    static struct _notifyMsg init_msg = { {
+        MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0),
+        sizeof (struct _notifyMsg),
+        MACH_PORT_NULL,
+        MACH_PORT_NULL,
+        0,
+        0
+    } };
 
-    if (msgh) {
-        bzero(msgh, sizeof(mach_msg_header_t));
-        msgh->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-        msgh->msgh_size = sizeof(mach_msg_header_t);
-        msgh->msgh_remote_port = port;
+    if (notifyMsg == 0) {
+        notifyMsg = IOMalloc(sizeof(struct _notifyMsg));
     }
+
+    *((struct _notifyMsg *)notifyMsg) = init_msg;
+
+    ((struct _notifyMsg *)notifyMsg)->h.msgh_remote_port = port;
 }
 
 void IODataQueue::sendDataAvailableNotification()
 {
-    kern_return_t       kr;
-    mach_msg_header_t * msgh;
+    kern_return_t		kr;
+    mach_msg_header_t *	msgh;
 
-    msgh = (mach_msg_header_t *) notifyMsg;
+    msgh = (mach_msg_header_t *)notifyMsg;
     if (msgh && msgh->msgh_remote_port) {
         kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size, MACH_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
         switch(kr) {
-            case MACH_SEND_TIMED_OUT:    // Notification already sent
+            case MACH_SEND_TIMED_OUT:	// Notification already sent
             case MACH_MSG_SUCCESS:
             case MACH_SEND_NO_BUFFER:
                 break;
@@ -276,5 +240,4 @@ IOMemoryDescriptor *IODataQueue::getMemoryDescriptor()
 
     return descriptor;
 }
-
 

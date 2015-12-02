@@ -1,13 +1,13 @@
 set -e
 
 function CopyHeader {
-    mkdir -p `dirname "${XNU_INSTALL_BASE}/usr/include/$1"`
-    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
+    install -d `dirname "${XNU_INSTALL_BASE}/usr/include/$1"`
+    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
 }
 
 function CopyPrivateHeader {
-    mkdir -p `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
-    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
+    install -d `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
+    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
 }
 
 CopyHeader AssertMacros.h
@@ -48,18 +48,3 @@ CopyPrivateHeader corecrypto/ccrng.h
 CopyPrivateHeader corecrypto/ccrng_system.h
 CopyPrivateHeader corecrypto/ccsha1.h
 CopyPrivateHeader corecrypto/ccsha2.h
-
-# These headers must be symlinked into Kernel.framework
-# from where they exist in the user-mode SDK.
-function SymlinkUserHeader {
-    local KERNEL_DIR="${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/Versions/Current/Headers"
-    pushd $KERNEL_DIR
-    ln -sfh "../../../../../../../usr/include/$1" "$1"
-    popd
-}
-
-SymlinkUserHeader AssertMacros.h
-SymlinkUserHeader Availability.h
-SymlinkUserHeader AvailabilityInternal.h
-SymlinkUserHeader AvailabilityMacros.h
-SymlinkUserHeader TargetConditionals.h

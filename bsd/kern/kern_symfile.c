@@ -133,8 +133,7 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
 	    filechunk = 1*1024*1024*1024;
 	    if (filechunk > (size_t)(end - offset))
 	    filechunk = (size_t)(end - offset);
-            error = VNOP_BLOCKMAP(ref->vp, offset, filechunk, &blkno,
-								  &filechunk, NULL, VNODE_WRITE, NULL);
+            error = VNOP_BLOCKMAP(ref->vp, offset, filechunk, &blkno, &filechunk, NULL, 0, NULL);
 			if (error) break;
             fileblk = blkno * ref->blksize;
         }
@@ -157,7 +156,7 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
 	{
 	    pin.cp_extent.offset = fileblk;
 	    pin.cp_extent.length = filechunk;
-	    pin.cp_flags = _DKIOCCSPINFORHIBERNATION;
+	    pin.cp_flags = _DKIOCSPINDISCARDDATA;
 	    error = do_ioctl(p1, p2, theIoctl, (caddr_t)&pin);
 	    if (error && (ENOTTY != error))
 	    {
@@ -173,10 +172,11 @@ kern_ioctl_file_extents(struct kern_direct_file_io_ref_t * ref, u_long theIoctl,
     return (error);
 }
 
+int
+kern_write_file(struct kern_direct_file_io_ref_t * ref, off_t offset, caddr_t addr, vm_size_t len);
 
 struct kern_direct_file_io_ref_t *
 kern_open_file_for_direct_io(const char * name, 
-                 boolean_t create_file,
 			     kern_get_file_extents_callback_t callback, 
 			     void * callback_ref,
                              off_t set_file_size,
@@ -223,8 +223,7 @@ kern_open_file_for_direct_io(const char * name,
     p = kernproc;
     ref->ctx = vfs_context_create(vfs_context_current());
 
-    if ((error = vnode_open(name, (create_file) ? (O_CREAT | FWRITE) : FWRITE, 
-                            (0), 0, &ref->vp, ref->ctx)))
+    if ((error = vnode_open(name, (O_CREAT | FWRITE), (0), 0, &ref->vp, ref->ctx)))
         goto out;
 
     if (ref->vp->v_type == VREG)
@@ -236,7 +235,7 @@ kern_open_file_for_direct_io(const char * name,
 
     if (write_file_addr && write_file_len)
     {
-	if ((error = kern_write_file(ref, write_file_offset, write_file_addr, write_file_len, 0)))
+	if ((error = kern_write_file(ref, write_file_offset, write_file_addr, write_file_len)))
 	    goto out;
     }
 
@@ -256,9 +255,9 @@ kern_open_file_for_direct_io(const char * name,
 
     if (ref->vp->v_type == VREG)
     {
-		/* Don't dump files with links. */
-		if (va.va_nlink != 1)
-			goto out;
+	/* Don't dump files with links. */
+	if (va.va_nlink != 1)
+	    goto out;
 
         device = va.va_fsid;
         ref->filelength = va.va_data_size;
@@ -267,14 +266,37 @@ kern_open_file_for_direct_io(const char * name,
         p2 = p;
         do_ioctl = &file_ioctl;
 
-		if (set_file_size)
-	    {
-			error = vnode_setsize(ref->vp, set_file_size, 
-								  IO_NOZEROFILL | IO_NOAUTH, ref->ctx);
-			if (error)
-				goto out;
-			ref->filelength = set_file_size;
-		}
+	if (set_file_size && (set_file_size != (off_t) va.va_data_alloc))
+	{
+	    u_int32_t alloc_flags = PREALLOCATE | ALLOCATEFROMPEOF | ALLOCATEALL;
+
+	    vnode_lock_spin(ref->vp);
+	    CLR(ref->vp->v_flag, VSWAP);
+	    vnode_unlock(ref->vp);
+
+            if (set_file_size < (off_t) va.va_data_alloc)
+            {
+                struct vnode_attr setva;
+                VATTR_INIT(&setva);
+                VATTR_SET(&setva, va_data_size, set_file_size);
+                error = vnode_setattr(ref->vp, &setva, ref->ctx);
+            }
+            else
+            {
+                off_t bytesallocated = set_file_size - va.va_data_alloc;
+                error = VNOP_ALLOCATE(ref->vp, bytesallocated, alloc_flags,
+                                      &bytesallocated, 0 /*fst_offset*/,
+                                      ref->ctx);
+                HIBLOG("VNOP_ALLOCATE(%d) %qd\n", error, bytesallocated);
+            }
+	    // F_SETSIZE:
+	    (void) vnode_setsize(ref->vp, set_file_size, IO_NOZEROFILL, ref->ctx);
+	    ref->filelength = set_file_size;
+
+	    vnode_lock_spin(ref->vp);
+	    SET(ref->vp->v_flag, VSWAP);
+	    vnode_unlock(ref->vp);
+	}
     }
     else if ((ref->vp->v_type == VBLK) || (ref->vp->v_type == VCHR))
     {
@@ -328,8 +350,7 @@ kern_open_file_for_direct_io(const char * name,
             filechunk = 1*1024*1024*1024;
             daddr64_t blkno;
 
-            error = VNOP_BLOCKMAP(ref->vp, f_offset, filechunk, &blkno,
-								  &filechunk, NULL, VNODE_WRITE, NULL);
+            error = VNOP_BLOCKMAP(ref->vp, f_offset, filechunk, &blkno, &filechunk, NULL, 0, NULL);
             if (error)
                 goto out;
 
@@ -381,12 +402,9 @@ kern_open_file_for_direct_io(const char * name,
 
     // get partition base
 
-    if (partitionbase_result) 
-    {
-        error = do_ioctl(p1, p2, DKIOCGETBASE, (caddr_t) partitionbase_result);
-        if (error)
-            goto out;
-    }
+    error = do_ioctl(p1, p2, DKIOCGETBASE, (caddr_t) partitionbase_result);
+    if (error)
+        goto out;
 
     // get block size & constraints
 
@@ -452,7 +470,7 @@ kern_open_file_for_direct_io(const char * name,
         *partition_device_result = device;
     if (image_device_result)
         *image_device_result = target;
-    if (oflags)
+    if (flags)
         *oflags = flags;
 
 out:
@@ -466,15 +484,6 @@ out:
 
     if (error && ref)
     {
-    if (ref->pinned)
-    {
-        _dk_cs_pin_t pin;
-        bzero(&pin, sizeof(pin));
-
-	    pin.cp_flags = _DKIOCCSPINDISCARDBLACKLIST;
-        p1 = &device;
-        (void) do_ioctl(p1, p2, _DKIOCCSUNPINEXTENT, (caddr_t)&pin);
-    }
 	if (ref->vp)
 	{
 	    vnode_close(ref->vp, FWRITE, ref->ctx);
@@ -489,11 +498,11 @@ out:
 }
 
 int
-kern_write_file(struct kern_direct_file_io_ref_t * ref, off_t offset, caddr_t addr, vm_size_t len, int ioflag)
+kern_write_file(struct kern_direct_file_io_ref_t * ref, off_t offset, caddr_t addr, vm_size_t len)
 {
     return (vn_rdwr(UIO_WRITE, ref->vp,
 			addr, len, offset,
-			UIO_SYSSPACE, ioflag|IO_SYNC|IO_NODELOCKED|IO_UNIT, 
+			UIO_SYSSPACE, IO_SYNC|IO_NODELOCKED|IO_UNIT, 
                         vfs_context_ucred(ref->ctx), (int *) 0,
 			vfs_context_proc(ref->ctx)));
 }
@@ -505,7 +514,6 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
 			      off_t discard_offset, off_t discard_end)
 {
     int error;
-    _dk_cs_pin_t pin;
     kprintf("kern_close_file_for_direct_io\n");
 
     if (!ref) return;
@@ -530,14 +538,6 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
             do_ioctl = &device_ioctl;
         }
         (void) do_ioctl(p1, p2, DKIOCUNLOCKPHYSICALEXTENTS, NULL);
-
-        if (ref->pinned)
-        {
-            bzero(&pin, sizeof(pin));
-            pin.cp_flags = _DKIOCCSPINDISCARDBLACKLIST;
-            (void) do_ioctl(p1, p2, _DKIOCCSUNPINEXTENT, (caddr_t)&pin);
-        }
-
         
         if (discard_offset && discard_end && !ref->pinned)
         {
@@ -545,7 +545,7 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
         }
         if (addr && write_length)
         {
-            (void) kern_write_file(ref, write_offset, addr, write_length, 0);
+            (void) kern_write_file(ref, write_offset, addr, write_length);
         }
 
         error = vnode_close(ref->vp, FWRITE, ref->ctx);
@@ -557,3 +557,4 @@ kern_close_file_for_direct_io(struct kern_direct_file_io_ref_t * ref,
     ref->ctx = NULL;
     kfree(ref, sizeof(struct kern_direct_file_io_ref_t));
 }
+

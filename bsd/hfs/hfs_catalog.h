@@ -107,17 +107,7 @@ struct cat_attr {
 	    u_int32_t	cau_dircount;	/* count of sub dirs (for posix nlink) */
 	    u_int32_t	cau_firstlink;	/* first hardlink link (files only) */
 	} ca_union3;
-	union {
-		u_int8_t 	ca_finderinfo[32]; /* Opaque Finder information */
-		struct {
-			FndrFileInfo 					ca_finderfileinfo;
-			struct FndrExtendedFileInfo 	ca_finderextendedfileinfo;
-		};
-		struct {
-			FndrDirInfo 					ca_finderdirinfo;
-			struct FndrExtendedDirInfo 		ca_finderextendeddirinfo;
-		};
-	};
+	u_int8_t 	ca_finderinfo[32]; /* Opaque Finder information */
 };
 
 /* Aliases for common fields */
@@ -363,8 +353,7 @@ extern int cat_findname (struct hfsmount *hfsmp,
 extern int cat_getentriesattr(
 			struct hfsmount *hfsmp,
 			directoryhint_t *dirhint,
-			struct cat_entrylist *ce_list, 
-			int *reachedeof);
+			struct cat_entrylist *ce_list);
 
 extern int cat_rename (	struct hfsmount * hfsmp,
 			struct cat_desc * from_cdp,
@@ -375,8 +364,8 @@ extern int cat_rename (	struct hfsmount * hfsmp,
 extern int cat_update (	struct hfsmount *hfsmp,
 			struct cat_desc *descp,
 			struct cat_attr *attrp,
-			const struct cat_fork *dataforkp,
-			const struct cat_fork *rsrcforkp);
+			struct cat_fork *dataforkp,
+			struct cat_fork *rsrcforkp);
 
 extern int cat_getdirentries(
 			struct hfsmount *hfsmp,

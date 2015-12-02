@@ -40,11 +40,10 @@
 
 #include <meta_features.h>
 
-#include <vm/vm_options.h>
-
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/debug.h>
+#include <kern/lock.h>
 #include <kern/extmod_statistics.h>
 #include <mach/mach_traps.h>
 #include <mach/port.h>
@@ -79,8 +78,6 @@
 #include <sys/cprotect.h>
 #include <sys/kpi_socket.h>
 #include <sys/kas_info.h>
-#include <sys/socket.h>
-#include <sys/socketvar.h>
 
 #include <security/audit/audit.h>
 #include <security/mac.h>
@@ -104,40 +101,9 @@
 int _shared_region_map_and_slide(struct proc*, int, unsigned int, struct shared_file_mapping_np*, uint32_t, user_addr_t, user_addr_t);
 int shared_region_copyin_mappings(struct proc*, user_addr_t, unsigned int, struct shared_file_mapping_np *);
 
-SYSCTL_INT(_vm, OID_AUTO, vm_do_collapse_compressor, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.do_collapse_compressor, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_do_collapse_compressor_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.do_collapse_compressor_pages, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_do_collapse_terminate, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.do_collapse_terminate, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_do_collapse_terminate_failure, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.do_collapse_terminate_failure, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_should_cow_but_wired, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.should_cow_but_wired, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_create_upl_extra_cow, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.create_upl_extra_cow, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_create_upl_extra_cow_pages, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.create_upl_extra_cow_pages, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_create_upl_lookup_failure_write, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.create_upl_lookup_failure_write, 0, "");
-SYSCTL_INT(_vm, OID_AUTO, vm_create_upl_lookup_failure_copy, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_counters.create_upl_lookup_failure_copy, 0, "");
-#if VM_SCAN_FOR_SHADOW_CHAIN
-static int vm_shadow_max_enabled = 0;    /* Disabled by default */
-extern int proc_shadow_max(void);
-static int
-vm_shadow_max SYSCTL_HANDLER_ARGS
-{
-#pragma unused(arg1, arg2, oidp)
-	int value = 0;
-
-	if (vm_shadow_max_enabled)
-		value = proc_shadow_max();
-
-	return SYSCTL_OUT(req, &value, sizeof(value));
-}
-SYSCTL_PROC(_vm, OID_AUTO, vm_shadow_max, CTLTYPE_INT|CTLFLAG_RD|CTLFLAG_LOCKED,
-    0, 0, &vm_shadow_max, "I", "");
-
-SYSCTL_INT(_vm, OID_AUTO, vm_shadow_max_enabled, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_shadow_max_enabled, 0, "");
-
-#endif /* VM_SCAN_FOR_SHADOW_CHAIN */
-
 SYSCTL_INT(_vm, OID_AUTO, vm_debug_events, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_debug_events, 0, "");
 
-__attribute__((noinline)) int __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(
-	mach_port_t task_access_port, int32_t calling_pid, uint32_t calling_gid, int32_t target_pid);
+
 /*
  * Sysctl's related to data/stack execution.  See osfmk/vm/vm_map.c
  */
@@ -174,17 +140,6 @@ SYSCTL_INT(_vm, OID_AUTO, shared_region_unnest_logging, CTLFLAG_RW | CTLFLAG_LOC
 
 int vm_shared_region_unnest_log_interval = 10;
 int shared_region_unnest_log_count_threshold = 5;
-
-/*
- * Shared cache path enforcement.
- */
-
-static int scdir_enforce = 1;
-static char scdir_path[] = "/var/db/dyld/";
-
-#ifndef SECURE_KERNEL
-SYSCTL_INT(_vm, OID_AUTO, enforce_shared_cache_dir, CTLFLAG_RW | CTLFLAG_LOCKED, &scdir_enforce, 0, "");
-#endif
 
 /* These log rate throttling state variables aren't thread safe, but
  * are sufficient unto the task.
@@ -590,19 +545,6 @@ out:
 }
 
 /*
- *	__KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__
- *
- *	Description:	Waits for the user space daemon to respond to the request
- *			we made. Function declared non inline to be visible in
- *			stackshots and spindumps as well as debugging.
- */
-__attribute__((noinline)) int __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(
-	mach_port_t task_access_port, int32_t calling_pid, uint32_t calling_gid, int32_t target_pid)
-{
-	return check_task_access(task_access_port, calling_pid, calling_gid, target_pid);
-}
-
-/*
  *	Routine:	task_for_pid
  *	Purpose:
  *		Get the task port for another "process", named by its
@@ -676,7 +618,7 @@ task_for_pid(
 			}
 
 			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport, proc_selfpid(), kauth_getgid(), pid);
+			error = check_task_access(tfpport, proc_selfpid(), kauth_getgid(), pid);
 
 			if (error != MACH_MSG_SUCCESS) {
 				if (error == MACH_RCV_INTERRUPTED)
@@ -851,7 +793,7 @@ pid_suspend(struct proc *p __unused, struct pid_suspend_args *args, int *ret)
 			}
 
 			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport, proc_selfpid(), kauth_getgid(), pid);
+			error = check_task_access(tfpport, proc_selfpid(), kauth_getgid(), pid);
 
 			if (error != MACH_MSG_SUCCESS) {
 				if (error == MACH_RCV_INTERRUPTED)
@@ -935,7 +877,7 @@ pid_resume(struct proc *p __unused, struct pid_resume_args *args, int *ret)
 			}
 
 			/* Call up to the task access server */
-			error = __KERNEL_WAITING_ON_TASKGATED_CHECK_ACCESS_UPCALL__(tfpport, proc_selfpid(), kauth_getgid(), pid);
+			error = check_task_access(tfpport, proc_selfpid(), kauth_getgid(), pid);
 
 			if (error != MACH_MSG_SUCCESS) {
 				if (error == MACH_RCV_INTERRUPTED)
@@ -1062,8 +1004,7 @@ shared_region_check_np(
 
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: %p [%d(%s)] -> check_np(0x%llx)\n",
-		 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-		 p->p_pid, p->p_comm,
+		 current_thread(), p->p_pid, p->p_comm,
 		 (uint64_t)uap->start_address));
 
 	/* retrieve the current tasks's shared region */
@@ -1084,8 +1025,7 @@ shared_region_check_np(
 					("shared_region: %p [%d(%s)] "
 					 "check_np(0x%llx) "
 					 "copyout(0x%llx) error %d\n",
-					 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-					 p->p_pid, p->p_comm,
+					 current_thread(), p->p_pid, p->p_comm,
 					 (uint64_t)uap->start_address, (uint64_t)start_address,
 					 error));
 			}
@@ -1098,8 +1038,7 @@ shared_region_check_np(
 
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: %p [%d(%s)] check_np(0x%llx) <- 0x%llx %d\n",
-		 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-		 p->p_pid, p->p_comm,
+		 current_thread(), p->p_pid, p->p_comm,
 		 (uint64_t)uap->start_address, (uint64_t)start_address, error));
 
 	return error;
@@ -1125,8 +1064,7 @@ shared_region_copyin_mappings(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(): "
 			 "copyin(0x%llx, %d) failed (error=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
+			 current_thread(), p->p_pid, p->p_comm,
 			 (uint64_t)user_mappings, mappings_count, error));
 	}
 	return error;
@@ -1154,7 +1092,7 @@ _shared_region_map_and_slide(
 	int				error;
 	kern_return_t			kr;
 	struct fileproc			*fp;
-	struct vnode			*vp, *root_vp, *scdir_vp;
+	struct vnode			*vp, *root_vp;
 	struct vnode_attr		va;
 	off_t				fs;
 	memory_object_size_t		file_size;
@@ -1166,13 +1104,11 @@ _shared_region_map_and_slide(
 
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: %p [%d(%s)] -> map\n",
-		 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-		 p->p_pid, p->p_comm));
+		 current_thread(), p->p_pid, p->p_comm));
 
 	shared_region = NULL;
 	fp = NULL;
 	vp = NULL;
-	scdir_vp = NULL;
 
 	/* get file structure from file descriptor */
 	error = fp_lookup(p, fd, &fp, 0);
@@ -1180,8 +1116,7 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map: "
 			 "fd=%d lookup failed (error=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm, fd, error));
+			 current_thread(), p->p_pid, p->p_comm, fd, error));
 		goto done;
 	}
 
@@ -1190,8 +1125,7 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map: "
 			 "fd=%d not a vnode (type=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
+			 current_thread(), p->p_pid, p->p_comm,
 			 fd, FILEGLOB_DTYPE(fp->f_fglob)));
 		error = EINVAL;
 		goto done;
@@ -1202,8 +1136,7 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map: "
 			 "fd=%d not readable\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm, fd));
+			 current_thread(), p->p_pid, p->p_comm, fd));
 		error = EPERM;
 		goto done;
 	}
@@ -1214,8 +1147,7 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map: "
 			 "fd=%d getwithref failed (error=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm, fd, error));
+			 current_thread(), p->p_pid, p->p_comm, fd, error));
 		goto done;
 	}
 	vp = (struct vnode *) fp->f_fglob->fg_data;
@@ -1225,10 +1157,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "not a file (type=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp),
-			 vp->v_name, vp->v_type));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name, vp->v_type));
 		error = EINVAL;
 		goto done;
 	}
@@ -1267,9 +1197,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "not on process's root volume\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name));
 		error = EPERM;
 		goto done;
 	}
@@ -1282,50 +1211,18 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "vnode_getattr(%p) failed (error=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name,
-			 (void *)VM_KERNEL_ADDRPERM(vp), error));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name, vp, error));
 		goto done;
 	}
 	if (va.va_uid != 0) {
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "owned by uid=%d instead of 0\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp),
-			 vp->v_name, va.va_uid));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name, va.va_uid));
 		error = EPERM;
 		goto done;
-	}
-
-	if (scdir_enforce) {
-		/* get vnode for scdir_path */
-		error = vnode_lookup(scdir_path, 0, &scdir_vp, vfs_context_current());
-		if (error) {
-			SHARED_REGION_TRACE_ERROR(
-				("shared_region: %p [%d(%s)] map(%p:'%s'): "
-				 "vnode_lookup(%s) failed (error=%d)\n",
-				 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-				 p->p_pid, p->p_comm,
-				 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name,
-				 scdir_path, error));
-			goto done;
-		}
-
-		/* ensure parent is scdir_vp */
-		if (vnode_parent(vp) != scdir_vp) {
-			SHARED_REGION_TRACE_ERROR(
-				("shared_region: %p [%d(%s)] map(%p:'%s'): "
-				 "shared cache file not in %s\n",
-				 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-				 p->p_pid, p->p_comm,
-				 (void *)VM_KERNEL_ADDRPERM(vp),
-				 vp->v_name, scdir_path));
-			error = EPERM;
-			goto done;
-		}
 	}
 
 	/* get vnode size */
@@ -1334,10 +1231,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "vnode_size(%p) failed (error=%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name,
-			 (void *)VM_KERNEL_ADDRPERM(vp), error));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name, vp, error));
 		goto done;
 	}
 	file_size = fs;
@@ -1348,9 +1243,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "no memory object\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name));
 		error = EINVAL;
 		goto done;
 	}
@@ -1362,9 +1256,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "no shared region\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name));
 		goto done;
 	}
 
@@ -1382,9 +1275,8 @@ _shared_region_map_and_slide(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(%p:'%s'): "
 			 "vm_shared_region_map_file() failed kr=0x%x\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
-			 (void *)VM_KERNEL_ADDRPERM(vp), vp->v_name, kr));
+			 current_thread(), p->p_pid, p->p_comm,
+			 vp, vp->v_name, kr));
 		switch (kr) {
 		case KERN_INVALID_ADDRESS:
 			error = EFAULT;
@@ -1439,10 +1331,6 @@ done:
 		fp_drop(p, fd, fp, 0);
 		fp = NULL;
 	}
-	if (scdir_vp != NULL) {
-		(void)vnode_put(scdir_vp);
-		scdir_vp = NULL;
-	}
 
 	if (shared_region != NULL) {
 		vm_shared_region_deallocate(shared_region);
@@ -1450,8 +1338,7 @@ done:
 
 	SHARED_REGION_TRACE_DEBUG(
 		("shared_region: %p [%d(%s)] <- map\n",
-		 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-		 p->p_pid, p->p_comm));
+		 current_thread(), p->p_pid, p->p_comm));
 
 	return error;
 }
@@ -1492,8 +1379,7 @@ shared_region_map_and_slide_np(
 		SHARED_REGION_TRACE_INFO(
 			("shared_region: %p [%d(%s)] map(): "
 			 "no mappings\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm));
+			 current_thread(), p->p_pid, p->p_comm));
 		kr = 0;	/* no mappings: we're done ! */
 		goto done;
 	} else if (mappings_count <= SFM_MAX_STACK) {
@@ -1502,8 +1388,7 @@ shared_region_map_and_slide_np(
 		SHARED_REGION_TRACE_ERROR(
 			("shared_region: %p [%d(%s)] map(): "
 			 "too many mappings (%d)\n",
-			 (void *)VM_KERNEL_ADDRPERM(current_thread()),
-			 p->p_pid, p->p_comm,
+			 current_thread(), p->p_pid, p->p_comm,
 			 mappings_count));
 		kr = KERN_FAILURE;
 		goto done;
@@ -1526,9 +1411,6 @@ done:
 }
 
 /* sysctl overflow room */
-
-SYSCTL_INT (_vm, OID_AUTO, pagesize, CTLFLAG_RD | CTLFLAG_LOCKED,
-	    (int *) &page_size, 0, "vm page size");
 
 /* vm_page_free_target is provided as a makeshift solution for applications that want to
 	allocate buffer space, possibly purgeable memory, but not cause inactive pages to be
@@ -1631,11 +1513,6 @@ SYSCTL_UINT(_vm, OID_AUTO, pageout_cleaned_fault_reactivated, CTLFLAG_RD | CTLFL
 SYSCTL_UINT(_vm, OID_AUTO, pageout_cleaned_commit_reactivated, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_cleaned_commit_reactivated, 0, "Cleaned pages commit reactivated");
 SYSCTL_UINT(_vm, OID_AUTO, pageout_cleaned_busy, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_cleaned_busy, 0, "Cleaned pages busy (deactivated)");
 SYSCTL_UINT(_vm, OID_AUTO, pageout_cleaned_nolock, CTLFLAG_RD | CTLFLAG_LOCKED, &vm_pageout_cleaned_nolock, 0, "Cleaned pages no-lock (deactivated)");
-
-/* counts of pages prefaulted when entering a memory object */
-extern int64_t vm_prefault_nb_pages, vm_prefault_nb_bailout;
-SYSCTL_QUAD(_vm, OID_AUTO, prefault_nb_pages, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_prefault_nb_pages, "");
-SYSCTL_QUAD(_vm, OID_AUTO, prefault_nb_bailout, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_prefault_nb_bailout, "");
 
 #include <kern/thread.h>
 #include <sys/user.h>

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2011 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -1636,7 +1636,7 @@ nfs_reconnect(struct nfsmount *nmp)
 		microuptime(&now);
 		if ((lastmsg + nmp->nm_tprintf_delay) < now.tv_sec) {
 			lastmsg = now.tv_sec;
-			nfs_down(nmp, thd, error, NFSSTA_TIMEO, "can not connect", 0);
+			nfs_down(nmp, thd, error, NFSSTA_TIMEO, "can not connect");
 			wentdown = 1;
 		}
 		lck_mtx_lock(&nmp->nm_lock);
@@ -1647,13 +1647,7 @@ nfs_reconnect(struct nfsmount *nmp)
 			NFS_SOCK_DBG("Not mounted returning %d\n", error);
 			return (error);
 		}
-
-		if (nfs_mount_check_dead_timeout(nmp)) {
-			nfs_mount_make_zombie(nmp);
-			lck_mtx_unlock(&nmp->nm_lock);
-			return (ENXIO);
-		}
-		
+		nfs_mount_check_dead_timeout(nmp);
 		if ((error = nfs_sigintr(nmp, NULL, thd, 1))) {
 			lck_mtx_unlock(&nmp->nm_lock);
 			return (error);
@@ -1777,6 +1771,7 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 	int do_reconnect_sleep = 0;
 
 	lck_mtx_lock(&nmp->nm_lock);
+
 	while (!(nmp->nm_sockflags & NMSOCK_READY) ||
 	       !TAILQ_EMPTY(&nmp->nm_resendq) ||
 	       !LIST_EMPTY(&nmp->nm_monlist) ||
@@ -1787,7 +1782,7 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 		if (nmp->nm_sockflags & NMSOCK_UNMOUNT)
 			break;
 		/* do reconnect, if necessary */
-		if (!(nmp->nm_sockflags & NMSOCK_READY) && !(nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD))) {
+		if (!(nmp->nm_sockflags & NMSOCK_READY) && !(nmp->nm_state & NFSSTA_FORCE)) {
 			if (nmp->nm_reconnect_start <= 0) {
 				microuptime(&now);
 				nmp->nm_reconnect_start = now.tv_sec;
@@ -1818,14 +1813,14 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 		if ((nmp->nm_sockflags & NMSOCK_READY) &&
 		    (nmp->nm_state & NFSSTA_RECOVER) &&
 		    !(nmp->nm_sockflags & NMSOCK_UNMOUNT) &&
-		    !(nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD))) {
+		    !(nmp->nm_state & NFSSTA_FORCE)) {
 			/* perform state recovery */
 			lck_mtx_unlock(&nmp->nm_lock);
 			nfs_recover(nmp);
 			lck_mtx_lock(&nmp->nm_lock);
 		}
 		/* handle NFSv4 delegation returns */
-		while ((nmp->nm_vers >= NFS_VER4) && !(nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD)) &&
+		while ((nmp->nm_vers >= NFS_VER4) && !(nmp->nm_state & NFSSTA_FORCE) &&
 		       (nmp->nm_sockflags & NMSOCK_READY) && !(nmp->nm_state & NFSSTA_RECOVER) &&
 		       ((np = TAILQ_FIRST(&nmp->nm_dreturnq)))) {
 			lck_mtx_unlock(&nmp->nm_lock);
@@ -1833,12 +1828,11 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 			lck_mtx_lock(&nmp->nm_lock);
 		}
 		/* do resends, if necessary/possible */
-		while ((((nmp->nm_sockflags & NMSOCK_READY) && !(nmp->nm_state & NFSSTA_RECOVER)) ||
-			(nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD))) &&
+		while ((((nmp->nm_sockflags & NMSOCK_READY) && !(nmp->nm_state & NFSSTA_RECOVER)) || (nmp->nm_state & NFSSTA_FORCE)) &&
 		       ((req = TAILQ_FIRST(&nmp->nm_resendq)))) {
 			if (req->r_resendtime)
 				microuptime(&now);
-			while (req && !(nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD)) && req->r_resendtime && (now.tv_sec < req->r_resendtime))
+			while (req && !(nmp->nm_state & NFSSTA_FORCE) && req->r_resendtime && (now.tv_sec < req->r_resendtime))
 				req = TAILQ_NEXT(req, r_rchain);
 			if (!req)
 				break;
@@ -1871,7 +1865,9 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 				NFS_SOCK_DBG("nfs async%s restart: p %d x 0x%llx f 0x%x rtt %d\n",
 					nfs_request_using_gss(req) ? " gss" : "", req->r_procnum, req->r_xid,
 					req->r_flags, req->r_rtt);
-				error = nfs_sigintr(nmp, req, req->r_thread, 0);
+				error = !req->r_nmp ? ENXIO : 0;	/* unmounted? */
+				if (!error)
+					error = nfs_sigintr(nmp, req, req->r_thread, 0);
 				if (!error)
 					error = nfs_request_add_header(req);
 				if (!error)
@@ -1892,7 +1888,9 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 			}
 			NFS_SOCK_DBG("nfs async resend: p %d x 0x%llx f 0x%x rtt %d\n",
 				req->r_procnum, req->r_xid, req->r_flags, req->r_rtt);
-			error = nfs_sigintr(nmp, req, req->r_thread, 0);
+			error = !req->r_nmp ? ENXIO : 0;	/* unmounted? */
+			if (!error)
+				error = nfs_sigintr(nmp, req, req->r_thread, 0);
 			if (!error) {
 				req->r_flags |= R_SENDING;
 				lck_mtx_unlock(&req->r_mtx);
@@ -1917,19 +1915,15 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 				nfs_asyncio_finish(req);
 			lck_mtx_lock(&nmp->nm_lock);
 		}
-		if (nfs_mount_check_dead_timeout(nmp)) {
-			nfs_mount_make_zombie(nmp);
-			break;
-		}
-		
+		if (nmp->nm_deadto_start)
+			nfs_mount_check_dead_timeout(nmp);
 		if (nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD))
 			break;
 		/* check monitored nodes, if necessary/possible */
 		if (!LIST_EMPTY(&nmp->nm_monlist)) {
 			nmp->nm_state |= NFSSTA_MONITOR_SCAN;
 			LIST_FOREACH(np, &nmp->nm_monlist, n_monlink) {
-				if (!(nmp->nm_sockflags & NMSOCK_READY) ||
-				    (nmp->nm_state & (NFSSTA_RECOVER|NFSSTA_UNMOUNTING|NFSSTA_FORCE|NFSSTA_DEAD)))
+				if (!(nmp->nm_sockflags & NMSOCK_READY) || (nmp->nm_state & (NFSSTA_RECOVER|NFSSTA_UNMOUNTING|NFSSTA_FORCE)))
 					break;
 				np->n_mflag |= NMMONSCANINPROG;
 				lck_mtx_unlock(&nmp->nm_lock);
@@ -1942,8 +1936,7 @@ nfs_mount_sock_thread(void *arg, __unused wait_result_t wr)
 					np->n_mflag &= ~NMMONSCANWANT;
 					wakeup(&np->n_mflag);
 				}
-				if (error || !(nmp->nm_sockflags & NMSOCK_READY) ||
-				    (nmp->nm_state & (NFSSTA_RECOVER|NFSSTA_UNMOUNTING|NFSSTA_FORCE|NFSSTA_DEAD)))
+				if (error || !(nmp->nm_sockflags & NMSOCK_READY) || (nmp->nm_state & (NFSSTA_RECOVER|NFSSTA_UNMOUNTING|NFSSTA_FORCE)))
 					break;
 			}
 			nmp->nm_state &= ~NFSSTA_MONITOR_SCAN;
@@ -1992,51 +1985,26 @@ nfs_mount_sock_thread_wake(struct nfsmount *nmp)
  * unresponsive mount has reached the dead timeout.
  * (must be called with nmp locked)
  */
-int
+void
 nfs_mount_check_dead_timeout(struct nfsmount *nmp)
 {
 	struct timeval now;
 
-	if (nmp->nm_state & NFSSTA_DEAD)
-		return 1;
 	if (nmp->nm_deadto_start == 0)
-		return 0;
+		return;
+	if (nmp->nm_state & NFSSTA_DEAD)
+		return;
 	nfs_is_squishy(nmp);
 	if (nmp->nm_curdeadtimeout <= 0)
-		return 0;
+		return;
 	microuptime(&now);
 	if ((now.tv_sec - nmp->nm_deadto_start) < nmp->nm_curdeadtimeout)
-		return 0;
-	return 1;
-}
-
-/*
- * Call nfs_mount_zombie to remove most of the
- * nfs state for the mount, and then ask to be forcibly unmounted.
- *
- * Assumes the nfs mount structure lock nm_lock is held.
- */
-
-void
-nfs_mount_make_zombie(struct nfsmount *nmp)
-{
-	fsid_t fsid;
-	
-	if (!nmp)
 		return;
-
-	if (nmp->nm_state & NFSSTA_DEAD)
-		return;
-
 	printf("nfs server %s: %sdead\n", vfs_statfs(nmp->nm_mountp)->f_mntfromname,
 	       (nmp->nm_curdeadtimeout != nmp->nm_deadtimeout) ? "squished " : "");
-	fsid = vfs_statfs(nmp->nm_mountp)->f_fsid;
-	lck_mtx_unlock(&nmp->nm_lock);
-	nfs_mount_zombie(nmp, NFSSTA_DEAD);
-	vfs_event_signal(&fsid, VQ_DEAD, 0);
-	lck_mtx_lock(&nmp->nm_lock);
+	nmp->nm_state |= NFSSTA_DEAD;
+	vfs_event_signal(&vfs_statfs(nmp->nm_mountp)->f_fsid, VQ_DEAD, 0);
 }
-
 
 /*
  * NFS callback channel socket state
@@ -3004,11 +2972,11 @@ again:
 		lck_mtx_lock(&nmp->nm_lock);
 		while (!(nmp->nm_sockflags & NMSOCK_READY)) {
 			/* don't bother waiting if the socket thread won't be reconnecting it */
-			if (nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD)) {
+			if (nmp->nm_state & NFSSTA_FORCE) {
 				error = EIO;
 				break;
 			}
-			if ((NMFLAG(nmp, SOFT) || (req->r_flags & R_SOFT)) && (nmp->nm_reconnect_start > 0)) {
+			if (NMFLAG(nmp, SOFT) && (nmp->nm_reconnect_start > 0)) {
 				struct timeval now;
 				microuptime(&now);
 				if ((now.tv_sec - nmp->nm_reconnect_start) >= 8) {
@@ -3126,11 +3094,11 @@ again:
 		msg.msg_namelen = sendnam->sa_len;
 	}
 	error = sock_sendmbuf(nso->nso_so, &msg, mreqcopy, 0, &sentlen);
-	if (error || (sentlen != req->r_mreqlen)) {
+#ifdef NFS_SOCKET_DEBUGGING
+	if (error || (sentlen != req->r_mreqlen))
 		NFS_SOCK_DBG("nfs_send: 0x%llx sent %d/%d error %d\n",
-			     req->r_xid, (int)sentlen, (int)req->r_mreqlen, error);
-	}
-	
+			req->r_xid, (int)sentlen, (int)req->r_mreqlen, error);
+#endif
 	if (!error && (sentlen != req->r_mreqlen))
 		error = EWOULDBLOCK;
 	needrecon = ((sotype == SOCK_STREAM) && sentlen && (sentlen != req->r_mreqlen));
@@ -3297,7 +3265,6 @@ nfs_tcp_rcv(socket_t so, void *arg, __unused int waitflag)
 	mbuf_t m;
 	int error = 0;
 	int recv = 1;
-	int wup = 0;
 
 	if (nmp->nm_sockflags & NMSOCK_CONNECTING)
 		return;
@@ -3328,16 +3295,19 @@ nfs_tcp_rcv(socket_t so, void *arg, __unused int waitflag)
 			nfs_request_match_reply(nmp, m);
 	}
 
-	/* Update the sockets's rpc parsing state */
-	lck_mtx_lock(&nso->nso_lock);
-	nso->nso_rrs = nrrs;
-	if (nso->nso_flags & NSO_DISCONNECTING)
-		wup = 1;
-	nso->nso_flags &= ~NSO_UPCALL;
-	lck_mtx_unlock(&nso->nso_lock);
-	if (wup)
-		wakeup(&nso->nso_flags);
-
+	lck_mtx_lock(&nmp->nm_lock);
+	if (nmp->nm_nso == nso) {
+		/* still the same socket, so update socket's RPC parsing state */
+		lck_mtx_unlock(&nmp->nm_lock);
+		lck_mtx_lock(&nso->nso_lock);
+		nso->nso_rrs = nrrs;
+		nso->nso_flags &= ~NSO_UPCALL;
+		lck_mtx_unlock(&nso->nso_lock);
+		if (nmp->nm_sockflags & NMSOCK_DISCONNECTING)
+			wakeup(&nmp->nm_sockflags);
+	} else {
+		lck_mtx_unlock(&nmp->nm_lock);
+	}
 #ifdef NFS_SOCKET_DEBUGGING
 	if (!recv && (error != EWOULDBLOCK))
 		NFS_SOCK_DBG("nfs_tcp_rcv: got nothing, error %d, got FIN?\n", error);
@@ -3365,9 +3335,6 @@ nfs_sock_poke(struct nfsmount *nmp)
 	lck_mtx_lock(&nmp->nm_lock);
 	if ((nmp->nm_sockflags & NMSOCK_UNMOUNT) ||
 	    !(nmp->nm_sockflags & NMSOCK_READY) || !nmp->nm_nso || !nmp->nm_nso->nso_so) {
-		/* Nothing to poke */
-		nmp->nm_sockflags &= ~NMSOCK_POKE;
-		wakeup(&nmp->nm_sockflags);
 		lck_mtx_unlock(&nmp->nm_lock);
 		return;
 	}
@@ -3380,10 +3347,6 @@ nfs_sock_poke(struct nfsmount *nmp)
 	msg.msg_iovlen = 1;
 	error = sock_send(nmp->nm_nso->nso_so, &msg, MSG_DONTWAIT, &len);
 	NFS_SOCK_DBG("nfs_sock_poke: error %d\n", error);
-	lck_mtx_lock(&nmp->nm_lock);
-	nmp->nm_sockflags &= ~NMSOCK_POKE;
-	wakeup(&nmp->nm_sockflags);
-	lck_mtx_unlock(&nmp->nm_lock);
 	nfs_is_dead(error, nmp);
 }
 
@@ -3610,14 +3573,14 @@ nfs_request_create(
 		req->r_flags = R_ALLOCATED;
 
 	nmp = VFSTONFS(np ? NFSTOMP(np) : mp);
-	if (nfs_mount_gone(nmp)) {
+	if (!nmp) {
 		if (newreq)
 			FREE_ZONE(newreq, sizeof(*newreq), M_NFSREQ);
 		return (ENXIO);
 	}
 	lck_mtx_lock(&nmp->nm_lock);
-	if ((nmp->nm_state & (NFSSTA_FORCE|NFSSTA_DEAD)) &&
-	    (nmp->nm_state & NFSSTA_TIMEO)) {
+	if ((nmp->nm_state & (NFSSTA_FORCE|NFSSTA_TIMEO)) ==
+	    (NFSSTA_FORCE|NFSSTA_TIMEO)) {
 		lck_mtx_unlock(&nmp->nm_lock);
 		mbuf_freem(nmrest->nmc_mhead);
 		nmrest->nmc_mhead = NULL;
@@ -3625,7 +3588,7 @@ nfs_request_create(
 			FREE_ZONE(newreq, sizeof(*newreq), M_NFSREQ);
 		return (ENXIO);
 	}
-	
+
 	if ((nmp->nm_vers != NFS_VER4) && (procnum >= 0) && (procnum < NFS_NPROCS))
 		OSAddAtomic64(1, &nfsstats.rpccnt[procnum]);
 	if ((nmp->nm_vers == NFS_VER4) && (procnum != NFSPROC4_COMPOUND) && (procnum != NFSPROC4_NULL))
@@ -3633,7 +3596,6 @@ nfs_request_create(
 
 	lck_mtx_init(&req->r_mtx, nfs_request_grp, LCK_ATTR_NULL);
 	req->r_nmp = nmp;
-	nmp->nm_ref++;
 	req->r_np = np;
 	req->r_thread = thd;
 	if (!thd)
@@ -3680,30 +3642,23 @@ nfs_request_destroy(struct nfsreq *req)
 {
 	struct nfsmount *nmp = req->r_np ? NFSTONMP(req->r_np) : req->r_nmp;
 	struct gss_seq *gsp, *ngsp;
-	int clearjbtimeo = 0;
 	struct timespec ts = { 1, 0 };
+	int clearjbtimeo = 0;
 
 	if (!req || !(req->r_flags & R_INITTED))
 		return;
 	req->r_flags &= ~R_INITTED;
 	if (req->r_lflags & RL_QUEUED)
 		nfs_reqdequeue(req);
-
-	if (req->r_achain.tqe_next != NFSREQNOLIST &&
-	    req->r_achain.tqe_next != NFSIODCOMPLETING) {
-		/* 
-		 * Still on an async I/O queue?
-		 * %%% But which one, we may be on a local iod.
-		 */
+	if (req->r_achain.tqe_next != NFSREQNOLIST) {
+		/* still on an async I/O queue? */
 		lck_mtx_lock(nfsiod_mutex);
-		if (nmp && req->r_achain.tqe_next != NFSREQNOLIST &&
-		    req->r_achain.tqe_next != NFSIODCOMPLETING) {
+		if (nmp && (req->r_achain.tqe_next != NFSREQNOLIST)) {
 			TAILQ_REMOVE(&nmp->nm_iodq, req, r_achain);
 			req->r_achain.tqe_next = NFSREQNOLIST;
 		}
 		lck_mtx_unlock(nfsiod_mutex);
 	}
-
 	lck_mtx_lock(&req->r_mtx);
 	if (nmp) {
 		lck_mtx_lock(&nmp->nm_lock);
@@ -3736,11 +3691,9 @@ nfs_request_destroy(struct nfsreq *req)
 		}
 		lck_mtx_unlock(&nmp->nm_lock);
 	}
-	/* Wait for the mount_sock_thread to finish with the resend */
 	while (req->r_flags & R_RESENDQ)
 		msleep(req, &req->r_mtx, (PZERO - 1), "nfsresendqwait", &ts);
 	lck_mtx_unlock(&req->r_mtx);
-
 	if (clearjbtimeo)
 		nfs_up(nmp, req->r_thread, clearjbtimeo, NULL);
 	if (req->r_mhead)
@@ -3759,8 +3712,7 @@ nfs_request_destroy(struct nfsreq *req)
 		nfs_gss_clnt_ctx_unref(req);
 	if (req->r_wrongsec)
 		FREE(req->r_wrongsec, M_TEMP);
-	if (nmp)
-		nfs_mount_rele(nmp);
+
 	lck_mtx_destroy(&req->r_mtx, nfs_request_grp);
 	if (req->r_flags & R_ALLOCATED)
 		FREE_ZONE(req, sizeof(*req), M_NFSREQ);
@@ -3812,7 +3764,7 @@ nfs_request_add_header(struct nfsreq *req)
 	}
 
 	nmp = req->r_np ? NFSTONMP(req->r_np) : req->r_nmp;
-	if (nfs_mount_gone(nmp))
+	if (!nmp)
 		return (ENXIO);
 
 	error = nfsm_rpchead(req, req->r_mrest, &req->r_xid, &req->r_mhead);
@@ -3821,10 +3773,10 @@ nfs_request_add_header(struct nfsreq *req)
 
 	req->r_mreqlen = mbuf_pkthdr_len(req->r_mhead);
 	nmp = req->r_np ? NFSTONMP(req->r_np) : req->r_nmp;
-	if (nfs_mount_gone(nmp))
+	if (!nmp)
 		return (ENXIO);
 	lck_mtx_lock(&nmp->nm_lock);
-	if (NMFLAG(nmp, SOFT) || (req->r_flags & R_SOFT))
+	if (NMFLAG(nmp, SOFT))
 		req->r_retry = nmp->nm_retry;
 	else
 		req->r_retry = NFS_MAXREXMIT + 1;	/* past clip limit */
@@ -3850,7 +3802,7 @@ nfs_request_send(struct nfsreq *req, int wait)
 	lck_mtx_lock(nfs_request_mutex);
 
 	nmp = req->r_np ? NFSTONMP(req->r_np) : req->r_nmp;
-	if (nfs_mount_gone(nmp)) {
+	if (!nmp) {
 		lck_mtx_unlock(nfs_request_mutex);
 		return (ENXIO);
 	}
@@ -3978,8 +3930,8 @@ nfs_request_finish(
 	 */
 	if (!error) {
 		if ((req->r_flags & R_TPRINTFMSG) ||
-		    (nmp && (NMFLAG(nmp, SOFT) || (req->r_flags & R_SOFT)) &&
-		     ((nmp->nm_state & (NFSSTA_TIMEO|NFSSTA_FORCE|NFSSTA_DEAD)) == NFSSTA_TIMEO)))
+		    (nmp && NMFLAG(nmp, SOFT) &&
+		     ((nmp->nm_state & (NFSSTA_TIMEO|NFSSTA_FORCE)) == NFSSTA_TIMEO)))
 			nfs_up(nmp, req->r_thread, NFSSTA_TIMEO, "is alive again");
 		else
 			nfs_up(nmp, req->r_thread, NFSSTA_TIMEO, NULL);
@@ -4095,10 +4047,9 @@ nfs_request_finish(
 					lck_mtx_unlock(&nmp->nm_lock);
 				}
 				nfs_down(req->r_nmp, req->r_thread, 0, NFSSTA_JUKEBOXTIMEO,
-					 "resource temporarily unavailable (jukebox)", 0);
+					"resource temporarily unavailable (jukebox)");
 			}
-			if ((NMFLAG(nmp, SOFT) || (req->r_flags & R_SOFT)) && (req->r_delay == 30) &&
-				!(req->r_flags & R_NOINTR)) {
+			if (NMFLAG(nmp, SOFT) && (req->r_delay == 30) && !(req->r_flags & R_NOINTR)) {
 				/* for soft mounts, just give up after a short while */
 				OSAddAtomic64(1, &nfsstats.rpctimeouts);
 				nfs_softterm(req);
@@ -4182,6 +4133,14 @@ nfs_request_finish(
 			/* find the next flavor to try */
 			for(i=0; i < NX_MAX_SEC_FLAVORS; i++)
 				if (req->r_wrongsec[i] != RPCAUTH_INVALID) {
+					if (((req->r_wrongsec[i] == RPCAUTH_KRB5P) ||
+					     (req->r_wrongsec[i] == RPCAUTH_KRB5I) ||
+					     (req->r_wrongsec[i] == RPCAUTH_KRB5)) && (req->r_gss_ctx &&
+					    (req->r_gss_ctx->gss_clnt_service == RPCSEC_GSS_SVC_SYS))) {
+						/* don't bother trying Kerberos if we've already got a fallback context */
+						req->r_wrongsec[i] = RPCAUTH_INVALID;
+						continue;
+					}
 					if (!srvcount) /* no server list, just try it */
 						break;
 					/* check that it's in the server's list */
@@ -4332,7 +4291,7 @@ nfs_request2(
 
 	if ((error = nfs_request_create(np, mp, nmrest, procnum, thd, cred, &req)))
 		return (error);
-	req->r_flags |= (flags & (R_OPTMASK | R_SOFT));
+	req->r_flags |= (flags & R_OPTMASK);
 	if (si)
 		req->r_secinfo = *si;
 
@@ -4375,7 +4334,7 @@ nfs_request_gss(
 		int *status)
 {
 	struct nfsreq rq, *req = &rq;
-	int error, wait = 1;
+	int error;
 
 	if ((error = nfs_request_create(NULL, mp, nmrest, NFSPROC_NULL, thd, cred, &req)))
 		return (error);
@@ -4388,13 +4347,6 @@ nfs_request_gss(
 	}
 	nfs_gss_clnt_ctx_ref(req, cp);
 
-	/*
-	 * Don't wait for a reply to a context destroy advisory
-	 * to avoid hanging on a dead server.
-	 */
-	if (cp->gss_clnt_proc == RPCSEC_GSS_DESTROY)
-		wait = 0;
-
 	FSDBG_TOP(273, R_XID32(req->r_xid), NULL, NFSPROC_NULL, 0);
 	do {
 		req->r_error = 0;
@@ -4402,21 +4354,15 @@ nfs_request_gss(
 		if ((error = nfs_request_add_header(req)))
 			break;
 
-		if ((error = nfs_request_send(req, wait)))
+		if ((error = nfs_request_send(req, 1)))
 			break;
-		if (!wait)
-			break;
-
 		nfs_request_wait(req);
 		if ((error = nfs_request_finish(req, nmrepp, status)))
 			break;
 	} while (req->r_flags & R_RESTART);
 
 	FSDBG_BOT(273, R_XID32(req->r_xid), NULL, NFSPROC_NULL, error);
-
-	nfs_gss_clnt_ctx_unref(req);
 	nfs_request_rele(req);
-
 	return (error);
 }
 
@@ -4463,8 +4409,7 @@ nfs_request_async(
 			int slpflag = (req->r_nmp && NMFLAG(req->r_nmp, INTR) && req->r_thread && !(req->r_flags & R_NOINTR)) ? PCATCH : 0;
 			struct timespec ts = { 2, 0 };
 			while (!(req->r_flags & R_SENT)) {
-				nmp = req->r_nmp;
-				if ((req->r_flags & R_RESENDQ) && !nfs_mount_gone(nmp)) {
+				if ((req->r_flags & R_RESENDQ) && ((nmp = req->r_nmp))) {
 					lck_mtx_lock(&nmp->nm_lock);
 					if ((nmp->nm_state & NFSSTA_RECOVER) && (req->r_rchain.tqe_next != NFSREQNOLIST)) {
 						/*
@@ -4495,14 +4440,12 @@ nfs_request_async(
 		}
 		sent = req->r_flags & R_SENT;
 		lck_mtx_unlock(&req->r_mtx);
-		if (error && req->r_callback.rcb_func && !sent) {
+		if (error && req->r_callback.rcb_func && !sent)
 			nfs_request_rele(req);
-		}
 	}
 	FSDBG(274, R_XID32(req->r_xid), np, procnum, error);
 	if (error || req->r_callback.rcb_func)
 		nfs_request_rele(req);
-
 	return (error);
 }
 
@@ -4524,7 +4467,6 @@ nfs_request_async_finish(
 		req->r_flags |= R_ASYNCWAIT;
 	while (req->r_flags & R_RESENDQ) {  /* wait until the request is off the resend queue */
 		struct timespec ts = { 2, 0 };
-
 		if ((nmp = req->r_nmp)) {
 			lck_mtx_lock(&nmp->nm_lock);
 			if ((nmp->nm_state & NFSSTA_RECOVER) && (req->r_rchain.tqe_next != NFSREQNOLIST)) {
@@ -4586,6 +4528,7 @@ nfs_request_async_finish(
 void
 nfs_request_async_cancel(struct nfsreq *req)
 {
+	nfs_reqdequeue(req);
 	FSDBG(275, R_XID32(req->r_xid), req->r_np, req->r_procnum, 0xD1ED1E);
 	nfs_request_rele(req);
 }
@@ -4599,7 +4542,7 @@ nfs_softterm(struct nfsreq *req)
 	struct nfsmount *nmp = req->r_nmp;
 	req->r_flags |= R_SOFTTERM;
 	req->r_error = ETIMEDOUT;
-	if (!(req->r_flags & R_CWND) || nfs_mount_gone(nmp))
+	if (!(req->r_flags & R_CWND) || !nmp)
 		return;
 	/* update congestion window */
 	req->r_flags &= ~R_CWND;
@@ -4691,7 +4634,6 @@ nfs_request_timer(__unused void *param0, __unused void *param1)
 	struct timeval now;
 	TAILQ_HEAD(nfs_mount_pokeq, nfsmount) nfs_mount_poke_queue;
 
-restart:
 	lck_mtx_lock(nfs_request_mutex);
 	req = TAILQ_FIRST(&nfs_reqq);
 	if (req == NULL) {	/* no requests - turn timer off */
@@ -4706,10 +4648,8 @@ restart:
 	microuptime(&now);
 	for ( ; req != NULL ; req = nfs_reqnext(req)) {
 		nmp = req->r_nmp;
-		if (nmp == NULL) {
-			NFS_SOCK_DBG("Found a request with out a mount!\n");
+		if (!nmp) /* unmounted */
 			continue;
-		}
 		if (req->r_error || req->r_nmrep.nmc_mhead)
 			continue;
 		if ((error = nfs_sigintr(nmp, req, req->r_thread, 0))) {
@@ -4733,7 +4673,7 @@ restart:
 		    ((req->r_lastmsg + nmp->nm_tprintf_delay) < now.tv_sec)) {
 			req->r_lastmsg = now.tv_sec;
 			nfs_down(req->r_nmp, req->r_thread, 0, NFSSTA_TIMEO,
-				 "not responding", 1);
+				"not responding");
 			req->r_flags |= R_TPRINTFMSG;
 			lck_mtx_lock(&nmp->nm_lock);
 			if (!(nmp->nm_state & NFSSTA_MOUNTED)) {
@@ -4756,7 +4696,7 @@ restart:
 		 * Put a reasonable limit on the maximum timeout,
 		 * and reduce that limit when soft mounts get timeouts or are in reconnect.
 		 */
-		if (!(NMFLAG(nmp, SOFT) || (req->r_flags & R_SOFT)) && !nfs_can_squish(nmp))
+		if (!NMFLAG(nmp, SOFT) && !nfs_can_squish(nmp))
 			maxtime = NFS_MAXTIMEO;
 		else if ((req->r_flags & (R_SETUP|R_RECOVER)) ||
 			 ((nmp->nm_reconnect_start <= 0) || ((now.tv_sec - nmp->nm_reconnect_start) < 8)))
@@ -4791,7 +4731,6 @@ restart:
 			if (timeo > maxtime)
 				timeo = maxtime;
 			if (req->r_rtt <= timeo) {
-				NFS_SOCK_DBG("nfs timeout: req time %d and timeo is %d continue\n", req->r_rtt, timeo);
 				lck_mtx_unlock(&nmp->nm_lock);
 				lck_mtx_unlock(&req->r_mtx);
 				continue;
@@ -4803,48 +4742,7 @@ restart:
 				(now.tv_sec - req->r_start)*NFS_HZ, maxtime);
 			if (nmp->nm_timeouts < 8)
 				nmp->nm_timeouts++;
-			if (nfs_mount_check_dead_timeout(nmp)) {
-				/* Unbusy this request */
-				req->r_lflags &= ~RL_BUSY;
-				if (req->r_lflags & RL_WAITING) {
-					req->r_lflags &= ~RL_WAITING;
-					wakeup(&req->r_lflags);
-				}
-				lck_mtx_unlock(&req->r_mtx);
-
-		 		/* No need to poke this mount */
-				if (nmp->nm_sockflags & NMSOCK_POKE) {
-					nmp->nm_sockflags &= ~NMSOCK_POKE;
-					TAILQ_REMOVE(&nfs_mount_poke_queue, nmp, nm_pokeq);
-				}
-				/* Release our lock state, so we can become a zombie */
-				lck_mtx_unlock(nfs_request_mutex);
-
-				/*
-				 * Note nfs_mount_make zombie(nmp) must be
-				 * called with nm_lock held. After doing some
-				 * work we release nm_lock in
-				 * nfs_make_mount_zombie with out acquiring any
-				 * other locks. (Later, in nfs_mount_zombie we
-				 * will acquire nfs_request_mutex, r_mtx,
-				 * nm_lock in that order). So we should not be
-				 * introducing deadlock here. We take a reference
-				 * on the mount so that its still there when we
-				 * release the lock.
-				 */
-				nmp->nm_ref++;
-				nfs_mount_make_zombie(nmp);
-				lck_mtx_unlock(&nmp->nm_lock);
-				nfs_mount_rele(nmp);
-
-				/*
-				 * All the request for this mount have now been
-				 * removed from the request queue. Restart to
-				 * process the remaining mounts
-				 */
-				goto restart;
-			}
-			
+			nfs_mount_check_dead_timeout(nmp);
 			/* if it's been a few seconds, try poking the socket */
 			if ((nmp->nm_sotype == SOCK_STREAM) &&
 			    ((now.tv_sec - req->r_start) >= 3) &&
@@ -4857,7 +4755,7 @@ restart:
 		}
 
 		/* For soft mounts (& SETUPs/RECOVERs), check for too many retransmits/timeout. */
-		if ((NMFLAG(nmp, SOFT) ||  (req->r_flags & (R_SETUP|R_RECOVER|R_SOFT))) &&
+		if ((NMFLAG(nmp, SOFT) ||  (req->r_flags & (R_SETUP|R_RECOVER))) &&
 		    ((req->r_rexmit >= req->r_retry) || /* too many */
 		     ((now.tv_sec - req->r_start)*NFS_HZ > maxtime))) { /* too long */
 			OSAddAtomic64(1, &nfsstats.rpctimeouts);
@@ -4867,7 +4765,7 @@ restart:
 				/* make sure we note the unresponsive server */
 				/* (maxtime may be less than tprintf delay) */
 				nfs_down(req->r_nmp, req->r_thread, 0, NFSSTA_TIMEO,
-					 "not responding", 1);
+					"not responding");
 				req->r_lastmsg = now.tv_sec;
 				req->r_flags |= R_TPRINTFMSG;
 			} else {
@@ -4923,6 +4821,10 @@ restart:
 	while ((nmp = TAILQ_FIRST(&nfs_mount_poke_queue))) {
 		TAILQ_REMOVE(&nfs_mount_poke_queue, nmp, nm_pokeq);
 		nfs_sock_poke(nmp);
+		lck_mtx_lock(&nmp->nm_lock);
+		nmp->nm_sockflags &= ~NMSOCK_POKE;
+		wakeup(&nmp->nm_sockflags);
+		lck_mtx_unlock(&nmp->nm_lock);
 	}
 
 	nfs_interval_timer_start(nfs_request_timer_call, NFS_REQUESTDELAY);
@@ -4953,7 +4855,7 @@ nfs_sigintr(struct nfsmount *nmp, struct nfsreq *req, thread_t thd, int nmplocke
 	proc_t p;
 	int error = 0;
 
-	if (!nmp)
+	if (nmp == NULL)
 		return (ENXIO);
 
 	if (req && (req->r_flags & R_SOFTTERM))
@@ -4966,7 +4868,7 @@ nfs_sigintr(struct nfsmount *nmp, struct nfsreq *req, thread_t thd, int nmplocke
 	if (nmp->nm_state & NFSSTA_FORCE) {
 		/* If a force unmount is in progress then fail. */
 		error = EIO;
-	} else if (vfs_isforce(nmp->nm_mountp)) {
+	} else if (nmp->nm_mountp->mnt_kern_flag & MNTK_FRCUNMOUNT) {
 		/* Someone is unmounting us, go soft and mark it. */
 		NFS_BITMAP_SET(nmp->nm_flags, NFS_MFLAG_SOFT);
 		nmp->nm_state |= NFSSTA_FORCE;
@@ -5026,7 +4928,7 @@ nfs_sndlock(struct nfsreq *req)
 	int error = 0, slpflag = 0;
 	struct timespec ts = { 0, 0 };
 
-	if (nfs_mount_gone(nmp))
+	if (nmp == NULL)
 		return (ENXIO);
 
 	lck_mtx_lock(&nmp->nm_lock);
@@ -5061,7 +4963,7 @@ nfs_sndunlock(struct nfsreq *req)
 	struct nfsmount *nmp = req->r_nmp;
 	int *statep, wake = 0;
 
-	if (!nmp)
+	if (nmp == NULL)
 		return;
 	lck_mtx_lock(&nmp->nm_lock);
 	statep = &nmp->nm_state;
@@ -5130,21 +5032,9 @@ nfs_aux_request(
 		}
 
 		if (sotype == SOCK_STREAM) {
-#			define NFS_AUX_CONNECTION_TIMEOUT 4   /* 4 second timeout for connections */
-			int count = 0;
-			
-			error = sock_connect(newso, saddr, MSG_DONTWAIT);
-			if (error == EINPROGRESS)
-				error = 0;
-			nfsmout_if(error);
-
-			while ((error = sock_connectwait(newso, &tv)) == EINPROGRESS) {
-				/* After NFS_AUX_CONNECTION_TIMEOUT bail */
-				if (++count >= NFS_AUX_CONNECTION_TIMEOUT) {
-					error = ETIMEDOUT;
-					break;
-				}
-			}
+			on = 4; /* don't wait too long for the socket to connect */
+			sock_setsockopt(newso, IPPROTO_TCP, TCP_CONNECTIONTIMEOUT, &on, sizeof(on));
+			error = sock_connect(newso, saddr, 0);
 			nfsmout_if(error);
 		}
 		if (((error = sock_setsockopt(newso, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)))) ||
@@ -5466,7 +5356,7 @@ nfs_is_squishy(struct nfsmount *nmp)
 	int squishy = 0;
 	int timeo = (nfs_squishy_flags & NFS_SQUISH_QUICK) ? NFS_SQUISHY_QUICKTIMEOUT : NFS_SQUISHY_DEADTIMEOUT;
 
-	NFS_SOCK_DBG("%s: nm_curdeadtimeout = %d, nfs_is_mobile = %d\n",
+	NFS_SOCK_DBG("%s: nm_curdeadtiemout = %d, nfs_is_mobile = %d\n",
 		      vfs_statfs(mp)->f_mntfromname, nmp->nm_curdeadtimeout,  nfs_is_mobile);
 
 	if (!nfs_can_squish(nmp))
@@ -5506,77 +5396,45 @@ out:
  * and NFS_SQUISH_QUICK flag is set and we are in a squishy state then mark the mount as dead
  * and ask to be forcibly unmounted. Return 1 if we're dead and 0 otherwise.
  */
-int
-nfs_is_dead(int error, struct nfsmount *nmp)
+static int
+nfs_is_dead_lock(int error, struct nfsmount *nmp)
 {
-	fsid_t fsid;
-
-	lck_mtx_lock(&nmp->nm_lock);
-	if (nmp->nm_state & NFSSTA_DEAD) {
-		lck_mtx_unlock(&nmp->nm_lock);
+	if (nmp->nm_state & NFSSTA_DEAD)
 		return (1);
-	}
 
 	if ((error != ENETUNREACH && error != EHOSTUNREACH && error != EADDRNOTAVAIL) ||
-	    !(nmp->nm_locations.nl_numlocs == 1 && nmp->nm_locations.nl_locations[0]->nl_servcount == 1)) {
-		lck_mtx_unlock(&nmp->nm_lock);
+	    !(nmp->nm_locations.nl_numlocs == 1 && nmp->nm_locations.nl_locations[0]->nl_servcount == 1))
 		return (0);
-	}
 
 	if ((nfs_squishy_flags & NFS_SQUISH_QUICK) && nfs_is_squishy(nmp)) {
 		printf("nfs_is_dead: nfs server %s: unreachable. Squished dead\n", vfs_statfs(nmp->nm_mountp)->f_mntfromname);
-		fsid = vfs_statfs(nmp->nm_mountp)->f_fsid;
-		lck_mtx_unlock(&nmp->nm_lock);
-		nfs_mount_zombie(nmp, NFSSTA_DEAD);
-		vfs_event_signal(&fsid, VQ_DEAD, 0);
+		nmp->nm_state |= NFSSTA_DEAD;
+		vfs_event_signal(&vfs_statfs(nmp->nm_mountp)->f_fsid, VQ_DEAD, 0);
 		return (1);
 	}
-	lck_mtx_unlock(&nmp->nm_lock);
 	return (0);
 }
 
-/*
- * If we've experienced timeouts and we're not really a
- * classic hard mount, then just return cached data to
- * the caller instead of likely hanging on an RPC.
- */
 int
-nfs_use_cache(struct nfsmount *nmp)
+nfs_is_dead(int error, struct nfsmount *nmp)
 {
-	/*
-	 *%%% We always let mobile users goto the cache,
-	 * perhaps we should not even require them to have
-	 * a timeout?
-	 */
-	int cache_ok = (nfs_is_mobile || NMFLAG(nmp, SOFT) ||
-			nfs_can_squish(nmp) || nmp->nm_deadtimeout);
+	int is_dead;
 
-	int timeoutmask = NFSSTA_TIMEO | NFSSTA_LOCKTIMEO | NFSSTA_JUKEBOXTIMEO;
+	lck_mtx_lock(&nmp->nm_lock);
+	is_dead = nfs_is_dead_lock(error, nmp);
+	lck_mtx_unlock(&nmp->nm_lock);
 
-	/*
-	 * So if we have a timeout and we're not really a hard hard-mount,
-	 * return 1 to not get things out of the cache.
-	 */
-
-	return ((nmp->nm_state & timeoutmask) && cache_ok);
+	return (is_dead);
 }
 
-/*
- * Log a message that nfs or lockd server is unresponsive. Check if we
- * can be squished and if we can, or that our dead timeout has
- * expired, and we're not holding state, set our mount as dead, remove
- * our mount state and ask to be unmounted. If we are holding state
- * we're being called from the nfs_request_timer and will soon detect
- * that we need to unmount.
- */
 void
-nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *msg, int holding_state)
+nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *msg)
 {
 	int timeoutmask, wasunresponsive, unresponsive, softnobrowse;
-	uint32_t do_vfs_signal = 0;
+	uint32_t do_vfs_signal;
 	struct timeval now;
 
-	if (nfs_mount_gone(nmp))
+	if (nmp == NULL)
 		return;
 
 	lck_mtx_lock(&nmp->nm_lock);
@@ -5605,17 +5463,17 @@ nfs_down(struct nfsmount *nmp, thread_t thd, int error, int flags, const char *m
 		if (!wasunresponsive) {
 			nmp->nm_deadto_start = now.tv_sec;
 			nfs_mount_sock_thread_wake(nmp);
-		} else if ((now.tv_sec - nmp->nm_deadto_start) > nmp->nm_curdeadtimeout && !holding_state) {
+		} else if ((now.tv_sec - nmp->nm_deadto_start) > nmp->nm_curdeadtimeout) {
 			if (!(nmp->nm_state & NFSSTA_DEAD))
 				printf("nfs server %s: %sdead\n", vfs_statfs(nmp->nm_mountp)->f_mntfromname,
 				       (nmp->nm_curdeadtimeout != nmp->nm_deadtimeout) ? "squished " : "");
-			do_vfs_signal = VQ_DEAD;
+			nmp->nm_state |= NFSSTA_DEAD;
 		}
 	}
 	lck_mtx_unlock(&nmp->nm_lock);
 
-	if (do_vfs_signal == VQ_DEAD && !(nmp->nm_state & NFSSTA_DEAD))
-		nfs_mount_zombie(nmp, NFSSTA_DEAD);
+	if (nmp->nm_state & NFSSTA_DEAD)
+		do_vfs_signal = VQ_DEAD;
 	else if (softnobrowse || wasunresponsive || !unresponsive)
 		do_vfs_signal = 0;
 	else
@@ -5632,7 +5490,7 @@ nfs_up(struct nfsmount *nmp, thread_t thd, int flags, const char *msg)
 	int timeoutmask, wasunresponsive, unresponsive, softnobrowse;
 	int do_vfs_signal;
 
-	if (nfs_mount_gone(nmp))
+	if (nmp == NULL)
 		return;
 
 	if (msg)

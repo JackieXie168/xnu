@@ -55,6 +55,7 @@
  */
 
 #include <mach_rt.h>
+#include <platforms.h>
 #include <mach_kdp.h>
 #include <mach_assert.h>
 

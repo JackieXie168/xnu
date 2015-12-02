@@ -33,6 +33,11 @@
 
 #pragma ident	"@(#)elftypes.h	1.24	05/06/08 SMI"	/* SVr4.0 1.1	*/
 
+#if !defined(__APPLE__)
+#include <sys/feature_tests.h>
+#else /* is Apple Mac OS X */
+/* NOTHING */ /* In lieu of Solaris <sys/feature_tests.h> */
+
 #if defined(__LP64__)
 #if !defined(_LP64)
 #define _LP64 /* Solaris vs. Darwin */
@@ -46,6 +51,8 @@
 #if !defined(_LONGLONG_TYPE)
 #define _LONGLONG_TYPE
 #endif
+
+#endif /* __APPLE__ */
 
 #ifdef	__cplusplus
 extern "C" {

@@ -289,7 +289,10 @@ hfs_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp, int
 		 * directory has not been removed, then can consider
 		 * allowing file to be created.
 		 */
-		if ((nameiop == CREATE || nameiop == RENAME) &&
+		if ((nameiop == CREATE || nameiop == RENAME ||
+		    (nameiop == DELETE &&
+		    (cnp->cn_flags & DOWHITEOUT) &&
+		    (cnp->cn_flags & ISWHITEOUT))) &&
 		    (flags & ISLASTCN) &&
 		    !(ISSET(dcp->c_flag, C_DELETED | C_NOEXISTS))) {
 			retval = EJUSTRETURN;

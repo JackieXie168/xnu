@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -79,7 +79,6 @@
 #include <net/if.h>
 #include <net/route.h>
 #include <net/ntstat.h>
-#include <net/content_filter.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -227,27 +226,16 @@ out:
 	return error;
 }
 
-#if NECP
 #define	COMMON_START()	TCPDEBUG0;					\
 do {									\
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD)		\
 		return (EINVAL);					\
-	if (necp_socket_should_use_flow_divert(inp))			\
+	if (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)			\
 		return (EPROTOTYPE);					\
 	tp = intotcpcb(inp);						\
 	TCPDEBUG1();							\
 	calculate_tcp_clock();						\
 } while (0)
-#else /* NECP */
-#define	COMMON_START()	TCPDEBUG0;					\
-do {									\
-	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD)		\
-		return (EINVAL);					\
-	tp = intotcpcb(inp);						\
-	TCPDEBUG1();							\
-	calculate_tcp_clock();						\
-} while (0)
-#endif /* !NECP */
 
 #define COMMON_END(req)	out: TCPDEBUG2(req); return error; goto out
 
@@ -421,27 +409,23 @@ tcp_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		} else
 			return EINVAL;
 	}
-#if NECP
 #if FLOW_DIVERT
-	else if (necp_socket_should_use_flow_divert(inp)) {
-		uint32_t fd_ctl_unit = necp_socket_get_flow_divert_control_unit(inp);
-		if (fd_ctl_unit > 0) {
-			error = flow_divert_pcb_init(so, fd_ctl_unit);
-			if (error == 0) {
-				error = flow_divert_connect_out(so, nam, p);
+   	else if (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT) {
+		uint32_t fd_ctl_unit = 0;
+		error = flow_divert_check_policy(so, p, FALSE, &fd_ctl_unit);
+		if (error == 0) {
+			if (fd_ctl_unit > 0) {
+				error = flow_divert_pcb_init(so, fd_ctl_unit);
+				if (error == 0) {
+					error = flow_divert_connect_out(so, nam, p);
+				}
+			} else {
+				error = ENETDOWN;
 			}
-		} else {
-			error = ENETDOWN;
 		}
 		return error;
 	}
 #endif /* FLOW_DIVERT */
-#if CONTENT_FILTER
-	error = cfil_sock_attach(so);
-	if (error != 0)
-		return error;
-#endif /* CONTENT_FILTER */
-#endif /* NECP */
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
 
@@ -496,10 +480,6 @@ tcp_usr_connectx_common(struct socket *so, int af,
 	VERIFY(dst_se->se_addr->sa_family == af);
 	VERIFY(src_se == NULL || src_se->se_addr->sa_family == af);
 
-#if NECP
-	inp_update_necp_policy(inp, src_se ? src_se->se_addr : NULL, dst_se ? dst_se->se_addr : NULL, ifscope);
-#endif /* NECP */
-	
 	/*
 	 * We get here for 2 cases:
 	 *
@@ -595,28 +575,23 @@ tcp6_usr_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 		} else
 			return EINVAL;
 	}
-#if NECP
 #if FLOW_DIVERT
-	else if (necp_socket_should_use_flow_divert(inp)) {
-		uint32_t fd_ctl_unit = necp_socket_get_flow_divert_control_unit(inp);
-		if (fd_ctl_unit > 0) {
-			error = flow_divert_pcb_init(so, fd_ctl_unit);
-			if (error == 0) {
-				error = flow_divert_connect_out(so, nam, p);
+	else if (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT) {
+		uint32_t fd_ctl_unit = 0;
+		error = flow_divert_check_policy(so, p, FALSE, &fd_ctl_unit);
+		if (error == 0) {
+			if (fd_ctl_unit > 0) {
+				error = flow_divert_pcb_init(so, fd_ctl_unit);
+				if (error == 0) {
+					error = flow_divert_connect_out(so, nam, p);
+				}
+			} else {
+				error = ENETDOWN;
 			}
-		} else {
-			error = ENETDOWN;
 		}
 		return error;
 	}
 #endif /* FLOW_DIVERT */
-#if CONTENT_FILTER
-	error = cfil_sock_attach(so);
-	if (error != 0)
-		return error;
-#endif /* CONTENT_FILTER */
-#endif /* NECP */
-
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
 
@@ -734,15 +709,8 @@ tcp_usr_accept(struct socket *so, struct sockaddr **nam)
 	}
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD)
 		return (EINVAL);
-#if NECP
-	else if (necp_socket_should_use_flow_divert(inp))
+	else if (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)
 		return (EPROTOTYPE);
-#if CONTENT_FILTER
-	error = cfil_sock_attach(so);
-	if (error != 0)
-		return (error);
-#endif /* CONTENT_FILTER */
-#endif /* NECP */
 
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
@@ -767,15 +735,8 @@ tcp6_usr_accept(struct socket *so, struct sockaddr **nam)
 	}
 	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD)
 		return (EINVAL);
-#if NECP
-	else if (necp_socket_should_use_flow_divert(inp))
+	else if (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)
 		return (EPROTOTYPE);
-#if CONTENT_FILTER
-	error = cfil_sock_attach(so);
-	if (error != 0)
-		return (error);
-#endif /* CONTENT_FILTER */
-#endif /* NECP */
 
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
@@ -823,12 +784,7 @@ tcp_usr_shutdown(struct socket *so)
 	 */
 	tp = intotcpcb(inp);
 	TCPDEBUG1();
-
-	if (tp == NULL
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp))
-#endif /* NECP */
-		) {
+        if (tp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)) {
 		if (tp != NULL)
 			error = EPROTOTYPE;
 		goto out;
@@ -844,12 +800,6 @@ tcp_usr_shutdown(struct socket *so)
 		goto out;
 	}
 #endif
-#if CONTENT_FILTER
-	/* Don't send a FIN yet */
-	if (tp && !(so->so_state & SS_ISDISCONNECTED) &&
-		cfil_sock_data_pending(&so->so_snd))
-		goto out;
-#endif /* CONTENT_FILTER */
 	if (tp)
 		error = tcp_output(tp);
 	COMMON_END(PRU_SHUTDOWN);
@@ -872,11 +822,6 @@ tcp_usr_rcvd(struct socket *so, __unused int flags)
 	tcp_sbrcv_trim(tp, &so->so_rcv);
 
 	tcp_output(tp);
-
-#if CONTENT_FILTER
-	cfil_sock_buf_update(&so->so_rcv);
-#endif /* CONTENT_FILTER */
-
 	COMMON_END(PRU_RCVD);
 }
 
@@ -924,11 +869,8 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 #endif
 	TCPDEBUG0;
 
-	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp))
-#endif /* NECP */
-		) {
+	if (inp == NULL || inp->inp_state == INPCB_STATE_DEAD ||
+	    (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)) {
 		/*
 		 * OOPS! we lost a race, the TCP session got reset after
 		 * we checked SS_CANTSENDMORE, eg: while doing uiomove or a
@@ -940,11 +882,10 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			m_freem(control);
 			control = NULL;
 		}
-
-		if (inp == NULL)
-			error = ECONNRESET;	/* XXX EPIPE? */
-		else
+		if (inp != NULL && (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
 			error = EPROTOTYPE;
+		else
+			error = ECONNRESET;	/* XXX EPIPE? */
 		tp = NULL;
 		TCPDEBUG1();
 		goto out;
@@ -1072,9 +1013,9 @@ tcp_usr_send(struct socket *so, int flags, struct mbuf *m,
 			tcp_mss(tp, -1, IFSCOPE_NONE);
 		}
 		tp->snd_up = tp->snd_una + so->so_snd.sb_cc;
-		tp->t_flagsext |= TF_FORCE;
+		tp->t_force = 1;
 		error = tcp_output(tp);
-		tp->t_flagsext &= ~TF_FORCE;
+		tp->t_force = 0;
 	}
 	COMMON_END((flags & PRUS_OOB) ? PRU_SENDOOB : 
 		   ((flags & PRUS_EOF) ? PRU_SEND_EOF : PRU_SEND));
@@ -1530,11 +1471,6 @@ tcp_fill_info(struct tcpcb *tp, struct tcp_info *ti)
 		ti->tcpi_wifi_rxbytes = inp->inp_wstat->rxbytes;
 		ti->tcpi_wifi_txpackets = inp->inp_wstat->txpackets;
 		ti->tcpi_wifi_txbytes = inp->inp_wstat->txbytes;
-
-		ti->tcpi_wired_rxpackets = inp->inp_Wstat->rxpackets;
-		ti->tcpi_wired_rxbytes = inp->inp_Wstat->rxbytes;
-		ti->tcpi_wired_txpackets = inp->inp_Wstat->txpackets;
-		ti->tcpi_wired_txbytes = inp->inp_Wstat->txbytes;
 	}
 }
 
@@ -1752,7 +1688,6 @@ tcp_ctloutput(so, sopt)
 		case TCP_NODELAY:
 		case TCP_NOOPT:
 		case TCP_NOPUSH:
-		case TCP_ENABLE_ECN:
 			error = sooptcopyin(sopt, &optval, sizeof optval,
 					    sizeof optval);
 			if (error)
@@ -1768,9 +1703,6 @@ tcp_ctloutput(so, sopt)
 			case TCP_NOPUSH:
 				opt = TF_NOPUSH;
 				break;
-			case TCP_ENABLE_ECN:
-				opt = TF_ENABLE_ECN;
-				break;
 			default:
 				opt = 0; /* dead code to fool gcc */
 				break;
@@ -1782,22 +1714,11 @@ tcp_ctloutput(so, sopt)
 				tp->t_flags &= ~opt;
 			break;
 		case TCP_RXT_FINDROP:
-		case TCP_NOTIMEWAIT:
 			error = sooptcopyin(sopt, &optval, sizeof optval,
 				sizeof optval);
 			if (error)
 				break;
-			switch (sopt->sopt_name) {
-			case TCP_RXT_FINDROP:
-				opt = TF_RXTFINDROP;
-				break;
-			case TCP_NOTIMEWAIT:
-				opt = TF_NOTIMEWAIT;
-				break;
-			default:
-				opt = 0;
-				break;
-			}
+			opt = TF_RXTFINDROP;
 			if (optval)
 				tp->t_flagsext |= opt;
 			else
@@ -2060,22 +1981,6 @@ tcp_ctloutput(so, sopt)
 				tp->t_flagsext |= TF_NOSTRETCHACK;
 			}
 			break;
-		case TCP_DISABLE_BLACKHOLE_DETECTION:
-			error = sooptcopyin(sopt, &optval, sizeof(optval),
-				sizeof(optval));
-			if (error)
-				break;
-			if (optval < 0 || optval > 1) {
-				error = EINVAL;
-			} else if (optval == 0) {
-				tp->t_flagsext &= ~TF_NOBLACKHOLE_DETECTION;
-			} else {
-				tp->t_flagsext |= TF_NOBLACKHOLE_DETECTION;
-				if ((tp->t_flags & TF_BLACKHOLE) &&
-				    tp->t_pmtud_saved_maxopd > 0)
-					tcp_pmtud_revert_segment_size(tp);
-			}
-			break;
 		case SO_FLUSH:
 			if ((error = sooptcopyin(sopt, &optval, sizeof (optval),
 			    sizeof (optval))) != 0)
@@ -2127,9 +2032,6 @@ tcp_ctloutput(so, sopt)
 		case TCP_NOPUSH:
 			optval = tp->t_flags & TF_NOPUSH;
 			break;
-		case TCP_ENABLE_ECN:
-			optval = (tp->t_flags & TF_ENABLE_ECN) ? 1 : 0; 
-			break;
 		case TCP_CONNECTIONTIMEOUT:
 			optval = tp->t_keepinit / TCP_RETRANSHZ;
 			break;
@@ -2142,9 +2044,6 @@ tcp_ctloutput(so, sopt)
 		case TCP_RXT_FINDROP:
 			optval = tp->t_flagsext & TF_RXTFINDROP;
 			break; 
-		case TCP_NOTIMEWAIT:
-			optval = (tp->t_flagsext & TF_NOTIMEWAIT) ? 1 : 0;
-			break;
 		case TCP_MEASURE_SND_BW:
 			optval = tp->t_flagsext & TF_MEASURESNDBW;
 			break;
@@ -2185,12 +2084,6 @@ tcp_ctloutput(so, sopt)
 			break;
 		case TCP_SENDMOREACKS:
 			if (tp->t_flagsext & TF_NOSTRETCHACK)
-				optval = 1;
-			else
-				optval = 0;
-			break;
-		case TCP_DISABLE_BLACKHOLE_DETECTION:
-			if (tp->t_flagsext & TF_NOBLACKHOLE_DETECTION)
 				optval = 1;
 			else
 				optval = 0;
@@ -2333,8 +2226,9 @@ tcp_attach(so, p)
 		so->so_state |= nofd;
 		return (ENOBUFS);
 	}
-	if (nstat_collect)
+	if (nstat_collect) {
 		nstat_tcp_new_pcb(inp);
+	}
 	tp->t_state = TCPS_CLOSED;
 	return (0);
 }

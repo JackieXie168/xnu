@@ -24,35 +24,26 @@ INSTINC_SUBDIRS = \
 
 EXPINC_SUBDIRS = ${INSTINC_SUBDIRS}
 
-# By default, everything in xnu/iokit/IOKit gets installed into 
-# Kernel.framework/Headers/IOKit AND Kernel.framework/PrivateHeaders/IOKit.
-# This is so the files with #ifdef ...PRIVATE portions can be processed.
-# xnu/README documents the INSTALL* and EXPORT_MI_DIR lists.
-ALL_HEADERS = $(shell (cd $(SOURCE); echo *.h))
+NOT_EXPORT_HEADERS = IOReportMacros.h
 
-# Do not install these headers (anywhere).
-NOT_EXPORT_HEADERS = IOInterruptAccountingPrivate.h
-
-# Install these only in Kernel.framework's PrivateHeaders (not Headers).
 NOT_KF_MI_HEADERS  = $(NOT_EXPORT_HEADERS)			\
 		     IOKitKeysPrivate.h IOCPU.h			\
 		     IOHibernatePrivate.h IOPolledInterface.h	\
 		     IOCommandQueue.h IOLocksPrivate.h 		\
 		     IOSyncer.h AppleKeyStoreInterface.h	\
-		     IOStatistics.h IOStatisticsPrivate.h	\
-		     IOKernelReporters.h
+		     IOStatistics.h IOStatisticsPrivate.h
 
-# These should be additionally installed in IOKit.framework's public Headers
+NOT_LOCAL_HEADERS = 
+
+ALL_HEADERS = $(shell (cd $(SOURCE); echo *.h))
+
 INSTALL_MI_LIST	= IOBSD.h IOKitKeys.h IOKitServer.h IOReturn.h\
 		  IOSharedLock.h IOTypes.h OSMessageNotification.h\
-		  IODataQueueShared.h IOMessage.h IOInterruptAccounting.h\
+		  IODataQueueShared.h IOMessage.h
 
-# These should be additionally installed in IOKit.framework's PrivateHeaders
 INSTALL_MI_LCL_LIST = IOKitKeysPrivate.h IOHibernatePrivate.h \
 					  IOLocksPrivate.h IOStatistics.h \
-					  AppleKeyStoreInterface.h  \
-					  IOReportTypes.h IOKernelReportStructs.h \
-					  IOReportMacros.h
+					  AppleKeyStoreInterface.h IOReportTypes.h
 
 INSTALL_MI_DIR = .
 

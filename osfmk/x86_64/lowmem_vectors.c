@@ -55,6 +55,7 @@
  * the rights to redistribute these changes.
  */
 
+#include <platforms.h>
 #include <mach_kdp.h>
 #include <mach/vm_param.h>
 #include <x86_64/lowglobals.h>

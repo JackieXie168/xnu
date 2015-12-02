@@ -57,9 +57,6 @@
 extern cpu_type_t cpuid_cputype(void);
 extern cpu_subtype_t cpuid_cpusubtype(void);
 
-extern vm_offset_t machine_trace_thread_get_kva(vm_offset_t cur_target_addr);
-extern void machine_trace_thread_clear_validation_cache(void);
-
 void		print_saved_state(void *);
 void		kdp_call(void);
 int		kdp_getc(void);
@@ -520,8 +517,7 @@ machine_trace_thread(thread_t thread, char *tracepos, char *tracebound, int nfra
 	uint32_t init_eip = 0;
 	uint32_t prevsp = 0;
 	uint32_t framesize = 2 * sizeof(vm_offset_t);
-	vm_offset_t kern_virt_addr = 0;
-
+	
 	if (user_p) {
 	        x86_saved_state32_t	*iss32;
 		
@@ -563,27 +559,18 @@ machine_trace_thread(thread_t thread, char *tracepos, char *tracebound, int nfra
 			break;
 		}
 
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr + RETURN_OFFSET);
-
-		if (!kern_virt_addr) {
+		if (kdp_machine_vm_read((mach_vm_address_t)(stackptr + RETURN_OFFSET), (caddr_t) tracebuf, sizeof(*tracebuf)) != sizeof(*tracebuf)) {
 			break;
 		}
-
-		*tracebuf = *(uint32_t *)kern_virt_addr;
 		tracebuf++;
 		
 		prevsp = stackptr;
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr);
-
-		if (!kern_virt_addr) {
+		if (kdp_machine_vm_read((mach_vm_address_t)stackptr, (caddr_t) &stackptr, sizeof(stackptr)) != sizeof(stackptr)) {
 			*tracebuf++ = 0;
 			break;
 		}
-
-		stackptr = *(uint32_t *)kern_virt_addr;
 	}
 
-	machine_trace_thread_clear_validation_cache();
 	kdp_pmap = 0;
 
 	return (uint32_t) (((char *) tracebuf) - tracepos);
@@ -608,7 +595,6 @@ machine_trace_thread64(thread_t thread, char *tracepos, char *tracebound, int nf
 	addr64_t init_rip = 0;
 	addr64_t prevsp = 0;
 	unsigned framesize = 2 * sizeof(addr64_t);
-	vm_offset_t kern_virt_addr = 0;
 
 	if (user_p) {
 		x86_saved_state64_t	*iss64;
@@ -639,7 +625,7 @@ machine_trace_thread64(thread_t thread, char *tracepos, char *tracebound, int nf
 			break;
 		}
 
-		if (stackptr & 0x0000007) {
+		if (stackptr & 0x0000003) {
 			break;
 		}
 
@@ -647,30 +633,21 @@ machine_trace_thread64(thread_t thread, char *tracepos, char *tracebound, int nf
 			break;
 		}
 
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr + RETURN_OFFSET64);
-
-		if (!kern_virt_addr) {
+		if (machine_read64(stackptr + RETURN_OFFSET64, (caddr_t) tracebuf, sizeof(addr64_t)) != sizeof(addr64_t)) {
 			break;
 		}
-
-		*tracebuf = *(uint64_t *)kern_virt_addr;
 		if (!user_p)
 			*tracebuf = VM_KERNEL_UNSLIDE(*tracebuf);
 
 		tracebuf++;
 
 		prevsp = stackptr;
-		kern_virt_addr = machine_trace_thread_get_kva(stackptr);
-
-		if (!kern_virt_addr) {
+		if (machine_read64(stackptr, (caddr_t) &stackptr, sizeof(addr64_t)) != sizeof(addr64_t)) {
 			*tracebuf++ = 0;
 			break;
 		}
-
-		stackptr = *(uint64_t *)kern_virt_addr;
 	}
 
-	machine_trace_thread_clear_validation_cache();
 	kdp_pmap = NULL;
 
 	return (uint32_t) (((char *) tracebuf) - tracepos);

@@ -113,6 +113,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 				mach_vm_address_t alignment,
 				mach_vm_address_t physicalMask)
 {
+    kern_return_t 	  kr;
     task_t		  mapTask = NULL;
     vm_map_t 		  vmmap = NULL;
     mach_vm_address_t     highestMask = 0;
@@ -121,7 +122,8 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     bool                  mapped = false;
     bool                  needZero;
 
-    if (!capacity) return false;
+    if (!capacity)
+        return false;
 
     _options   	      = options;
     _capacity         = capacity;
@@ -145,7 +147,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 	IOMapper::checkForSystemMapper();
 	mapped = (0 != IOMapper::gSystem);
     }
-    needZero = (mapped || (0 != (kIOMemorySharingTypeMask & options)));
+    needZero = mapped;
 
     if (physicalMask && (alignment <= 1))
     {
@@ -182,15 +184,53 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 	highestMask = 0;
     }
 
-    // set memory entry cache mode, pageable, purgeable
-    iomdOptions |= ((options & kIOMapCacheMask) >> kIOMapCacheShift) << kIOMemoryBufferCacheShift;
+    // set flags for entry + object create
+    vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE;
+
+    // set memory entry cache mode
+    switch (options & kIOMapCacheMask)
+    {
+	case kIOMapInhibitCache:
+	    SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
+	    break;
+
+	case kIOMapWriteThruCache:
+	    SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
+	    break;
+
+	case kIOMapWriteCombineCache:
+	    SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
+	    break;
+
+	case kIOMapCopybackCache:
+	    SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
+	    break;
+
+	case kIOMapCopybackInnerCache:
+	    SET_MAP_MEM(MAP_MEM_INNERWBACK, memEntryCacheMode);
+	    break;
+
+	case kIOMapDefaultCache:
+	default:
+	    SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
+	    break;
+    }
+
     if (options & kIOMemoryPageable)
     {
 	iomdOptions |= kIOMemoryBufferPageable;
-	if (options & kIOMemoryPurgeable) iomdOptions |= kIOMemoryBufferPurgeable;
+
+	// must create the entry before any pages are allocated
+
+	// set flags for entry + object create
+	memEntryCacheMode |= MAP_MEM_NAMED_CREATE;
+
+	if (options & kIOMemoryPurgeable)
+	    memEntryCacheMode |= MAP_MEM_PURGABLE;
     }
     else
     {
+	memEntryCacheMode |= MAP_MEM_NAMED_REUSE;
 	vmmap = kernel_map;
 
 	// Buffer shouldn't auto prepare they should be prepared explicitly
@@ -223,7 +263,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
             				capacity, highestMask, alignment, contig);
 	}
 	else if (needZero
-		  && ((capacity + alignment) <= (page_size - gIOPageAllocChunkBytes)))
+		  && ((capacity + alignment) <= (page_size - kIOPageAllocChunkBytes)))
 	{
             _internalFlags |= kInternalFlagPageAllocated;
             needZero        = false;
@@ -252,10 +292,22 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     }
 
     if( (options & (kIOMemoryPageable | kIOMapCacheMask))) {
+	ipc_port_t	sharedMem;
 	vm_size_t	size = round_page(capacity);
 
-	// initWithOptions will create memory entry
-	iomdOptions |= kIOMemoryPersistent;
+	kr = mach_make_memory_entry(vmmap,
+				    &size, (vm_offset_t)_buffer,
+				    memEntryCacheMode, &sharedMem,
+				    NULL );
+
+	if( (KERN_SUCCESS == kr) && (size != round_page(capacity))) {
+	    ipc_port_release_send( sharedMem );
+	    kr = kIOReturnVMError;
+	}
+	if( KERN_SUCCESS != kr)
+	    return( false );
+
+	_memEntry = (void *) sharedMem;
 
 	if( options & kIOMemoryPageable) {
 #if IOALLOCDEBUG
@@ -300,7 +352,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 		return( false );
 	}
 	reserved->map = createMappingInTask(mapTask, 0, 
-			    kIOMapAnywhere | (options & kIOMapPrefault) | (options & kIOMapCacheMask), 0, 0);
+			    kIOMapAnywhere | (options & kIOMapCacheMask), 0, 0);
 	if (!reserved->map)
 	{
 	    _buffer = 0;

@@ -39,6 +39,7 @@
 
 #include <mach/mach_types.h>
 
+#include <kern/lock.h>
 #include <kern/host.h>
 #include <kern/spl.h>
 #include <kern/sched_prim.h>
@@ -127,6 +128,8 @@ static kern_return_t	clock_sleep_internal(
 							sleep_type_t		sleep_type,
 							mach_timespec_t		*sleep_time);
 
+int		rtclock_config(void);
+
 int		rtclock_init(void);
 
 kern_return_t	rtclock_gettime(
@@ -138,7 +141,7 @@ kern_return_t	rtclock_getattr(
 	mach_msg_type_number_t	*count);
 
 struct clock_ops sysclk_ops = {
-	NULL,			rtclock_init,
+	rtclock_config,			rtclock_init,
 	rtclock_gettime,
 	rtclock_getattr,
 };

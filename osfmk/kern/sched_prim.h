@@ -135,23 +135,9 @@ extern void		set_sched_pri(
 					int				priority);
 
 /* Set base priority of the specified thread */
-extern void		sched_set_thread_base_priority(
+extern void		set_priority(
 					thread_t		thread,
 					int				priority);
-
-/* Set the thread to be categorized as 'background' */
-extern void             sched_set_thread_throttled(thread_t thread,
-                                                   boolean_t wants_throttle);
-
-/* Set the thread's true scheduling mode */
-extern void             sched_set_thread_mode(thread_t thread,
-                                              sched_mode_t mode);
-/* Demote the true scheduler mode */
-extern void             sched_thread_mode_demote(thread_t thread,
-                                                 uint32_t reason);
-/* Un-demote the true scheduler mode */
-extern void             sched_thread_mode_undemote(thread_t thread,
-                                                   uint32_t reason);
 
 /* Reset scheduled priority of thread */
 extern void		compute_priority(
@@ -216,7 +202,7 @@ extern processor_t	choose_processor(
 									 thread_t			thread);
 
 /* Choose a thread from a processor's priority-based runq */
-extern thread_t choose_thread_from_runq(
+extern thread_t choose_thread(
 							  processor_t		processor,
 							  run_queue_t		runq,
 							  int				priority);
@@ -241,25 +227,6 @@ extern void	run_queue_remove(
 									 run_queue_t		runq,
 									 thread_t			thread);
 									  
-
-#if defined(CONFIG_SCHED_TIMESHARE_CORE)
-
-extern boolean_t        thread_update_add_thread(
-                                                 thread_t thread);
-extern void             thread_update_process_threads(void);
-extern boolean_t        runq_scan(
-                                  run_queue_t runq);
-
-void sched_traditional_timebase_init(void);
-void sched_traditional_maintenance_continue(void);
-boolean_t priority_is_urgent(
-                             int priority);
-uint32_t sched_traditional_initial_quantum_size(
-                                                thread_t thread);
-void sched_traditional_init(void);
-
-#endif /* CONFIG_SCHED_TIMESHARE_CORE */
-
 /* Remove thread from its run queue */
 extern boolean_t	thread_run_queue_remove(
 						thread_t	thread);
@@ -272,7 +239,7 @@ extern boolean_t	thread_eager_preemption(
 						thread_t thread);
 
 /* Fair Share routines */
-#if defined(CONFIG_SCHED_FAIRSHARE_CORE)
+#if defined(CONFIG_SCHED_TRADITIONAL) || defined(CONFIG_SCHED_PROTO) || defined(CONFIG_SCHED_FIXEDPRIORITY)
 void		sched_traditional_fairshare_init(void);
 
 int			sched_traditional_fairshare_runq_count(void);
@@ -284,9 +251,9 @@ void		sched_traditional_fairshare_enqueue(thread_t thread);
 thread_t	sched_traditional_fairshare_dequeue(void);
 
 boolean_t	sched_traditional_fairshare_queue_remove(thread_t thread);
-#endif /* CONFIG_SCHED_FAIRSHARE_CORE */
+#endif
 
-#if defined(CONFIG_SCHED_GRRR)
+#if defined(CONFIG_SCHED_GRRR) || defined(CONFIG_SCHED_FIXEDPRIORITY)
 void		sched_grrr_fairshare_init(void);
 
 int			sched_grrr_fairshare_runq_count(void);
@@ -474,7 +441,7 @@ extern boolean_t		preemption_enabled(void);
  * a function pointer table.
  */
 
-#if   !defined(CONFIG_SCHED_TRADITIONAL) && !defined(CONFIG_SCHED_PROTO) && !defined(CONFIG_SCHED_GRRR) && !defined(CONFIG_SCHED_MULTIQ)
+#if   !defined(CONFIG_SCHED_TRADITIONAL) && !defined(CONFIG_SCHED_PROTO) && !defined(CONFIG_SCHED_GRRR) && !defined(CONFIG_SCHED_FIXEDPRIORITY)
 #error Enable at least one scheduler algorithm in osfmk/conf/MASTER.XXX
 #endif
 
@@ -494,8 +461,7 @@ struct sched_dispatch_table {
 	 */
 	thread_t	(*choose_thread)(
 								  processor_t		processor,
-								  int				priority,
-								  ast_t reason);
+								  int				priority);
 	
 	/*
 	 * Steal a thread from another processor in the pset so that it can run
@@ -534,7 +500,7 @@ struct sched_dispatch_table {
 	
 	/* Remove the specific thread from the per-processor runqueue */
 	boolean_t	(*processor_queue_remove)(
-									processor_t		processor,
+									processor_t			processor,
 									thread_t		thread);
 	
 	/*
@@ -570,6 +536,9 @@ struct sched_dispatch_table {
 	
 	/* Scheduler mode for a new thread */
 	sched_mode_t	(*initial_thread_sched_mode)(task_t parent_task);
+	
+	/* Scheduler algorithm supports timeshare (decay) mode */
+	boolean_t	(*supports_timeshare_mode)(void);
 	
 	/*
 	 * Is it safe to call update_priority, which may change a thread's
@@ -620,11 +589,7 @@ struct sched_dispatch_table {
 	thread_t	(*fairshare_dequeue)(void);
 
 	boolean_t	(*fairshare_queue_remove)(thread_t thread);
-
-	boolean_t	(*processor_bound_count)(processor_t processor);
-
-	void		(*thread_update_scan)(void);
-
+    
 	/*
 	* Use processor->next_thread to pin a thread to an idle
 	* processor. If FALSE, threads are enqueued and can
@@ -640,13 +605,6 @@ extern const struct sched_dispatch_table sched_traditional_dispatch;
 extern const struct sched_dispatch_table sched_traditional_with_pset_runqueue_dispatch;
 #endif
 
-#if defined(CONFIG_SCHED_MULTIQ)
-extern const struct sched_dispatch_table sched_multiq_dispatch;
-#define kSchedMultiQString "multiq"
-extern const struct sched_dispatch_table sched_dualq_dispatch;
-#define kSchedDualQString "dualq"
-#endif
-
 #if defined(CONFIG_SCHED_PROTO)
 #define kSchedProtoString "proto"
 extern const struct sched_dispatch_table sched_proto_dispatch;
@@ -655,6 +613,13 @@ extern const struct sched_dispatch_table sched_proto_dispatch;
 #if defined(CONFIG_SCHED_GRRR)
 #define kSchedGRRRString "grrr"
 extern const struct sched_dispatch_table sched_grrr_dispatch;
+#endif
+
+#if defined(CONFIG_SCHED_FIXEDPRIORITY)
+#define kSchedFixedPriorityString "fixedpriority"
+#define kSchedFixedPriorityWithPsetRunqueueString "fixedpriority_with_pset_runqueue"
+extern const struct sched_dispatch_table sched_fixedpriority_dispatch;
+extern const struct sched_dispatch_table sched_fixedpriority_with_pset_runqueue_dispatch;
 #endif
 
 /*
@@ -673,11 +638,11 @@ enum sched_enum {
 #if defined(CONFIG_SCHED_GRRR)
 	sched_enum_grrr = 4,
 #endif
-#if defined(CONFIG_SCHED_MULTIQ)
-	sched_enum_multiq = 5,
-	sched_enum_dualq = 6,
+#if defined(CONFIG_SCHED_FIXEDPRIORITY)
+	sched_enum_fixedpriority = 5,
+	sched_enum_fixedpriority_with_pset_runqueue = 6,
 #endif
-	sched_enum_max = 7,
+	sched_enum_max = 7
 };
 
 extern const struct sched_dispatch_table *sched_current_dispatch;

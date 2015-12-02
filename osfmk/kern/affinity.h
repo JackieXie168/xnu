@@ -35,6 +35,7 @@
 
 #include <kern/queue.h>
 #include <kern/processor.h>
+#include <kern/lock.h>
 
 /*
  * An affinity set object represents a set of threads identified by the user

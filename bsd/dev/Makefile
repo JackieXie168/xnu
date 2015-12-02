@@ -9,7 +9,7 @@ include $(MakeInc_def)
 
 EXPINC_SUBDIRS = random
 
-INSTTEXTFILES_SUBDIRS = dtrace
+INST_SUBDIRS = dtrace
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

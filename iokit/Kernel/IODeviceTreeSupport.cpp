@@ -776,7 +776,6 @@ CompareKey( OSString * key,
     OSString		*string;
     const char		*ckey;
     UInt32			keyLen;
-    UInt32          nlen;
     const char		*names;
     const char		*lastName;
     bool			wild;
@@ -801,16 +800,16 @@ CompareKey( OSString * key,
 
     do {
         // for each name in the property
-        nlen = strnlen(names, lastName - names);
         if( wild)
-            matched = ((nlen >= (keyLen - 1)) && (0 == strncmp(ckey, names, keyLen - 1)));
+            matched = (0 == strncmp( ckey, names, keyLen - 1 ));
         else
-            matched = (keyLen == nlen) && (0 == strncmp(ckey, names, keyLen));
+            matched = (keyLen == strlen( names ))
+                    && (0 == strncmp( ckey, names, keyLen ));
 
         if( matched)
             result = names;
 
-        names = names + nlen + 1;
+        names = names + strlen( names) + 1;
 
     } while( (names < lastName) && (false == matched));
 
@@ -928,7 +927,7 @@ void IODTSetResolving( IORegistryEntry * 	regEntry,
     return;
 }
 
-#if   defined(__arm__) || defined(__i386__) || defined(__x86_64__)
+#if defined(__arm__) || defined(__i386__) || defined(__x86_64__)
 static SInt32 DefaultCompare( UInt32 cellCount, UInt32 left[], UInt32 right[] )
 {
 	cellCount--;
@@ -1240,7 +1239,6 @@ OSData * IODTFindSlotName( IORegistryEntry * regEntry, UInt32 deviceNumber )
     OSData				*ret = 0;
     UInt32				*bits;
     UInt32				i;
-    size_t              nlen;
     char				*names;
     char				*lastName;
     UInt32				mask;
@@ -1268,16 +1266,15 @@ OSData * IODTFindSlotName( IORegistryEntry * regEntry, UInt32 deviceNumber )
     for( i = 0; (i <= deviceNumber) && (names < lastName); i++ ) {
 
         if( mask & (1 << i)) {
-            nlen = 1 + strnlen(names, lastName - names);
             if( i == deviceNumber) {
-                data = OSData::withBytesNoCopy(names, nlen);
+                data = OSData::withBytesNoCopy( names, 1 + strlen( names));
                 if( data) {
                     regEntry->setProperty("AAPL,slot-name", data);
                     ret = data;
                     data->release();
                 }
             } else
-                names += nlen;
+                names += 1 + strlen( names);
         }
     }
 

@@ -113,7 +113,6 @@ class OSString;
 class OSDictionary : public OSCollection
 {
     OSDeclareDefaultStructors(OSDictionary)
-    friend class OSSerialize;
 
 protected:
     struct dictEntry {

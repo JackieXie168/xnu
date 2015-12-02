@@ -154,7 +154,5 @@ extern void		memory_object_mark_unused(
 	memory_object_control_t		control,
 	boolean_t			rage);
 
-extern void 		memory_object_mark_io_tracking(
-	memory_object_control_t         control);
 
 #endif	/* _VM_MEMORY_OBJECT_H_ */

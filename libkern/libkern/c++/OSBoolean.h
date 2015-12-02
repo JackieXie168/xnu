@@ -63,7 +63,6 @@ class OSString;
 class OSBoolean : public OSObject
 {
     OSDeclareDefaultStructors(OSBoolean)
-    friend class OSSerialize;
 
 protected:
     bool value;

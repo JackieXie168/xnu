@@ -273,6 +273,7 @@ pshm_cache_search(struct pshminfo **pshmp, struct pshmname *pnp,
 
 	/*
 	 * We found a "negative" match, ENOENT notifies client of this match.
+	 * The nc_vpid field records whether this is a whiteout.
 	 */
 	pshmstats.neghits++;
 	return (ENOENT);
@@ -303,6 +304,9 @@ pshm_cache_add(struct pshminfo *pshmp, struct pshmname *pnp, struct pshmcache *p
 
 	/*
 	 * Fill in cache info, if vp is NULL this is a "negative" cache entry.
+	 * For negative entries, we have to record whether it is a whiteout.
+	 * the whiteout flag is stored in the nc_vpid field which is
+	 * otherwise unused.
 	 */
 	pcp->pshminfo = pshmp;
 	pcp->pshm_nlen = pnp->pshm_namelen;

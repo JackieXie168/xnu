@@ -33,7 +33,6 @@
 #include <i386/machine_routines.h>
 #include <i386/cpu_data.h>
 #include <i386/pmap.h>
-#include <i386/bit_routines.h>
 
 /* PAL-related routines */
 void i386_cpu_IPI(int cpu);

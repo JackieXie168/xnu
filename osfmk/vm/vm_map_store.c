@@ -36,23 +36,12 @@ first_free_is_valid_store( vm_map_t map )
 }
 #endif
 
-boolean_t
-vm_map_store_has_RB_support( struct vm_map_header *hdr )
-{
-	if ((void*)hdr->rb_head_store.rbh_root == (void*)(int)SKIP_RB_TREE) {
-		return FALSE;
-	}
-	return TRUE;
-}
-
 void
 vm_map_store_init( struct vm_map_header *hdr )
 {
 	vm_map_store_init_ll( hdr );
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( hdr )) {
-		vm_map_store_init_rb( hdr );
-	}
+	vm_map_store_init_rb( hdr );
 #endif
 }
 
@@ -65,12 +54,7 @@ vm_map_store_lookup_entry(
 #ifdef VM_MAP_STORE_USE_LL
 	return (vm_map_store_lookup_entry_ll( map, address, entry ));
 #elif defined VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( &map->hdr )) {
-		return (vm_map_store_lookup_entry_rb( map, address, entry ));
-	} else {
-		panic("VM map lookups need RB tree support.\n");
-		return FALSE; /* For compiler warning.*/
-	}
+	return (vm_map_store_lookup_entry_rb( map, address, entry ));
 #endif
 }
 
@@ -97,9 +81,7 @@ void	vm_map_store_copy_insert( vm_map_t map, vm_map_entry_t after_where, vm_map_
 {
 	vm_map_store_copy_insert_ll(map, after_where, copy);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( &map->hdr )) {
-		vm_map_store_copy_insert_rb(map, after_where, copy);
-	}
+	vm_map_store_copy_insert_rb(map, after_where, copy);
 #endif
 }
 
@@ -122,9 +104,7 @@ _vm_map_store_entry_link( struct vm_map_header * mapHdr, vm_map_entry_t after_wh
 	assert(entry->vme_start < entry->vme_end);
 	vm_map_store_entry_link_ll(mapHdr, after_where, entry);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( mapHdr )) {
-		vm_map_store_entry_link_rb(mapHdr, after_where, entry);
-	}
+	vm_map_store_entry_link_rb(mapHdr, after_where, entry);
 #endif
 #if MAP_ENTRY_INSERTION_DEBUG
 	fastbacktrace(&entry->vme_insertion_bt[0],
@@ -146,9 +126,7 @@ vm_map_store_entry_link( vm_map_t map, vm_map_entry_t after_where, vm_map_entry_
 	} else {
 		update_first_free_ll(VMEL_map, VMEL_map->first_free);
 #ifdef VM_MAP_STORE_USE_RB
-		if (vm_map_store_has_RB_support( &VMEL_map->hdr )) {
-			update_first_free_rb(VMEL_map, VMEL_map->first_free);
-		}
+		update_first_free_rb(VMEL_map, VMEL_map->first_free);
 #endif
 	}
 }
@@ -158,9 +136,7 @@ _vm_map_store_entry_unlink( struct vm_map_header * mapHdr, vm_map_entry_t entry)
 {
 	vm_map_store_entry_unlink_ll(mapHdr, entry);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( mapHdr )) {
-		vm_map_store_entry_unlink_rb(mapHdr, entry);
-	}
+	vm_map_store_entry_unlink_rb(mapHdr, entry);
 #endif
 }
 
@@ -182,9 +158,7 @@ vm_map_store_entry_unlink( vm_map_t map, vm_map_entry_t entry)
 	vm_map_store_update( map, entry, VM_MAP_ENTRY_DELETE);
 	update_first_free_ll(VMEU_map, VMEU_first_free);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( &VMEU_map->hdr )) {
-		update_first_free_rb(VMEU_map, VMEU_first_free);
-	}
+	update_first_free_rb(VMEU_map, VMEU_first_free);
 #endif
 }
 
@@ -194,9 +168,7 @@ vm_map_store_copy_reset( vm_map_copy_t copy,vm_map_entry_t entry)
 	int nentries = copy->cpy_hdr.nentries;
 	vm_map_store_copy_reset_ll(copy, entry, nentries);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( &copy->c_u.hdr )) {
-		vm_map_store_copy_reset_rb(copy, entry, nentries);
-	}
+	vm_map_store_copy_reset_rb(copy, entry, nentries);
 #endif
 }
 
@@ -205,8 +177,6 @@ vm_map_store_update_first_free( vm_map_t map, vm_map_entry_t first_free)
 {
 	update_first_free_ll(map, first_free);
 #ifdef VM_MAP_STORE_USE_RB
-	if (vm_map_store_has_RB_support( &map->hdr )) {
-		update_first_free_rb(map, first_free);
-	}
+	update_first_free_rb(map, first_free);
 #endif
 }

@@ -492,6 +492,7 @@ vnread(dev_t dev, struct uio *uio, int ioflag)
 {
 	struct vfs_context  	context; 		
 	int 			error = 0;
+	boolean_t   		funnel_state;
 	off_t			offset;
 	proc_t			p;
 	user_ssize_t		resid;
@@ -503,6 +504,7 @@ vnread(dev_t dev, struct uio *uio, int ioflag)
 		return (ENXIO);
 	}
 	p = current_proc();
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
 	vn = vn_table + unit;
 	if ((vn->sc_flags & VNF_INITED) == 0) {
 		error = ENXIO;
@@ -558,6 +560,7 @@ vnread(dev_t dev, struct uio *uio, int ioflag)
 	}
 	vnode_put(vn->sc_vp);
  done:
+	(void) thread_funnel_set(kernel_flock, funnel_state);
 	return (error);
 }
 
@@ -566,6 +569,7 @@ vnwrite(dev_t dev, struct uio *uio, int ioflag)
 {
 	struct vfs_context  	context;
 	int 			error;
+	boolean_t   		funnel_state;
 	off_t			offset;
 	proc_t			p;
 	user_ssize_t		resid;
@@ -577,6 +581,7 @@ vnwrite(dev_t dev, struct uio *uio, int ioflag)
 		return (ENXIO);
 	}
 	p = current_proc();
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
 	vn = vn_table + unit;
 	if ((vn->sc_flags & VNF_INITED) == 0) {
 		error = ENXIO;
@@ -635,6 +640,7 @@ vnwrite(dev_t dev, struct uio *uio, int ioflag)
 	}
 	vnode_put(vn->sc_vp);
  done:
+	(void) thread_funnel_set(kernel_flock, funnel_state);
 	return (error);
 }
 
@@ -776,10 +782,12 @@ vnstrategy(struct buf *bp)
 	int error = 0;
 	long sz;	/* in sc_secsize chunks */
 	daddr64_t blk_num;
+	boolean_t   		funnel_state;
 	struct vnode *		shadow_vp = NULL;
 	struct vnode *		vp = NULL;
 	struct vfs_context  	context; 
 
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
 	vn = vn_table + vnunit(buf_device(bp));
 	if ((vn->sc_flags & VNF_INITED) == 0) {
 		error = ENXIO;
@@ -851,6 +859,7 @@ vnstrategy(struct buf *bp)
 	}
 
  done:
+	(void) thread_funnel_set(kernel_flock, funnel_state);
 	if (error) {
 	        buf_seterror(bp, error);
 	}
@@ -872,13 +881,15 @@ vnioctl(dev_t dev, u_long cmd, caddr_t data,
 	int unit;
 	struct vfsioattr ioattr;
 	struct vn_ioctl_64 user_vnio;
-	struct vfs_context  	context;
+	boolean_t   		funnel_state;
+	struct vfs_context  	context; 
 
 	unit = vnunit(dev);
 	if (vnunit(dev) >= NVNDEVICE) {
 		return (ENXIO);
 	}
 
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
 	vn = vn_table + unit;
 	error = proc_suser(p);
 	if (error) {
@@ -1091,6 +1102,7 @@ vnioctl(dev_t dev, u_long cmd, caddr_t data,
 		break;
 	}
  done:
+	(void) thread_funnel_set(kernel_flock, funnel_state);
 	return(error);
 }
 
@@ -1324,18 +1336,20 @@ vnsize(dev_t dev)
 	int	secsize;
 	struct vn_softc *vn;
 	int unit;
+	boolean_t   		funnel_state;
 
 	unit = vnunit(dev);
 	if (vnunit(dev) >= NVNDEVICE) {
 		return (-1);
 	}
 
+	funnel_state = thread_funnel_set(kernel_flock, TRUE);
 	vn = vn_table + unit;
 	if ((vn->sc_flags & VNF_INITED) == 0)
 		secsize = -1;
 	else
 		secsize = vn->sc_secsize;
-
+	(void) thread_funnel_set(kernel_flock, funnel_state);
 	return (secsize);
 }
 

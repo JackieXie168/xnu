@@ -66,6 +66,7 @@
 #include <mach/kern_return.h>
 #include <mach/vm_param.h>
 #include <kern/assert.h>
+#include <kern/lock.h>
 #include <kern/thread.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -946,7 +947,7 @@ kmem_alloc_pageable(
 	kern_return_t kr;
 
 #ifndef normal
-	map_addr = (vm_map_min(map)) + PAGE_SIZE;
+	map_addr = (vm_map_min(map)) + 0x1000;
 #else
 	map_addr = vm_map_min(map);
 #endif

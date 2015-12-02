@@ -56,6 +56,7 @@
 /*
  */
 
+#include <platforms.h>
 #include <debug.h>
 
 #include <i386/asm.h>
@@ -211,7 +212,7 @@ L_pstart_common:
 	cpuid
 	test	$(1 << 30), %ecx
 	jz	Lnon_rdrand
-	rdrand	%rax		/* RAX := 64 bits of DRBG entropy */
+	RDRAND_RAX		/* RAX := 64 bits of DRBG entropy */
 	jnc	Lnon_rdrand	/* TODO: complain if DRBG fails at this stage */
 
 Lstore_random_guard:

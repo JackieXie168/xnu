@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2015 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -177,20 +177,14 @@ struct kevent64_s {
  * (which always returns true for regular files - regardless of the amount
  * of unread data in the file).
  *
- * On input, EV_OOBAND specifies that filter should actively return in the
- * presence of OOB on the descriptor. It implies that filter will return
- * if there is OOB data available to read OR when any other condition
- * for the read are met (for example number of bytes regular data becomes >=
- * low-watermark).
- * If EV_OOBAND is not set on input, it implies that the filter should not actively
- * return for out of band data on the descriptor. The filter will then only return
- * when some other condition for read is met (ex: when number of regular data bytes
- * >=low-watermark OR when socket can't receive more data (SS_CANTRCVMORE)).
+ * On input, EV_OOBAND specifies that only OOB data should be looked for.
+ * The returned data count is the number of bytes beyond the current OOB marker.
  *
- * On output, EV_OOBAND indicates the presence of OOB data on the descriptor.
+ * On output, EV_OOBAND indicates that OOB data is present
  * If it was not specified as an input parameter, then the data count is the
- * number of bytes before the current OOB marker, else data count is the number
- * of bytes beyond OOB marker.
+ * number of bytes before the current OOB marker. If at the marker, the
+ * data count indicates the number of bytes available after it.  In either
+ * case, it's the amount of data one could expect to receive next.
  */
 #define EV_POLL	EV_FLAG0
 #define EV_OOBAND	EV_FLAG1
@@ -259,6 +253,7 @@ enum {
 #define	NOTE_EXITSTATUS		0x04000000	/* exit status to be returned, valid for child process only */
 #define	NOTE_EXIT_DETAIL	0x02000000	/* provide details on reasons for exit */
 
+
 #define	NOTE_PDATAMASK	0x000fffff		/* mask for signal & exit status */
 #define	NOTE_PCTRLMASK	(~NOTE_PDATAMASK)
 
@@ -283,14 +278,13 @@ enum {
 /*
  * If NOTE_EXIT_MEMORY is present, these bits indicate specific jetsam condition.
  */
-#define NOTE_EXIT_MEMORY_DETAIL_MASK	0xfe000000
+#define NOTE_EXIT_MEMORY_DETAIL_MASK	0xfc000000
 #define NOTE_EXIT_MEMORY_VMPAGESHORTAGE	0x80000000	/* jetsam condition: lowest jetsam priority proc killed due to vm page shortage */
 #define NOTE_EXIT_MEMORY_VMTHRASHING	0x40000000	/* jetsam condition: lowest jetsam priority proc killed due to vm thrashing */
 #define NOTE_EXIT_MEMORY_HIWAT		0x20000000	/* jetsam condition: process reached its high water mark */
 #define NOTE_EXIT_MEMORY_PID		0x10000000	/* jetsam condition: special pid kill requested */
 #define NOTE_EXIT_MEMORY_IDLE		0x08000000	/* jetsam condition: idle process cleaned up */
 #define NOTE_EXIT_MEMORY_VNODE		0X04000000	/* jetsam condition: virtual node kill */
-#define NOTE_EXIT_MEMORY_FCTHRASHING	0x02000000	/* jetsam condition: lowest jetsam priority proc killed due to filecache thrashing */
 
 #endif
 
@@ -310,7 +304,6 @@ enum {
 #define NOTE_MEMORYSTATUS_PRESSURE_NORMAL	0x00000001	/* system memory pressure has returned to normal */
 #define NOTE_MEMORYSTATUS_PRESSURE_WARN		0x00000002	/* system memory pressure has changed to the warning state */
 #define NOTE_MEMORYSTATUS_PRESSURE_CRITICAL	0x00000004	/* system memory pressure has changed to the critical state */
-#define NOTE_MEMORYSTATUS_LOW_SWAP		0x00000008	/* system is in a low-swap state */
 
 typedef enum vm_pressure_level {
         kVMPressureNormal   = 0,
@@ -480,7 +473,7 @@ extern int	knote_link_wait_queue(struct knote *kn, struct wait_queue *wq, wait_q
 extern int	knote_unlink_wait_queue(struct knote *kn, struct wait_queue *wq, wait_queue_link_t *wqlp);
 extern void	knote_fdclose(struct proc *p, int fd);
 extern void	knote_markstayqueued(struct knote *kn);
-extern void	knote_clearstayqueued(struct knote *kn);
+
 #endif /* !KERNEL_PRIVATE */
 
 #else 	/* KERNEL */

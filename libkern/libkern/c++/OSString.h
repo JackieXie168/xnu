@@ -180,7 +180,6 @@ public:
     */
     static OSString * withCStringNoCopy(const char * cString);
 
-    static OSString * withStringOfLength(const char *cString, size_t length);
 
    /*!
     * @function initWithString
@@ -247,7 +246,6 @@ public:
     */
     virtual bool initWithCStringNoCopy(const char * cString);
 
-    bool initWithStringOfLength(const char *cString, size_t inlength);
 
    /*!
     * @function free

@@ -94,9 +94,6 @@ typedef struct {
 	uint64_t cpu_insns;
 	uint64_t cpu_ucc;
 	uint64_t cpu_urc;
-#if	DIAG_ALL_PMCS
-	uint64_t gpmcs[4];
-#endif /* DIAG_ALL_PMCS */
 } core_energy_stat_t;
 
 typedef struct {
@@ -202,11 +199,23 @@ diagCall64(x86_saved_state_t * state)
 		pkes.pkg_cres[0][2] = ((uint64_t)c6h << 32) | c6l;
 		pkes.pkg_cres[0][3] = ((uint64_t)c7h << 32) | c7l;
 
+		uint32_t cpumodel = cpuid_info()->cpuid_model;
+		boolean_t c8avail;
+		switch (cpumodel) {
+		case CPUID_MODEL_HASWELL_ULT:
+			c8avail = TRUE;
+			break;
+		default:
+			c8avail = FALSE;
+			break;
+		}
 		uint64_t c8r = ~0ULL, c9r = ~0ULL, c10r = ~0ULL;
 
-		rdmsr64_carefully(MSR_IA32_PKG_C8_RESIDENCY, &c8r);
-		rdmsr64_carefully(MSR_IA32_PKG_C9_RESIDENCY, &c9r);
-		rdmsr64_carefully(MSR_IA32_PKG_C10_RESIDENCY, &c10r);
+		if (c8avail) {
+			rdmsr64_carefully(MSR_IA32_PKG_C8_RESIDENCY, &c8r);
+			rdmsr64_carefully(MSR_IA32_PKG_C9_RESIDENCY, &c9r);
+			rdmsr64_carefully(MSR_IA32_PKG_C10_RESIDENCY, &c10r);
+		}
 
 		pkes.pkg_cres[0][4] = c8r;
 		pkes.pkg_cres[0][5] = c9r;
@@ -265,9 +274,6 @@ diagCall64(x86_saved_state_t * state)
  			cest.cpu_insns = cpu_data_ptr[i]->cpu_cur_insns;
  			cest.cpu_ucc = cpu_data_ptr[i]->cpu_cur_ucc;
  			cest.cpu_urc = cpu_data_ptr[i]->cpu_cur_urc;
-#if DIAG_ALL_PMCS
-			bcopy(&cpu_data_ptr[i]->cpu_gpmcs[0], &cest.gpmcs[0], sizeof(cest.gpmcs));
-#endif /* DIAG_ALL_PMCS */			
  			(void) ml_set_interrupts_enabled(TRUE);
 
 			copyout(&cest, curpos, sizeof(cest));
@@ -350,13 +356,6 @@ void cpu_powerstats(__unused void *arg) {
 		uint64_t insns = read_pmc(FIXED_PMC0);
 		uint64_t ucc = read_pmc(FIXED_PMC1);
 		uint64_t urc = read_pmc(FIXED_PMC2);
-#if DIAG_ALL_PMCS
-		int i;
-
-		for (i = 0; i < 4; i++) {
-			cdp->cpu_gpmcs[i] = read_pmc(i);
-		}
-#endif /* DIAG_ALL_PMCS */
 		cdp->cpu_cur_insns = insns;
 		cdp->cpu_cur_ucc = ucc;
 		cdp->cpu_cur_urc = urc;

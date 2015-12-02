@@ -95,8 +95,6 @@ extern kern_return_t vm_fault(
 		pmap_t		pmap,
 		vm_map_offset_t	pmap_addr);
 
-extern void vm_pre_fault(vm_map_offset_t);
-
 #ifdef	MACH_KERNEL_PRIVATE
 
 #include <vm/vm_page.h>
@@ -104,16 +102,6 @@ extern void vm_pre_fault(vm_map_offset_t);
 #include <vm/vm_map.h>
 
 extern void vm_fault_init(void);
-
-extern kern_return_t vm_fault_internal(
-		vm_map_t	map,
-		vm_map_offset_t	vaddr,
-		vm_prot_t	fault_type,
-		boolean_t	change_wiring,
-		int             interruptible,
-		pmap_t		pmap,
-		vm_map_offset_t	pmap_addr,
-		ppnum_t		*physpage_p);
 
 /*
  *	Page fault handling based on vm_object only.
@@ -148,8 +136,7 @@ extern kern_return_t vm_fault_wire(
 		vm_map_t	map,
 		vm_map_entry_t	entry,
 		pmap_t		pmap,
-		vm_map_offset_t	pmap_addr,
-		ppnum_t		*physpage_p);
+		vm_map_offset_t	pmap_addr);
 
 extern void vm_fault_unwire(
 		vm_map_t	map,
@@ -178,8 +165,6 @@ extern kern_return_t vm_fault_enter(
 	boolean_t change_wiring,
 	boolean_t no_cache,
 	boolean_t cs_bypass,
-	int	  user_tag,
-	int	  pmap_options,
 	boolean_t *need_retry,
 	int *type_of_fault);
 

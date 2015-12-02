@@ -257,7 +257,7 @@ struct linesw {
 
 
 extern struct linesw linesw[];
-extern const int nlinesw;
+extern int nlinesw;
  
 int ldisc_register(int , struct linesw *);
 void ldisc_deregister(int);

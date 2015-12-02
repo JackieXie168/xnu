@@ -144,8 +144,6 @@ static struct {
 
 static iopa_t gIOPageablePageAllocator;
 
-uint32_t  gIOPageAllocChunkBytes;
-
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 void IOLibInit(void)
@@ -177,8 +175,6 @@ void IOLibInit(void)
     gIOMallocContiguousEntriesLock 	= lck_mtx_alloc_init(IOLockGroup, LCK_ATTR_NULL);
     queue_init( &gIOMallocContiguousEntries );
 
-    gIOPageAllocChunkBytes = PAGE_SIZE/64;
-    assert(sizeof(iopa_page_t) <= gIOPageAllocChunkBytes);
     iopa_init(&gIOBMDPageAllocator);
     iopa_init(&gIOPageablePageAllocator);
 
@@ -369,7 +365,6 @@ IOKernelFreePhysical(mach_vm_address_t address, mach_vm_size_t size)
     debug_iomalloc_size -= size;
 #endif
 }
-
 
 mach_vm_address_t
 IOKernelAllocateWithPhysicalRestrict(mach_vm_size_t size, mach_vm_address_t maxPhys, 
@@ -698,7 +693,7 @@ void * IOMallocPageable(vm_size_t size, vm_size_t alignment)
 {
     void * addr;
 
-    if (size >= (page_size - 4*gIOPageAllocChunkBytes)) addr = IOMallocPageablePages(size, alignment);
+    if (size >= (page_size - 4*kIOPageAllocChunkBytes)) addr = IOMallocPageablePages(size, alignment);
     else                   addr = ((void * ) iopa_alloc(&gIOPageablePageAllocator, &IOMallocOnePageablePage, size, alignment));
 
     if (addr) {
@@ -718,7 +713,7 @@ void IOFreePageable(void * address, vm_size_t size)
 #endif
     IOStatisticsAlloc(kIOStatisticsFreePageable, size);
 
-    if (size < (page_size - 4*gIOPageAllocChunkBytes))
+    if (size < (page_size - 4*kIOPageAllocChunkBytes))
     {
 	address = (void *) iopa_free(&gIOPageablePageAllocator, (uintptr_t) address, size);
 	size = page_size;
@@ -727,6 +722,14 @@ void IOFreePageable(void * address, vm_size_t size)
 }
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+#if 0
+#undef assert
+#define assert(ex)  \
+	((ex) ? (void)0 : Assert(__FILE__, __LINE__, # ex))
+#endif
+
+typedef char iopa_page_t_assert[(sizeof(iopa_page_t) <= kIOPageAllocChunkBytes) ? 1 : -1];
 
 extern "C" void 
 iopa_init(iopa_t * a)
@@ -762,7 +765,7 @@ iopa_allocinpage(iopa_page_t * pa, uint32_t count, uint64_t align)
 	    remque(&pa->link);
 	    pa->link.next = 0;
 	}
-	return (n * gIOPageAllocChunkBytes + trunc_page((uintptr_t) pa));
+	return (n * kIOPageAllocChunkBytes + trunc_page((uintptr_t) pa));
     }
 
     return (0);
@@ -794,8 +797,8 @@ iopa_alloc(iopa_t * a, iopa_proc_t alloc, vm_size_t bytes, uint32_t balign)
     uint64_t      align;
 
     if (!bytes) bytes = 1;
-    count = (bytes + gIOPageAllocChunkBytes - 1) / gIOPageAllocChunkBytes;
-    align = align_masks[log2up((balign + gIOPageAllocChunkBytes - 1) / gIOPageAllocChunkBytes)];
+    count = (bytes + kIOPageAllocChunkBytes - 1) / kIOPageAllocChunkBytes;
+    align = align_masks[log2up((balign + kIOPageAllocChunkBytes - 1) / kIOPageAllocChunkBytes)];
 
     IOLockLock(a->lock);
     pa = (typeof(pa)) queue_first(&a->list);
@@ -816,7 +819,7 @@ iopa_alloc(iopa_t * a, iopa_proc_t alloc, vm_size_t bytes, uint32_t balign)
 	addr = alloc(a);
 	if (addr)
 	{
-	    pa = (typeof(pa)) (addr + page_size - gIOPageAllocChunkBytes);
+	    pa = (typeof(pa)) (addr + page_size - kIOPageAllocChunkBytes);
 	    pa->signature = kIOPageAllocSignature;
 	    pa->avail     = -2ULL;
 
@@ -843,13 +846,13 @@ iopa_free(iopa_t * a, uintptr_t addr, vm_size_t bytes)
     if (!bytes) bytes = 1;
 
     chunk = (addr & page_mask);
-    assert(0 == (chunk & (gIOPageAllocChunkBytes - 1)));
+    assert(0 == (chunk & (kIOPageAllocChunkBytes - 1)));
 
-    pa = (typeof(pa)) (addr | (page_size - gIOPageAllocChunkBytes));
+    pa = (typeof(pa)) (addr | (page_size - kIOPageAllocChunkBytes));
     assert(kIOPageAllocSignature == pa->signature);
 
-    count = (bytes + gIOPageAllocChunkBytes - 1) / gIOPageAllocChunkBytes;
-    chunk /= gIOPageAllocChunkBytes;
+    count = (bytes + kIOPageAllocChunkBytes - 1) / kIOPageAllocChunkBytes;
+    chunk /= kIOPageAllocChunkBytes;
 
     IOLockLock(a->lock);
     if (!pa->avail)

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -93,6 +93,7 @@
 #include <netinet/in_pcb.h>
 #include <netinet/in_var.h>
 #include <netinet/ip_var.h>
+#include <netinet/ip_mroute.h>
 
 #if INET6
 #include <netinet6/in6_pcb.h>
@@ -119,6 +120,10 @@ int rip_disconnect(struct socket *);
 int rip_bind(struct socket *, struct sockaddr *, struct proc *);
 int rip_connect(struct socket *, struct sockaddr *, struct proc *);
 int rip_shutdown(struct socket *);
+ 
+#if IPSEC
+extern int ipsec_bypass;
+#endif
 
 struct	inpcbhead ripcb;
 struct	inpcbinfo ripcbinfo;
@@ -226,20 +231,29 @@ rip_input(m, iphlen)
 		if (inp->inp_faddr.s_addr &&
                   inp->inp_faddr.s_addr != ip->ip_src.s_addr)
 			continue;
-		if (inp_restricted_recv(inp, ifp))
+
+		if (inp_restricted(inp, ifp))
 			continue;
+
+		if (ifp != NULL && IFNET_IS_CELLULAR(ifp) &&
+		    (inp->inp_flags & INP_NO_IFT_CELLULAR))
+			continue;
+
 		if (last) {
 			struct mbuf *n = m_copy(m, 0, (int)M_COPYALL);
 		
 			skipit = 0;
-			
-#if NECP
-			if (n && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0, &ip->ip_dst, &ip->ip_src, ifp, NULL)) {
-				m_freem(n);
-				/* do not inject data to pcb */
-				skipit = 1;
-			}
-#endif /* NECP */
+#if IPSEC
+			/* check AH/ESP integrity. */
+			if (ipsec_bypass == 0 && n) {
+				if (ipsec4_in_reject_so(n, last->inp_socket)) {
+					m_freem(n);
+					IPSEC_STAT_INCREMENT(ipsecstat.in_polvio);
+					/* do not inject data to pcb */
+					skipit = 1;
+				}
+			} 
+#endif /*IPSEC*/
 #if CONFIG_MACF_NET
 			if (n && skipit == 0) {
 				if (mac_inpcb_check_deliver(last, n, AF_INET,
@@ -285,14 +299,18 @@ rip_input(m, iphlen)
 	}
 
 	skipit = 0;
-#if NECP
-	if (last && !necp_socket_is_allowed_to_send_recv_v4(last, 0, 0, &ip->ip_dst, &ip->ip_src, ifp, NULL)) {
-		m_freem(m);
-		OSAddAtomic(1, &ipstat.ips_delivered);
-		/* do not inject data to pcb */
-		skipit = 1;
-	}
-#endif /* NECP */
+#if IPSEC
+	/* check AH/ESP integrity. */
+	if (ipsec_bypass == 0 && last) {
+		if (ipsec4_in_reject_so(m, last->inp_socket)) {
+			m_freem(m);
+			IPSEC_STAT_INCREMENT(ipsecstat.in_polvio);
+			OSAddAtomic(1, &ipstat.ips_delivered);
+			/* do not inject data to pcb */
+			skipit = 1;
+		}
+	} 
+#endif /*IPSEC*/
 #if CONFIG_MACF_NET
 	if (last && skipit == 0) {
 		if (mac_inpcb_check_deliver(last, m, AF_INET, SOCK_RAW) != 0) {
@@ -366,11 +384,7 @@ rip_output(
 		control = NULL;
 	}
 
-	if (inp == NULL
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp))
-#endif /* NECP */
-		) {
+	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)) {
 		if (m != NULL)
 			m_freem(m);
 		VERIFY(control == NULL);
@@ -383,12 +397,8 @@ rip_output(
 		ipoa.ipoa_boundif = inp->inp_boundifp->if_index;
 		ipoa.ipoa_flags |= IPOAF_BOUND_IF;
 	}
-	if (INP_NO_CELLULAR(inp))
+	if (inp->inp_flags & INP_NO_IFT_CELLULAR)
 		ipoa.ipoa_flags |=  IPOAF_NO_CELLULAR;
-	if (INP_NO_EXPENSIVE(inp))
-		ipoa.ipoa_flags |=  IPOAF_NO_EXPENSIVE;
-	if (INP_AWDL_UNRESTRICTED(inp))
-		ipoa.ipoa_flags |=  IPOAF_AWDL_UNRESTRICTED;
 
 	if (inp->inp_flowhash == 0)
 		inp->inp_flowhash = inp_calc_flowhash(inp);
@@ -437,21 +447,9 @@ rip_output(
 
 	if (inp->inp_laddr.s_addr != INADDR_ANY)
 		ipoa.ipoa_flags |= IPOAF_BOUND_SRCADDR;
-	
-#if NECP
-	{
-		necp_kernel_policy_id policy_id;
-		if (!necp_socket_is_allowed_to_send_recv_v4(inp, 0, 0, &ip->ip_src, &ip->ip_dst, NULL, &policy_id)) {
-			m_freem(m);
-			return(EHOSTUNREACH);
-		}
 
-		necp_mark_packet_from_socket(m, inp, policy_id);
-	}
-#endif /* NECP */
-	
 #if IPSEC
-	if (inp->inp_sp != NULL && ipsec_setsocket(m, so) != 0) {
+	if (ipsec_bypass == 0 && ipsec_setsocket(m, so) != 0) {
 		m_freem(m);
 		return ENOBUFS;
 	}
@@ -513,11 +511,11 @@ rip_output(
 	}
 
 	/*
-	 * If output interface was cellular/expensive, and this socket is
-	 * denied access to it, generate an event.
+	 * If output interface was cellular, and this socket is denied
+	 * access to it, generate an event.
 	 */
 	if (error != 0 && (ipoa.ipoa_retflags & IPOARF_IFDENIED) &&
-	    (INP_NO_CELLULAR(inp) || INP_NO_EXPENSIVE(inp)))
+	    (inp->inp_flags & INP_NO_IFT_CELLULAR))
 		soevent(so, (SO_FILT_HINT_LOCKED|SO_FILT_HINT_IFDENIED));
 
 	return (error);
@@ -597,6 +595,19 @@ rip_ctloutput(so, sopt)
 			break ;
 #endif /* DUMMYNET */
 
+#if MROUTING
+		case MRT_INIT:
+		case MRT_DONE:
+		case MRT_ADD_VIF:
+		case MRT_DEL_VIF:
+		case MRT_ADD_MFC:
+		case MRT_DEL_MFC:
+		case MRT_VERSION:
+		case MRT_ASSERT:
+			error = ip_mrouter_get(so, sopt);
+			break;
+#endif /* MROUTING */
+
 		default:
 			error = ip_ctloutput(so, sopt);
 			break;
@@ -659,6 +670,36 @@ rip_ctloutput(so, sopt)
 				error = ENOPROTOOPT ;
 			break ;
 #endif
+
+#if MROUTING
+		case IP_RSVP_ON:
+			error = ip_rsvp_init(so);
+			break;
+
+		case IP_RSVP_OFF:
+			error = ip_rsvp_done();
+			break;
+
+			/* XXX - should be combined */
+		case IP_RSVP_VIF_ON:
+			error = ip_rsvp_vif_init(so, sopt);
+			break;
+
+		case IP_RSVP_VIF_OFF:
+			error = ip_rsvp_vif_done(so, sopt);
+			break;
+
+		case MRT_INIT:
+		case MRT_DONE:
+		case MRT_ADD_VIF:
+		case MRT_DEL_VIF:
+		case MRT_ADD_MFC:
+		case MRT_DEL_MFC:
+		case MRT_VERSION:
+		case MRT_ASSERT:
+			error = ip_mrouter_set(so, sopt);
+			break;
+#endif /* MROUTING */
 
 		case SO_FLUSH:
 			if ((error = sooptcopyin(sopt, &optval, sizeof (optval),
@@ -813,6 +854,13 @@ rip_detach(struct socket *so)
 	inp = sotoinpcb(so);
 	if (inp == 0)
 		panic("rip_detach");
+#if MROUTING
+	if (so == ip_mrouter)
+		ip_mrouter_done();
+	ip_rsvp_force_done(so);
+	if (so == ip_rsvpd)
+		ip_rsvp_done();
+#endif /* MROUTING */
 	in_pcbdetach(inp);
 	return 0;
 }
@@ -841,11 +889,7 @@ rip_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 	struct ifaddr *ifa = NULL;
 	struct ifnet *outif = NULL;
 
-	if (inp == NULL
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp))
-#endif /* NECP */
-		)
+	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
 		return (inp == NULL ? EINVAL : EPROTOTYPE);
 
 	if (nam->sa_len != sizeof (struct sockaddr_in))
@@ -886,11 +930,7 @@ rip_connect(struct socket *so, struct sockaddr *nam, __unused  struct proc *p)
 	struct inpcb *inp = sotoinpcb(so);
 	struct sockaddr_in *addr = (struct sockaddr_in *)(void *)nam;
 
-	if (inp == NULL
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp))
-#endif /* NECP */
-		)
+	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
 		return (inp == NULL ? EINVAL : EPROTOTYPE);
 	if (nam->sa_len != sizeof(*addr))
 		return EINVAL;
@@ -921,15 +961,8 @@ rip_send(struct socket *so, int flags, struct mbuf *m, struct sockaddr *nam,
 	u_int32_t dst;
 	int error = 0;
 
-	if (inp == NULL
-#if NECP
-		|| (necp_socket_should_use_flow_divert(inp) && (error = EPROTOTYPE))
-#endif /* NECP */
-		) {
-		if (inp == NULL)
-			error = EINVAL;
-		else
-			error = EPROTOTYPE;
+	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)) {
+		error = (inp == NULL ? EINVAL : EPROTOTYPE);
 		goto bad;
 	}
 
@@ -1102,8 +1135,7 @@ rip_pcblist SYSCTL_HANDLER_ARGS
 	return error;
 }
 
-SYSCTL_PROC(_net_inet_raw, OID_AUTO/*XXX*/, pcblist,
-	    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+SYSCTL_PROC(_net_inet_raw, OID_AUTO/*XXX*/, pcblist, CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
 	    rip_pcblist, "S,xinpcb", "List of active raw IP sockets");
 
 
@@ -1205,8 +1237,7 @@ rip_pcblist64 SYSCTL_HANDLER_ARGS
         return error;
 }
 
-SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist64,
-            CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist64, CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
             rip_pcblist64, "S,xinpcb64", "List of active raw IP sockets");
 
 
@@ -1222,8 +1253,7 @@ rip_pcblist_n SYSCTL_HANDLER_ARGS
 	return error;
 }
 
-SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist_n,
-            CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
+SYSCTL_PROC(_net_inet_raw, OID_AUTO, pcblist_n, CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0,
             rip_pcblist_n, "S,xinpcb_n", "List of active raw IP sockets");
 
 struct pr_usrreqs rip_usrreqs = {

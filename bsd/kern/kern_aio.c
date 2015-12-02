@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2008 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -2415,11 +2415,8 @@ do_aio_write( aio_workq_entry *entryp )
 				entryp->aiocb.aio_offset,
 				flags,
 				&entryp->returnval);
-
-	if (entryp->returnval)
-		fp_drop_written(entryp->procp, entryp->aiocb.aio_fildes, fp);
-	else
-		fp_drop(entryp->procp, entryp->aiocb.aio_fildes, fp, 0);
+	
+	fp_drop(entryp->procp, entryp->aiocb.aio_fildes, fp, 0);
 
 	return( error );
 

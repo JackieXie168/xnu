@@ -232,31 +232,6 @@ typedef struct thread_background_policy 	*thread_background_policy_t;
 	(sizeof (thread_background_policy_data_t) / sizeof (integer_t)))
 
 
-#define THREAD_LATENCY_QOS_POLICY	7
-typedef integer_t	thread_latency_qos_t;
-
-struct thread_latency_qos_policy {
-	thread_latency_qos_t thread_latency_qos_tier;
-};
-
-typedef struct thread_latency_qos_policy	thread_latency_qos_policy_data_t;
-typedef struct thread_latency_qos_policy 	*thread_latency_qos_policy_t;
-
-#define THREAD_LATENCY_QOS_POLICY_COUNT	((mach_msg_type_number_t)	\
-	    (sizeof (thread_latency_qos_policy_data_t) / sizeof (integer_t)))
-
-#define THREAD_THROUGHPUT_QOS_POLICY	8
-typedef integer_t	thread_throughput_qos_t;
-
-struct thread_throughput_qos_policy {
-	thread_throughput_qos_t thread_throughput_qos_tier;
-};
-
-typedef struct thread_throughput_qos_policy	thread_throughput_qos_policy_data_t;
-typedef struct thread_throughput_qos_policy 	*thread_throughput_qos_policy_t;
-
-#define THREAD_THROUGHPUT_QOS_POLICY_COUNT	((mach_msg_type_number_t) \
-	    (sizeof (thread_throughput_qos_policy_data_t) / sizeof (integer_t)))
 
 #ifdef PRIVATE
 
@@ -265,14 +240,11 @@ typedef struct thread_throughput_qos_policy 	*thread_throughput_qos_policy_t;
  */
 #define THREAD_POLICY_STATE		6
 
-#define THREAD_POLICY_STATE_FLAG_STATIC_PARAM   0x1
-
 struct thread_policy_state {
 	integer_t requested;
 	integer_t effective;
 	integer_t pending;
-	integer_t flags;
-	integer_t reserved[12];
+	integer_t reserved[13];
 };
 
 typedef struct thread_policy_state		thread_policy_state_data_t;
@@ -280,86 +252,6 @@ typedef struct thread_policy_state		*thread_policy_state_t;
 
 #define THREAD_POLICY_STATE_COUNT	((mach_msg_type_number_t) \
 	(sizeof (thread_policy_state_data_t) / sizeof (integer_t)))
-
-/*
- * THREAD_QOS_POLICY:
- */
-#define THREAD_QOS_POLICY               9
-#define THREAD_QOS_POLICY_OVERRIDE      10
-
-#define THREAD_QOS_UNSPECIFIED          0
-#define THREAD_QOS_DEFAULT              THREAD_QOS_UNSPECIFIED  /* Temporary rename */
-#define THREAD_QOS_MAINTENANCE          1
-#define THREAD_QOS_BACKGROUND           2
-#define THREAD_QOS_UTILITY              3
-#define THREAD_QOS_LEGACY               4       /* i.e. default workq threads */
-#define THREAD_QOS_USER_INITIATED       5
-#define THREAD_QOS_USER_INTERACTIVE     6
-
-#define THREAD_QOS_LAST                 7
-
-#define THREAD_QOS_MIN_TIER_IMPORTANCE	(-15)
-
-/*
- * Overrides are inputs to the task/thread policy engine that
- * temporarily elevate the effective QoS of a thread without changing
- * its steady-state (and round-trip-able) requested QoS. The
- * interfaces into the kernel allow the caller to associate a resource
- * and type that describe the reason/lifecycle of the override. For
- * instance, a contended pthread_mutex_t held by a UTILITY thread
- * might get an override to USER_INTERACTIVE, with the resource
- * being the userspace address of the pthread_mutex_t. When the
- * owning thread releases that resource, it can call into the
- * task policy subsystem to drop the override because of that resource,
- * although if more contended locks are held by the thread, the
- * effective QoS may remain overridden for longer.
- *
- * THREAD_QOS_OVERRIDE_TYPE_PTHREAD_MUTEX is used for contended
- * pthread_mutex_t's via the pthread kext. The holder gets an override
- * with resource=&mutex and a count of 1 by the initial contender.
- * Subsequent contenders raise the QoS value, until the holder
- * decrements the count to 0 and the override is released.
- *
- * THREAD_QOS_OVERRIDE_TYPE_PTHREAD_RWLOCK is unimplemented and has no
- * specified semantics.
- *
- * THREAD_QOS_OVERRIDE_TYPE_PTHREAD_EXPLICIT_OVERRIDE are explicitly
- * paired start/end overrides on a target thread. The resource can
- * either be a memory allocation in userspace, or the pthread_t of the
- * overrider if no allocation was used.
- *
- * THREAD_QOS_OVERRIDE_TYPE_DISPATCH_ASYNCHRONOUS_OVERRIDE are used to
- * override the QoS of a thread currently draining a serial dispatch
- * queue, so that it can get to a block of higher QoS than its
- * predecessors. The override is applied by a thread enqueueing work
- * with resource=&queue, and reset by the thread that was overriden
- * once it has drained the queue. Since the ++ and reset are
- * asynchronous, there is the possibility of a ++ after the target
- * thread has issued a reset, in which case the workqueue thread may
- * issue a reset-all in its outermost scope before deciding whether it
- * should return to dequeueing work from the global concurrent queues,
- * or return to the kernel.
- */
-
-#define THREAD_QOS_OVERRIDE_TYPE_UNKNOWN					(0)
-#define THREAD_QOS_OVERRIDE_TYPE_PTHREAD_MUTEX				(1)
-#define THREAD_QOS_OVERRIDE_TYPE_PTHREAD_RWLOCK				(2)
-#define THREAD_QOS_OVERRIDE_TYPE_PTHREAD_EXPLICIT_OVERRIDE	(3)
-#define THREAD_QOS_OVERRIDE_TYPE_DISPATCH_ASYNCHRONOUS_OVERRIDE	(4)
-
-/* A special resource value to indicate a resource wildcard */
-#define THREAD_QOS_OVERRIDE_RESOURCE_WILDCARD (~((user_addr_t)0))
-
-struct thread_qos_policy {
-	integer_t qos_tier;
-	integer_t tier_importance;
-};
-
-typedef struct thread_qos_policy       thread_qos_policy_data_t;
-typedef struct thread_qos_policy      *thread_qos_policy_t;
-
-#define THREAD_QOS_POLICY_COUNT    ((mach_msg_type_number_t) \
-        (sizeof (thread_qos_policy_data_t) / sizeof (integer_t)))
 
 #endif /* PRIVATE */
 

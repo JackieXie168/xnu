@@ -14,9 +14,6 @@ INSTINC_SUBDIRS =	\
 INSTINC_SUBDIRS_X86_64 =	\
 	architecture
 
-INSTINC_SUBDIRS_X86_64H =	\
-	architecture
-
 INSTINC_SUBDIRS_ARM =	\
 	architecture
 
@@ -25,9 +22,6 @@ EXPORT_FILES = \
 	Availability.h	\
 	AvailabilityInternal.h	\
 	AvailabilityMacros.h	\
-	stddef.h
-
-KERNEL_FILES = \
 	stdarg.h	\
 	stdbool.h	\
 	stdint.h
@@ -36,11 +30,11 @@ INSTALL_MI_LIST =
 
 INSTALL_MI_DIR = .
 
-INSTALL_KF_MI_LIST = ${KERNEL_FILES}
+INSTALL_KF_MI_LIST = ${EXPORT_FILES}
 
-INSTALL_KF_MI_LCL_LIST = ${KERNEL_FILES}
+INSTALL_KF_MI_LCL_LIST = ${EXPORT_FILES}
 
-EXPORT_MI_LIST = ${EXPORT_FILES} ${KERNEL_FILES}
+EXPORT_MI_LIST = ${EXPORT_FILES} stddef.h
 
 EXPORT_MI_DIR = .
 

@@ -273,7 +273,6 @@ struct Dwarf_Chain_s {
 
 #define CURRENT_VERSION_STAMP		2 /* DWARF2 */
 #define CURRENT_VERSION_STAMP3		3 /* DWARF3 */
-#define CURRENT_VERSION_STAMP4		4 /* DWARF4 */
 
     /* Size of cu header version stamp field. */
 #define CU_VERSION_STAMP_SIZE   sizeof(Dwarf_Half)

@@ -44,29 +44,22 @@ COMP_SUBDIRS =
 
 %CFILES
 
-%CXXFILES
-
 %SFILES
 
 %MACHDEP
 
-# Rebuild if per-file overrides change
-${OBJS}: $(firstword $(MAKEFILE_LIST))
+#
+#  OBJSDEPS is the set of files (defined in the machine dependent
+#  template if necessary) which all objects depend on (such as an
+#  in-line assembler expansion filter)
+#
+${OBJS}: ${OBJSDEPS}
 
-# Rebuild if global compile flags change
-$(COBJS): .CFLAGS
-.CFLAGS: ALWAYS
-	$(_v)$(REPLACECONTENTS) $@ $(KCC) $(CFLAGS) $(INCFLAGS)
-$(CXXOBJS): .CXXFLAGS
-.CXXFLAGS: ALWAYS
-	$(_v)$(REPLACECONTENTS) $@ $(KC++) $(CXXFLAGS) $(INCFLAGS)
-$(SOBJS): .SFLAGS
-.SFLAGS: ALWAYS
-	$(_v)$(REPLACECONTENTS) $@ $(S_KCC) $(SFLAGS) $(INCFLAGS)
+LDOBJS = $(OBJS)
 
-$(COMPONENT).filelist: $(OBJS)
+$(COMPONENT).filelist: $(LDOBJS)
 	@echo LDFILELIST $(COMPONENT)
-	$(_v)( for obj in ${OBJS}; do	\
+	$(_v)( for obj in ${LDOBJS}; do	\
 		 echo $(TARGET)/$(CURRENT_KERNEL_CONFIG)/$${obj}; \
 	done; ) > $(COMPONENT).filelist
 

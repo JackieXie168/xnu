@@ -50,12 +50,7 @@ enum {
     kIOServiceTerminatedNotificationType	= 102,
     kIOAsyncCompletionNotificationType		= 150,
     kIOServiceMessageNotificationType		= 160,
-    kLastIOKitNotificationType 			= 199,
-
-    // reserved bits
-    kIOKitNoticationTypeMask                    = 0x00000FFF,
-    kIOKitNoticationTypeSizeAdjShift            = 30,
-    kIOKitNoticationMsgSizeMask                 = 3,
+    kLastIOKitNotificationType 			= 199
 };
 
 enum {

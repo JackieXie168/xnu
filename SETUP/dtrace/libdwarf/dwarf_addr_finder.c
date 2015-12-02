@@ -49,7 +49,11 @@
 #include "dwarf_arange.h"
 #include "dwarf_line.h"
 #include "dwarf_frame.h"
-#include "dwarf_addr_finder.h"
+#if !defined(__APPLE__)
+#include <cmplrs/dwarf_addr_finder.h>
+#else
+#include "cmplrs/dwarf_addr_finder.h"
+#endif /* __APPLE__ */
 #include "dwarf_error.h"
 
 typedef unsigned long long ull;

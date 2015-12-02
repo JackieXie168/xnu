@@ -18,7 +18,7 @@ INSTALL_DTRACE_SCRIPTS_LIST =	\
 	tcp.d \
 	unistd.d
 
-ifneq ($(filter iPhoneOS iPhoneOSNano,$(PLATFORM)),)
+ifeq ($(PLATFORM),iPhoneOS)
 INSTALL_DTRACE_SCRIPTS_LIST += mptcp.d
 endif
 
@@ -30,7 +30,7 @@ $(INSTALL_DTRACE_SCRIPTS_FILES): $(DSTROOT)/$(INSTALL_DTRACE_SCRIPTS_DIR)/% : %
 	@echo INSTALL $(@F)
 	$(_v)$(INSTALL) $(DATA_INSTALL_FLAGS) $< $@
 
-do_textfiles_install:: $(INSTALL_DTRACE_SCRIPTS_FILES)
+do_build_install_primary:: $(INSTALL_DTRACE_SCRIPTS_FILES)
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

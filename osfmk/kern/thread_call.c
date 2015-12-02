@@ -154,10 +154,10 @@ disable_ints_and_lock(void)
 }
 
 static inline void 
-enable_ints_and_unlock(spl_t s)
+enable_ints_and_unlock(void)
 {
 	thread_call_unlock();
-	splx(s);
+	(void)spllo();
 }
 
 
@@ -307,7 +307,6 @@ thread_call_initialize(void)
 	kern_return_t			result;
 	thread_t			thread;
 	int				i;
-	spl_t			s;
 
 	i = sizeof (thread_call_data_t);
 	thread_call_zone = zinit(i, 4096 * i, 16 * i, "thread_call");
@@ -333,7 +332,7 @@ thread_call_initialize(void)
 	thread_call_group_setup(&thread_call_groups[THREAD_CALL_PRIORITY_KERNEL], THREAD_CALL_PRIORITY_KERNEL, 1, TRUE);
 	thread_call_group_setup(&thread_call_groups[THREAD_CALL_PRIORITY_HIGH], THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_THREAD_MIN, FALSE);
 
-	s = disable_ints_and_lock();
+	disable_ints_and_lock();
 
 	queue_init(&thread_call_internal_queue);
 	for (
@@ -347,7 +346,7 @@ thread_call_initialize(void)
 
 	thread_call_daemon_awake = TRUE;
 
-	enable_ints_and_unlock(s);
+	enable_ints_and_unlock();
 
 	result = kernel_thread_start_priority((thread_continue_t)thread_call_daemon, NULL, BASEPRI_PREEMPT + 1, &thread);
 	if (result != KERN_SUCCESS)
@@ -523,7 +522,7 @@ _set_delayed_call_timer(
 	timer_call_enter_with_leeway(&group->delayed_timer, NULL,
 	    call->tc_soft_deadline, leeway,
 	    TIMER_CALL_SYS_CRITICAL|TIMER_CALL_LEEWAY,
-	    ((call->tc_flags & THREAD_CALL_RATELIMITED) == THREAD_CALL_RATELIMITED));
+	    ((call->tc_soft_deadline & 0x1) == 0x1));
 }
 
 /*
@@ -926,12 +925,16 @@ thread_call_enter_delayed_internal(
 	else
 		deadline += slop;
 
+	/* Bit 0 of the "soft" deadline indicates that
+	 * this particular callout requires rate-limiting
+	 * behaviour. Maintain the invariant deadline >= soft_deadline
+	 */
+	deadline |= 1;
 	if (ratelimited) {
-		call->tc_flags |= TIMER_CALL_RATELIMITED;
+		call->tc_soft_deadline |= 0x1ULL;
 	} else {
-		call->tc_flags &= ~TIMER_CALL_RATELIMITED;
+		call->tc_soft_deadline &= ~0x1ULL;
 	}
-
 
 	call->tc_call.param1 = param1;
 	call->ttd = (sdeadline > abstime) ? (sdeadline - abstime) : 0;
@@ -1109,7 +1112,7 @@ sched_call_thread(
  * if the client has so requested.
  */
 static void
-thread_call_finish(thread_call_t call, spl_t *s)
+thread_call_finish(thread_call_t call)
 {
 	boolean_t dowake = FALSE;
 
@@ -1135,11 +1138,11 @@ thread_call_finish(thread_call_t call, spl_t *s)
 			panic("Someone waiting on a thread call that is scheduled for free: %p\n", call->tc_call.func);
 		}
 
-		enable_ints_and_unlock(*s);
+		enable_ints_and_unlock();
 
 		zfree(thread_call_zone, call);
 
-		*s = disable_ints_and_lock();
+		(void)disable_ints_and_lock();
 	}
 
 }
@@ -1154,7 +1157,6 @@ thread_call_thread(
 {
 	thread_t	self = current_thread();
 	boolean_t	canwait;
-	spl_t		s;
 
 	if ((thread_get_tag_internal(self) & THREAD_TAG_CALLOUT) == 0)
 		(void)thread_set_tag_internal(self, THREAD_TAG_CALLOUT);
@@ -1170,7 +1172,7 @@ thread_call_thread(
 		panic("thread_terminate() returned?");
 	}
 
-	s = disable_ints_and_lock();
+	(void)disable_ints_and_lock();
 
 	thread_sched_call(self, group->sched_call);
 
@@ -1200,7 +1202,7 @@ thread_call_thread(
 		} else
 			canwait = FALSE;
 
-		enable_ints_and_unlock(s);
+		enable_ints_and_unlock();
 
 		KERNEL_DEBUG_CONSTANT(
 				MACHDBG_CODE(DBG_MACH_SCHED,MACH_CALLOUT) | DBG_FUNC_NONE,
@@ -1222,11 +1224,13 @@ thread_call_thread(
 					pl, (void *)VM_KERNEL_UNSLIDE(func), param0, param1);
 		}
 
-		s = disable_ints_and_lock();
+		(void)thread_funnel_set(self->funnel_lock, FALSE);		/* XXX */
+
+		(void) disable_ints_and_lock();
 		
 		if (canwait) {
 			/* Frees if so desired */
-			thread_call_finish(call, &s);
+			thread_call_finish(call);
 		}
 	}
 
@@ -1269,7 +1273,7 @@ thread_call_thread(
 			panic("kcall worker unable to assert wait?");
 		}   
 
-		enable_ints_and_unlock(s);
+		enable_ints_and_unlock();
 
 		thread_block_parameter((thread_continue_t)thread_call_thread, group);
 	} else {
@@ -1278,14 +1282,14 @@ thread_call_thread(
 
 			wait_queue_assert_wait(&group->idle_wqueue, NO_EVENT, THREAD_UNINT, 0); /* Interrupted means to exit */
 
-			enable_ints_and_unlock(s);
+			enable_ints_and_unlock();
 
 			thread_block_parameter((thread_continue_t)thread_call_thread, group);
 			/* NOTREACHED */
 		}
 	}
 
-	enable_ints_and_unlock(s);
+	enable_ints_and_unlock();
 
 	thread_terminate(self);
 	/* NOTREACHED */
@@ -1302,9 +1306,8 @@ thread_call_daemon_continue(__unused void *arg)
 	int		i;
 	kern_return_t	kr;
 	thread_call_group_t group;
-	spl_t	s;
 
-	s = disable_ints_and_lock();
+	(void)disable_ints_and_lock();
 
 	/* Starting at zero happens to be high-priority first. */
 	for (i = 0; i < THREAD_CALL_GROUP_COUNT; i++) {
@@ -1312,7 +1315,7 @@ thread_call_daemon_continue(__unused void *arg)
 		while (thread_call_group_should_add_thread(group)) {
 			group->active_count++;
 
-			enable_ints_and_unlock(s);
+			enable_ints_and_unlock();
 
 			kr = thread_call_thread_create(group);
 			if (kr != KERN_SUCCESS) {
@@ -1321,11 +1324,11 @@ thread_call_daemon_continue(__unused void *arg)
 				 * We can try again later.
 				 */
 				delay(10000); /* 10 ms */
-				s = disable_ints_and_lock();
+				(void)disable_ints_and_lock();
 				goto out;
 			}
 
-			s = disable_ints_and_lock();
+			(void)disable_ints_and_lock();
 		}
 	}
 
@@ -1333,7 +1336,7 @@ out:
 	thread_call_daemon_awake = FALSE;
 	wait_queue_assert_wait(&daemon_wqueue, NO_EVENT, THREAD_UNINT, 0);
 
-	enable_ints_and_unlock(s);
+	enable_ints_and_unlock();
 
 	thread_block_parameter((thread_continue_t)thread_call_daemon_continue, NULL);
 	/* NOTREACHED */
@@ -1393,7 +1396,13 @@ thread_call_delayed_timer(
 
 	while (!queue_end(&group->delayed_queue, qe(call))) {
 		if (call->tc_soft_deadline <= timestamp) {
-			if ((call->tc_flags & THREAD_CALL_RATELIMITED) &&
+			/* Bit 0 of the "soft" deadline indicates that
+			 * this particular callout is rate-limited
+			 * and hence shouldn't be processed before its
+			 * hard deadline. Rate limited timers aren't
+			 * skipped when a forcible reevaluation is in progress.
+			 */
+			if ((call->tc_soft_deadline & 0x1) &&
 			    (CE(call)->deadline > timestamp) &&
 			    (ml_timer_forced_evaluation() == FALSE)) {
 				break;
@@ -1558,11 +1567,10 @@ boolean_t
 thread_call_isactive(thread_call_t call) 
 {
 	boolean_t active;
-	spl_t	s;
 
-	s = disable_ints_and_lock();
+	disable_ints_and_lock();
 	active = (call->tc_submit_count > call->tc_finish_count);
-	enable_ints_and_unlock(s);
+	enable_ints_and_unlock();
 
 	return active;
 }

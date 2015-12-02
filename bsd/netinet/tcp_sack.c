@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -102,8 +102,6 @@
 #include <netinet6/ipsec.h>
 #endif /*IPSEC*/
 
-#include <libkern/OSAtomic.h>
-
 int	tcp_do_sack = 1;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, sack, CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_do_sack, 0,
 	"Enable/Disable TCP SACK support");
@@ -117,7 +115,7 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, sack_globalmaxholes, CTLFLAG_RW | CTLFLAG_LO
 	&tcp_sack_globalmaxholes, 0, 
     "Global maximum number of TCP SACK holes");
 
-static SInt32 tcp_sack_globalholes = 0;
+static int tcp_sack_globalholes = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, sack_globalholes, CTLFLAG_RD | CTLFLAG_LOCKED,
     &tcp_sack_globalholes, 0,
     "Global number of TCP SACK holes currently allocated");
@@ -244,7 +242,7 @@ tcp_sackhole_alloc(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 		return NULL;
 	}
 
-	hole = (struct sackhole *)zalloc(sack_hole_zone);
+	hole = (struct sackhole *)zalloc_noblock(sack_hole_zone);
 	if (hole == NULL)
 		return NULL;
 
@@ -253,7 +251,7 @@ tcp_sackhole_alloc(struct tcpcb *tp, tcp_seq start, tcp_seq end)
 	hole->rxmit = start;
 
 	tp->snd_numholes++;
-	OSIncrementAtomic(&tcp_sack_globalholes);
+	tcp_sack_globalholes++;
 
 	return hole;
 }
@@ -267,7 +265,7 @@ tcp_sackhole_free(struct tcpcb *tp, struct sackhole *hole)
 	zfree(sack_hole_zone, hole);
 
 	tp->snd_numholes--;
-	OSDecrementAtomic(&tcp_sack_globalholes);
+	tcp_sack_globalholes--;
 }
 
 /*
@@ -283,7 +281,7 @@ tcp_sackhole_insert(struct tcpcb *tp, tcp_seq start, tcp_seq end,
 	hole = tcp_sackhole_alloc(tp, start, end);
 	if (hole == NULL)
 		return NULL;
-	hole->rxmit_start = tcp_now;
+
 	/* Insert the new SACK hole into scoreboard */
 	if (after != NULL)
 		TAILQ_INSERT_AFTER(&tp->snd_holes, after, hole, scblink);
@@ -313,75 +311,6 @@ tcp_sackhole_remove(struct tcpcb *tp, struct sackhole *hole)
 	/* Free this SACK hole. */
 	tcp_sackhole_free(tp, hole);
 }
-/*
- * When a new ack with SACK is received, check if it indicates packet
- * reordering. If there is packet reordering, the socket is marked and
- * the late time offset by which the packet was reordered with
- * respect to its closest neighboring packets is computed.
- */
-static void
-tcp_sack_detect_reordering(struct tcpcb *tp, struct sackhole *s,
-    tcp_seq sacked_seq, tcp_seq snd_fack)
-{
-	int32_t rext = 0, reordered = 0;
-
-	/*
-	 * If the SACK hole is past snd_fack, this is from new SACK
-	 * information, so we can ignore it.
-	 */
-	if (SEQ_GT(s->end, snd_fack))
-		return;
-	/*
-	 * If there has been a retransmit timeout, then the timestamp on 
-	 * the SACK segment will be newer. This might lead to a
-	 * false-positive. Avoid re-ordering detection in this case.
-	 */
-	if (tp->t_rxtshift > 0)
-		return;
-
-	/*
-	 * Detect reordering from SACK information by checking
-	 * if recently sacked data was never retransmitted from this hole.
-	 */
-	if (SEQ_LT(s->rxmit, sacked_seq)) {
-		reordered = 1;
-		tcpstat.tcps_avoid_rxmt++;
-	}
-
-	if (reordered) {
-		if (!(tp->t_flagsext & TF_PKTS_REORDERED)) {
-			tp->t_flagsext |= TF_PKTS_REORDERED;
-			tcpstat.tcps_detect_reordering++;
-		}
-
-		tcpstat.tcps_reordered_pkts++;
-
-		VERIFY(SEQ_GEQ(snd_fack, s->rxmit));
-
-		if (s->rxmit_start > 0) {
-			rext = timer_diff(tcp_now, 0, s->rxmit_start, 0);
-			if (rext < 0)
-				return;
-
-			/*
-			 * We take the maximum reorder window to schedule
-			 * DELAYFR timer as that will take care of jitter
-			 * on the network path.
-			 *
-			 * Computing average and standard deviation seems
-			 * to cause unnecessary retransmissions when there
-			 * is high jitter.
-			 *
-			 * We set a maximum of SRTT/2 and a minimum of
-			 * 10 ms on the reorder window.
-			 */
-			tp->t_reorderwin = max(tp->t_reorderwin, rext);
-			tp->t_reorderwin = min(tp->t_reorderwin,
-			    (tp->t_srtt >> (TCP_RTT_SHIFT - 1)));
-			tp->t_reorderwin = max(tp->t_reorderwin, 10);
-		}
-	}
-}
 
 /*
  * Process cumulative ACK and the TCP SACK option to update the scoreboard.
@@ -389,13 +318,12 @@ tcp_sack_detect_reordering(struct tcpcb *tp, struct sackhole *s,
  * the sequence space).
  */
 void
-tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th, 
+tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, tcp_seq th_ack, 
 	u_int32_t *newbytes_acked)
 {
 	struct sackhole *cur, *temp;
 	struct sackblk sack, sack_blocks[TCP_MAX_SACK + 1], *sblkp;
 	int i, j, num_sack_blks;
-	tcp_seq old_snd_fack = 0, th_ack = th->th_ack;
 
 	num_sack_blks = 0;
 	/*
@@ -431,7 +359,6 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 	if (num_sack_blks == 0)
 		return;
 
-	VERIFY(num_sack_blks <= (TCP_MAX_SACK + 1));
 	/*
 	 * Sort the SACK blocks so we can update the scoreboard
 	 * with just one pass. The overhead of sorting upto 4+1 elements
@@ -457,7 +384,6 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 		*newbytes_acked += (tp->snd_fack - tp->snd_una);
 	}
 
-	old_snd_fack = tp->snd_fack;
 	/*
 	 * In the while-loop below, incoming SACK blocks (sack_blocks[])
 	 * and SACK holes (snd_holes) are traversed from their tails with
@@ -537,9 +463,6 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 			if (SEQ_GEQ(sblkp->end, cur->end)) {
 				/* Acks entire hole, so delete hole */
 				*newbytes_acked += (cur->end - cur->start);
-
-				tcp_sack_detect_reordering(tp, cur,
-				    cur->end, old_snd_fack);
 				temp = cur;
 				cur = TAILQ_PREV(cur, sackhole_head, scblink);
 				tcp_sackhole_remove(tp, temp);
@@ -551,8 +474,6 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 			} else {
 				/* Move start of hole forward */
 				*newbytes_acked += (sblkp->end - cur->start);
-				tcp_sack_detect_reordering(tp, cur,
-				    sblkp->end, old_snd_fack);
 				cur->start = sblkp->end;
 				cur->rxmit = SEQ_MAX(cur->rxmit, cur->start);
 			}
@@ -561,20 +482,16 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 			if (SEQ_GEQ(sblkp->end, cur->end)) {
 				/* Move end of hole backward */
 				*newbytes_acked += (cur->end - sblkp->start);
-				tcp_sack_detect_reordering(tp, cur,
-				    cur->end, old_snd_fack);
 				cur->end = sblkp->start;
 				cur->rxmit = SEQ_MIN(cur->rxmit, cur->end);
 			} else {
 				/*
-				 * ACKs some data in the middle of a hole;
-				 * need to split current hole
+				 * ACKs some data in middle of a hole; need to
+				 * split current hole
 				 */
 				*newbytes_acked += (sblkp->end - sblkp->start);
-				tcp_sack_detect_reordering(tp, cur,
-				    sblkp->end, old_snd_fack);
 				temp = tcp_sackhole_insert(tp, sblkp->end,
-				    cur->end, cur);
+							   cur->end, cur);
 				if (temp != NULL) {
 					if (SEQ_GT(cur->rxmit, temp->rxmit)) {
 						temp->rxmit = cur->rxmit;
@@ -585,13 +502,6 @@ tcp_sack_doack(struct tcpcb *tp, struct tcpopt *to, struct tcphdr *th,
 					cur->end = sblkp->start;
 					cur->rxmit = SEQ_MIN(cur->rxmit,
 							     cur->end);
-					/*
-					 * Reset the rxmit_start to that of
-					 * the current hole as that will
-					 * help to compute the reorder
-					 * window correctly
-					 */
-					temp->rxmit_start = cur->rxmit_start;
 				}
 			}
 		}
@@ -759,29 +669,4 @@ tcp_sack_adjust(struct tcpcb *tp)
 		return;
 	tp->snd_nxt = tp->snd_fack;
 	return;
-}
-
-/*
- * This function returns true if more than (tcprexmtthresh - 1) * SMSS
- * bytes with sequence numbers greater than snd_una have been SACKed. 
- */
-boolean_t
-tcp_sack_byte_islost(struct tcpcb *tp)
-{
-	u_int32_t unacked_bytes, sndhole_bytes = 0;
-	struct sackhole *sndhole;
-	if (!SACK_ENABLED(tp) || IN_FASTRECOVERY(tp) ||
-	    TAILQ_EMPTY(&tp->snd_holes) ||
-	    (tp->t_flagsext & TF_PKTS_REORDERED))
-		return (FALSE);
-
-	unacked_bytes = tp->snd_max - tp->snd_una;
-
-	TAILQ_FOREACH(sndhole, &tp->snd_holes, scblink) {
-		sndhole_bytes += (sndhole->end - sndhole->start);
-	}
-
-	VERIFY(unacked_bytes >= sndhole_bytes);
-	return ((unacked_bytes - sndhole_bytes) >
-	    ((tcprexmtthresh - 1) * tp->t_maxseg));
 }

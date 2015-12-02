@@ -71,11 +71,6 @@
 #include <mach/message.h>
 #include <mach/port.h>
 
-#if PRIVATE
-#define IOKIT_SERVER_VERSION	20140421
-#endif
-
-
 /*
  * IO buffer - out-of-line array of characters.
  */
@@ -116,7 +111,7 @@ typedef uint64_t		io_scalar_inband64_t[16];
 typedef uint64_t		io_async_ref64_t[8];
 #endif // __LP64__
 
-#ifdef MACH_KERNEL_PRIVATE
+#ifdef MACH_KERNEL
 
 typedef struct IOObject * io_object_t;
 typedef io_object_t io_connect_t;

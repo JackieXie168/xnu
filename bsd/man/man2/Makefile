@@ -39,13 +39,10 @@ DATAFILES = \
 	dup2.2			\
 	execve.2		\
 	exchangedata.2		\
-	faccessat.2		\
 	fchdir.2		\
 	fchflags.2		\
 	fchmod.2		\
-	fchmodat.2		\
 	fchown.2		\
-	fchownat.2		\
 	fcntl.2			\
 	fgetattrlist.2		\
 	fsetattrlist.2		\
@@ -59,15 +56,12 @@ DATAFILES = \
 	fsetxattr.2		\
 	fstat.2			\
 	fstat64.2		\
-	fstatat.2		\
 	fstatfs.2		\
 	fstatfs64.2		\
 	fsync.2			\
 	ftruncate.2		\
 	futimes.2		\
 	getattrlist.2		\
-	getattrlistat.2		\
-	getattrlistbulk.2	\
 	getaudit.2		\
 	getaudit_addr.2		\
 	getauid.2		\
@@ -108,7 +102,6 @@ DATAFILES = \
 	kqueue.2		\
 	lchown.2		\
 	link.2			\
-	linkat.2		\
 	listen.2		\
 	listxattr.2		\
 	lseek.2			\
@@ -118,7 +111,6 @@ DATAFILES = \
 	mincore.2		\
 	minherit.2		\
 	mkdir.2			\
-	mkdirat.2		\
 	mkfifo.2		\
 	mknod.2			\
 	mlock.2			\
@@ -131,7 +123,6 @@ DATAFILES = \
 	nfsclnt.2		\
 	nfssvc.2		\
 	open.2			\
-	openat.2		\
 	pathconf.2		\
 	pipe.2			\
 	poll.2 			\
@@ -144,14 +135,12 @@ DATAFILES = \
 	quotactl.2		\
 	read.2			\
 	readlink.2		\
-	readlinkat.2		\
 	readv.2			\
 	reboot.2		\
 	recv.2			\
 	recvfrom.2		\
 	recvmsg.2		\
 	rename.2		\
-	renameat.2		\
 	removexattr.2		\
 	revoke.2		\
 	rmdir.2			\
@@ -211,14 +200,12 @@ DATAFILES = \
 	statfs.2		\
 	statfs64.2		\
 	symlink.2		\
-	symlinkat.2		\
 	sync.2			\
 	syscall.2		\
 	truncate.2		\
 	umask.2			\
 	undelete.2		\
 	unlink.2		\
-	unlinkat.2		\
 	unmount.2		\
 	utimes.2		\
 	vfork.2			\

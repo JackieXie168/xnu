@@ -226,10 +226,4 @@ typedef struct __lck_rw_t__	lck_rw_t;
 #endif
 #endif
 
-#ifdef MACH_KERNEL_PRIVATE
-
-extern void		kernel_preempt_check (void);
-
-#endif /* MACH_KERNEL_PRIVATE */
-
 #endif	/* _I386_LOCKS_H_ */

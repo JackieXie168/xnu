@@ -42,14 +42,10 @@
 #include <IOKit/pwr_mgt/IOPMinformeeList.h>
 #include <IOKit/IOStatisticsPrivate.h>
 #include <IOKit/IOKitKeysPrivate.h>
-#include <IOKit/IOInterruptAccountingPrivate.h>
 
 #include <IOKit/assert.h>
 
 #include "IOKitKernelInternal.h"
-
-const OSSymbol * gIOProgressBackbufferKey;
-OSSet *          gIORemoveOnReadProperties;
 
 extern "C" {
 
@@ -157,11 +153,6 @@ void StartIOKit( void * p1, void * p2, void * p3, void * p4 )
     IOLibInit(); 
     OSlibkernInit();
 
-    gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
-    gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
-
-    interruptAccountingInit();
-
     rootNub = new IOPlatformExpertDevice;
 
     if( rootNub && rootNub->initWithArgs( p1, p2, p3, p4)) {
@@ -201,19 +192,6 @@ IORegistrySetOSBuildVersion(char * build_version)
     }
 
     return;
-}
-
-void
-IORecordProgressBackbuffer(void * buffer, size_t size, uint32_t theme)
-{
-    IORegistryEntry * chosen;
-    if ((chosen = IORegistryEntry::fromPath(kIODeviceTreePlane ":/chosen")))
-    {
-        chosen->setProperty(kIOProgressBackbufferKey, buffer, size);
-	chosen->setProperty(kIOProgressColorThemeKey, theme, 32);
-
-        chosen->release();
-    }
 }
 
 }; /* extern "C" */

@@ -37,7 +37,6 @@
 #endif
 
 #include <sys/appleapiopts.h>
-#include <sys/cdefs.h>
 
 #include <IOKit/system.h>
 
@@ -130,15 +129,15 @@ void	IOLockUnlock( IOLock * lock);
     @abstract Sleep with mutex unlock and relock
 @discussion Prepare to sleep,unlock the mutex, and re-acquire it on wakeup. Results are undefined if the caller has not locked the mutex. This function may block and so should not be called from interrupt level or while a spin lock is held. 
     @param lock Pointer to the locked lock. 
-    @param event The event to sleep on. Must be non-NULL.
+    @param event The event to sleep on.
     @param interType How can the sleep be interrupted.
 	@result The wait-result value indicating how the thread was awakened.*/
-int	IOLockSleep( IOLock * lock, void *event, UInt32 interType) __DARWIN14_ALIAS(IOLockSleep);
+int	IOLockSleep( IOLock * lock, void *event, UInt32 interType);
 
 int	IOLockSleepDeadline( IOLock * lock, void *event,
-						 AbsoluteTime deadline, UInt32 interType) __DARWIN14_ALIAS(IOLockSleepDeadline);
+				AbsoluteTime deadline, UInt32 interType);
 
-void	IOLockWakeup(IOLock * lock, void *event, bool oneThread) __DARWIN14_ALIAS(IOLockWakeup);
+void	IOLockWakeup(IOLock * lock, void *event, bool oneThread);
 
 #ifdef __APPLE_API_OBSOLETE
 

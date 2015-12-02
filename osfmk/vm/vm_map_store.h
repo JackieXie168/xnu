@@ -114,8 +114,6 @@ struct vm_map_store {
 	(map)->hint = (value);	       \
 	MACRO_END
 
-#define SKIP_RB_TREE		0xBAADC0D1
-
 #define VM_MAP_ENTRY_CREATE	1
 #define VM_MAP_ENTRY_DELETE	2
 
@@ -132,7 +130,6 @@ void	vm_map_store_copy_reset( struct vm_map_copy*, struct vm_map_entry*);
 #if MACH_ASSERT
 boolean_t first_free_is_valid_store( struct _vm_map*);
 #endif
-boolean_t vm_map_store_has_RB_support( struct vm_map_header *hdr );
 
 #endif /* _VM_VM_MAP_STORE_H */
 
