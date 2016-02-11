@@ -29,6 +29,129 @@
 		1F42B3D818592E9A0023356E /* libdwarf.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F051CD01859223C008F6CAE /* libdwarf.a */; };
 		1F42B3D918592E9A0023356E /* libelf.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FAD56711859255500EDAF39 /* libelf.a */; };
 		1F42B3DA18592E9D0023356E /* libz.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F3A879E18592B2F007D12D6 /* libz.dylib */; };
+		1F433E081C6D1A880046E5BC /* ar.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6951C6C4D63003D7461 /* ar.c */; };
+		1F433E091C6D1A880046E5BC /* begin.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6961C6C4D63003D7461 /* begin.c */; };
+		1F433E0A1C6D1A880046E5BC /* checksum.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6971C6C4D63003D7461 /* checksum.c */; };
+		1F433E0B1C6D1A880046E5BC /* clscook.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6981C6C4D63003D7461 /* clscook.c */; };
+		1F433E0C1C6D1A880046E5BC /* clscook_ELF64.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6991C6C4D63003D7461 /* clscook_ELF64.c */; };
+		1F433E0D1C6D1A880046E5BC /* cntl.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC69A1C6C4D63003D7461 /* cntl.c */; };
+		1F433E0E1C6D1A880046E5BC /* cook.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC69B1C6C4D63003D7461 /* cook.c */; };
+		1F433E0F1C6D1A880046E5BC /* data.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC69C1C6C4D63003D7461 /* data.c */; };
+		1F433E111C6D1A880046E5BC /* end.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC69E1C6C4D63003D7461 /* end.c */; };
+		1F433E121C6D1A880046E5BC /* error.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC69F1C6C4D63003D7461 /* error.c */; };
+		1F433E131C6D1A880046E5BC /* fill.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A01C6C4D63003D7461 /* fill.c */; };
+		1F433E141C6D1A880046E5BC /* flag.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A11C6C4D63003D7461 /* flag.c */; };
+		1F433E151C6D1A880046E5BC /* gelf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A21C6C4D63003D7461 /* gelf.c */; };
+		1F433E161C6D1A880046E5BC /* getarhdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A31C6C4D63003D7461 /* getarhdr.c */; };
+		1F433E171C6D1A880046E5BC /* getarsym.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A41C6C4D63003D7461 /* getarsym.c */; };
+		1F433E181C6D1A880046E5BC /* getbase.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A51C6C4D63003D7461 /* getbase.c */; };
+		1F433E191C6D1A880046E5BC /* getdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A61C6C4D63003D7461 /* getdata.c */; };
+		1F433E1A1C6D1A880046E5BC /* getehdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A71C6C4D63003D7461 /* getehdr.c */; };
+		1F433E1B1C6D1A880046E5BC /* getident.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A81C6C4D63003D7461 /* getident.c */; };
+		1F433E1C1C6D1A880046E5BC /* getphdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6A91C6C4D63003D7461 /* getphdr.c */; };
+		1F433E1D1C6D1A880046E5BC /* getphnum.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AA1C6C4D63003D7461 /* getphnum.c */; };
+		1F433E1E1C6D1A880046E5BC /* getscn.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AB1C6C4D63003D7461 /* getscn.c */; };
+		1F433E1F1C6D1A880046E5BC /* getshdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AC1C6C4D63003D7461 /* getshdr.c */; };
+		1F433E201C6D1A880046E5BC /* getshnum.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AD1C6C4D63003D7461 /* getshnum.c */; };
+		1F433E211C6D1A880046E5BC /* getshstrndx.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AE1C6C4D63003D7461 /* getshstrndx.c */; };
+		1F433E221C6D1A880046E5BC /* hash.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6AF1C6C4D63003D7461 /* hash.c */; };
+		1F433E231C6D1A880046E5BC /* input.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B01C6C4D63003D7461 /* input.c */; };
+		1F433E241C6D1A880046E5BC /* kind.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B11C6C4D63003D7461 /* kind.c */; };
+		1F433E251C6D1A9D0046E5BC /* ndxscn.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B51C6C4D63003D7461 /* ndxscn.c */; };
+		1F433E261C6D1A9D0046E5BC /* newdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B61C6C4D63003D7461 /* newdata.c */; };
+		1F433E271C6D1A9D0046E5BC /* newehdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B71C6C4D63003D7461 /* newehdr.c */; };
+		1F433E281C6D1A9D0046E5BC /* newehdr_ELF64.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B81C6C4D63003D7461 /* newehdr_ELF64.c */; };
+		1F433E291C6D1A9D0046E5BC /* newphdr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6B91C6C4D63003D7461 /* newphdr.c */; };
+		1F433E2A1C6D1A9D0046E5BC /* newphdr_ELF64.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BA1C6C4D63003D7461 /* newphdr_ELF64.c */; };
+		1F433E2B1C6D1A9D0046E5BC /* newscn.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BB1C6C4D63003D7461 /* newscn.c */; };
+		1F433E2C1C6D1A9D0046E5BC /* next.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BC1C6C4D63003D7461 /* next.c */; };
+		1F433E2D1C6D1A9D0046E5BC /* nextscn.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BD1C6C4D63003D7461 /* nextscn.c */; };
+		1F433E2E1C6D1A9D0046E5BC /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BE1C6C4D63003D7461 /* output.c */; };
+		1F433E2F1C6D1A9D0046E5BC /* rand.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6BF1C6C4D63003D7461 /* rand.c */; };
+		1F433E301C6D1A9D0046E5BC /* rawdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C01C6C4D63003D7461 /* rawdata.c */; };
+		1F433E311C6D1A9D0046E5BC /* rawfile.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C11C6C4D63003D7461 /* rawfile.c */; };
+		1F433E321C6D1A9D0046E5BC /* rawput.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C21C6C4D63003D7461 /* rawput.c */; };
+		1F433E331C6D1A9D0046E5BC /* strptr.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C31C6C4D63003D7461 /* strptr.c */; };
+		1F433E341C6D1A9D0046E5BC /* update.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C51C6C4D63003D7461 /* update.c */; };
+		1F433E351C6D1A9D0046E5BC /* update_ELF64.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C61C6C4D63003D7461 /* update_ELF64.c */; };
+		1F433E361C6D1A9D0046E5BC /* xlate.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C71C6C4D63003D7461 /* xlate.c */; };
+		1F433E371C6D1A9D0046E5BC /* xlate64.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6C91C6C4D63003D7461 /* xlate64.c */; };
+		1F433E381C6D1ABD0046E5BC /* dwarf_abbrev.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC63A1C6C4D62003D7461 /* dwarf_abbrev.c */; };
+		1F433E391C6D1ABD0046E5BC /* dwarf_addr_finder.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC63C1C6C4D62003D7461 /* dwarf_addr_finder.c */; };
+		1F433E3A1C6D1ABD0046E5BC /* dwarf_alloc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC63D1C6C4D62003D7461 /* dwarf_alloc.c */; };
+		1F433E3B1C6D1ABD0046E5BC /* dwarf_arange.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC63F1C6C4D62003D7461 /* dwarf_arange.c */; };
+		1F433E3C1C6D1ABD0046E5BC /* dwarf_die_deliv.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6421C6C4D62003D7461 /* dwarf_die_deliv.c */; };
+		1F433E3D1C6D1ABD0046E5BC /* dwarf_error.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6441C6C4D62003D7461 /* dwarf_error.c */; };
+		1F433E3E1C6D1ABD0046E5BC /* dwarf_form.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6461C6C4D62003D7461 /* dwarf_form.c */; };
+		1F433E3F1C6D1ABD0046E5BC /* dwarf_frame.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6471C6C4D62003D7461 /* dwarf_frame.c */; };
+		1F433E401C6D1ABD0046E5BC /* dwarf_frame2.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6491C6C4D62003D7461 /* dwarf_frame2.c */; };
+		1F433E411C6D1ABD0046E5BC /* dwarf_frame3.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC64A1C6C4D62003D7461 /* dwarf_frame3.c */; };
+		1F433E421C6D1ABD0046E5BC /* dwarf_funcs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC64B1C6C4D62003D7461 /* dwarf_funcs.c */; };
+		1F433E431C6D1ABD0046E5BC /* dwarf_global.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC64D1C6C4D62003D7461 /* dwarf_global.c */; };
+		1F433E441C6D1ABD0046E5BC /* dwarf_init_finish.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6501C6C4D62003D7461 /* dwarf_init_finish.c */; };
+		1F433E451C6D1ABD0046E5BC /* dwarf_leb.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6511C6C4D62003D7461 /* dwarf_leb.c */; };
+		1F433E461C6D1ABD0046E5BC /* dwarf_line.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6521C6C4D62003D7461 /* dwarf_line.c */; };
+		1F433E471C6D1ABD0046E5BC /* dwarf_line2.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6541C6C4D62003D7461 /* dwarf_line2.c */; };
+		1F433E481C6D1ABD0046E5BC /* dwarf_loc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6551C6C4D62003D7461 /* dwarf_loc.c */; };
+		1F433E491C6D1ACD0046E5BC /* dwarf_macro.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6571C6C4D62003D7461 /* dwarf_macro.c */; };
+		1F433E4A1C6D1ACD0046E5BC /* dwarf_print_lines.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65A1C6C4D62003D7461 /* dwarf_print_lines.c */; };
+		1F433E4B1C6D1ACD0046E5BC /* dwarf_pubtypes.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65B1C6C4D62003D7461 /* dwarf_pubtypes.c */; };
+		1F433E4C1C6D1ACD0046E5BC /* dwarf_query.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65C1C6C4D62003D7461 /* dwarf_query.c */; };
+		1F433E4D1C6D1ACD0046E5BC /* dwarf_sort_line.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65D1C6C4D62003D7461 /* dwarf_sort_line.c */; };
+		1F433E4E1C6D1ACD0046E5BC /* dwarf_string.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65E1C6C4D62003D7461 /* dwarf_string.c */; };
+		1F433E4F1C6D1ACD0046E5BC /* dwarf_stubs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC65F1C6C4D62003D7461 /* dwarf_stubs.c */; };
+		1F433E501C6D1ACD0046E5BC /* dwarf_types.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6601C6C4D62003D7461 /* dwarf_types.c */; };
+		1F433E511C6D1ACD0046E5BC /* dwarf_util.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6621C6C4D62003D7461 /* dwarf_util.c */; };
+		1F433E521C6D1ACD0046E5BC /* dwarf_vars.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6641C6C4D62003D7461 /* dwarf_vars.c */; };
+		1F433E531C6D1ACD0046E5BC /* dwarf_weaks.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6661C6C4D62003D7461 /* dwarf_weaks.c */; };
+		1F433E541C6D1B340046E5BC /* barrier.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5F91C6C4D62003D7461 /* barrier.c */; };
+		1F433E551C6D1B340046E5BC /* ctf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5FC1C6C4D62003D7461 /* ctf.c */; };
+		1F433E561C6D1B340046E5BC /* ctfconvert.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5FE1C6C4D62003D7461 /* ctfconvert.c */; };
+		1F433E571C6D1B340046E5BC /* darwin_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6021C6C4D62003D7461 /* darwin_shim.c */; };
+		1F433E581C6D1B340046E5BC /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6041C6C4D62003D7461 /* dwarf.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
+		1F433E591C6D1B340046E5BC /* fifo.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6051C6C4D62003D7461 /* fifo.c */; };
+		1F433E5A1C6D1B340046E5BC /* hash.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6071C6C4D62003D7461 /* hash.c */; };
+		1F433E5B1C6D1B340046E5BC /* iidesc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6091C6C4D62003D7461 /* iidesc.c */; };
+		1F433E5C1C6D1B340046E5BC /* input.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60A1C6C4D62003D7461 /* input.c */; };
+		1F433E5D1C6D1B340046E5BC /* list.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60B1C6C4D62003D7461 /* list.c */; };
+		1F433E5E1C6D1B340046E5BC /* memory.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60D1C6C4D62003D7461 /* memory.c */; };
+		1F433E5F1C6D1B340046E5BC /* merge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60F1C6C4D62003D7461 /* merge.c */; };
+		1F433E601C6D1B340046E5BC /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6101C6C4D62003D7461 /* output.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
+		1F433E611C6D1B340046E5BC /* st_bugs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6111C6C4D62003D7461 /* st_bugs.c */; };
+		1F433E621C6D1B340046E5BC /* st_parse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6121C6C4D62003D7461 /* st_parse.c */; };
+		1F433E631C6D1B340046E5BC /* stabs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6131C6C4D62003D7461 /* stabs.c */; };
+		1F433E641C6D1B340046E5BC /* stack.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6141C6C4D62003D7461 /* stack.c */; };
+		1F433E651C6D1B340046E5BC /* strtab.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6161C6C4D62003D7461 /* strtab.c */; };
+		1F433E661C6D1B340046E5BC /* symbol.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6181C6C4D62003D7461 /* symbol.c */; };
+		1F433E671C6D1B340046E5BC /* tdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61A1C6C4D62003D7461 /* tdata.c */; };
+		1F433E681C6D1B340046E5BC /* traverse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61B1C6C4D62003D7461 /* traverse.c */; };
+		1F433E691C6D1B340046E5BC /* util.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61D1C6C4D62003D7461 /* util.c */; };
+		1F433E6A1C6D1B340046E5BC /* utils.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61E1C6C4D62003D7461 /* utils.c */; };
+		1F433E6B1C6D1B610046E5BC /* alist.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5F71C6C4D62003D7461 /* alist.c */; };
+		1F433E6C1C6D1B610046E5BC /* barrier.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5F91C6C4D62003D7461 /* barrier.c */; };
+		1F433E6D1C6D1B610046E5BC /* ctf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5FC1C6C4D62003D7461 /* ctf.c */; };
+		1F433E6E1C6D1B610046E5BC /* ctfmerge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5FF1C6C4D62003D7461 /* ctfmerge.c */; };
+		1F433E6F1C6D1B610046E5BC /* dwarf.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6041C6C4D62003D7461 /* dwarf.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
+		1F433E701C6D1B610046E5BC /* fifo.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6051C6C4D62003D7461 /* fifo.c */; };
+		1F433E711C6D1B610046E5BC /* hash.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6071C6C4D62003D7461 /* hash.c */; };
+		1F433E721C6D1B610046E5BC /* iidesc.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6091C6C4D62003D7461 /* iidesc.c */; };
+		1F433E731C6D1B610046E5BC /* input.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60A1C6C4D62003D7461 /* input.c */; };
+		1F433E741C6D1B610046E5BC /* list.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60B1C6C4D62003D7461 /* list.c */; };
+		1F433E751C6D1B610046E5BC /* memory.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60D1C6C4D62003D7461 /* memory.c */; };
+		1F433E761C6D1B610046E5BC /* merge.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC60F1C6C4D62003D7461 /* merge.c */; };
+		1F433E771C6D1B610046E5BC /* output.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6101C6C4D62003D7461 /* output.c */; settings = {COMPILER_FLAGS = "-Wno-#warnings"; }; };
+		1F433E781C6D1B610046E5BC /* st_bugs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6111C6C4D62003D7461 /* st_bugs.c */; };
+		1F433E791C6D1B610046E5BC /* st_parse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6121C6C4D62003D7461 /* st_parse.c */; };
+		1F433E7A1C6D1B610046E5BC /* stabs.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6131C6C4D62003D7461 /* stabs.c */; };
+		1F433E7B1C6D1B610046E5BC /* stack.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6141C6C4D62003D7461 /* stack.c */; };
+		1F433E7C1C6D1B610046E5BC /* strtab.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6161C6C4D62003D7461 /* strtab.c */; };
+		1F433E7D1C6D1B610046E5BC /* symbol.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6181C6C4D62003D7461 /* symbol.c */; };
+		1F433E7E1C6D1B610046E5BC /* tdata.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61A1C6C4D62003D7461 /* tdata.c */; };
+		1F433E7F1C6D1B610046E5BC /* traverse.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61B1C6C4D62003D7461 /* traverse.c */; };
+		1F433E801C6D1B610046E5BC /* util.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61D1C6C4D62003D7461 /* util.c */; };
+		1F433E811C6D1B610046E5BC /* utils.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC61E1C6C4D62003D7461 /* utils.c */; };
+		1F433E821C6D1B6C0046E5BC /* darwin_shim.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC6021C6C4D62003D7461 /* darwin_shim.c */; };
+		1F433E831C6D1BC50046E5BC /* alist.c in Sources */ = {isa = PBXBuildFile; fileRef = 1F3EC5F71C6C4D62003D7461 /* alist.c */; };
 		1FA7B32118592C3B0043E98F /* libdwarf.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F051CD01859223C008F6CAE /* libdwarf.a */; };
 		1FA7B32218592C3B0043E98F /* libelf.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 1FAD56711859255500EDAF39 /* libelf.a */; };
 		1FA7B32318592C3B0043E98F /* libz.dylib in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F3A879E18592B2F007D12D6 /* libz.dylib */; };
@@ -8603,6 +8726,34 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F433E491C6D1ACD0046E5BC /* dwarf_macro.c in Sources */,
+				1F433E4A1C6D1ACD0046E5BC /* dwarf_print_lines.c in Sources */,
+				1F433E4B1C6D1ACD0046E5BC /* dwarf_pubtypes.c in Sources */,
+				1F433E4C1C6D1ACD0046E5BC /* dwarf_query.c in Sources */,
+				1F433E4D1C6D1ACD0046E5BC /* dwarf_sort_line.c in Sources */,
+				1F433E4E1C6D1ACD0046E5BC /* dwarf_string.c in Sources */,
+				1F433E4F1C6D1ACD0046E5BC /* dwarf_stubs.c in Sources */,
+				1F433E501C6D1ACD0046E5BC /* dwarf_types.c in Sources */,
+				1F433E511C6D1ACD0046E5BC /* dwarf_util.c in Sources */,
+				1F433E521C6D1ACD0046E5BC /* dwarf_vars.c in Sources */,
+				1F433E531C6D1ACD0046E5BC /* dwarf_weaks.c in Sources */,
+				1F433E381C6D1ABD0046E5BC /* dwarf_abbrev.c in Sources */,
+				1F433E391C6D1ABD0046E5BC /* dwarf_addr_finder.c in Sources */,
+				1F433E3A1C6D1ABD0046E5BC /* dwarf_alloc.c in Sources */,
+				1F433E3B1C6D1ABD0046E5BC /* dwarf_arange.c in Sources */,
+				1F433E3C1C6D1ABD0046E5BC /* dwarf_die_deliv.c in Sources */,
+				1F433E3D1C6D1ABD0046E5BC /* dwarf_error.c in Sources */,
+				1F433E3E1C6D1ABD0046E5BC /* dwarf_form.c in Sources */,
+				1F433E3F1C6D1ABD0046E5BC /* dwarf_frame.c in Sources */,
+				1F433E401C6D1ABD0046E5BC /* dwarf_frame2.c in Sources */,
+				1F433E411C6D1ABD0046E5BC /* dwarf_frame3.c in Sources */,
+				1F433E421C6D1ABD0046E5BC /* dwarf_funcs.c in Sources */,
+				1F433E431C6D1ABD0046E5BC /* dwarf_global.c in Sources */,
+				1F433E441C6D1ABD0046E5BC /* dwarf_init_finish.c in Sources */,
+				1F433E451C6D1ABD0046E5BC /* dwarf_leb.c in Sources */,
+				1F433E461C6D1ABD0046E5BC /* dwarf_line.c in Sources */,
+				1F433E471C6D1ABD0046E5BC /* dwarf_line2.c in Sources */,
+				1F433E481C6D1ABD0046E5BC /* dwarf_loc.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -8610,6 +8761,30 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F433E821C6D1B6C0046E5BC /* darwin_shim.c in Sources */,
+				1F433E6B1C6D1B610046E5BC /* alist.c in Sources */,
+				1F433E6C1C6D1B610046E5BC /* barrier.c in Sources */,
+				1F433E6D1C6D1B610046E5BC /* ctf.c in Sources */,
+				1F433E6E1C6D1B610046E5BC /* ctfmerge.c in Sources */,
+				1F433E6F1C6D1B610046E5BC /* dwarf.c in Sources */,
+				1F433E701C6D1B610046E5BC /* fifo.c in Sources */,
+				1F433E711C6D1B610046E5BC /* hash.c in Sources */,
+				1F433E721C6D1B610046E5BC /* iidesc.c in Sources */,
+				1F433E731C6D1B610046E5BC /* input.c in Sources */,
+				1F433E741C6D1B610046E5BC /* list.c in Sources */,
+				1F433E751C6D1B610046E5BC /* memory.c in Sources */,
+				1F433E761C6D1B610046E5BC /* merge.c in Sources */,
+				1F433E771C6D1B610046E5BC /* output.c in Sources */,
+				1F433E781C6D1B610046E5BC /* st_bugs.c in Sources */,
+				1F433E791C6D1B610046E5BC /* st_parse.c in Sources */,
+				1F433E7A1C6D1B610046E5BC /* stabs.c in Sources */,
+				1F433E7B1C6D1B610046E5BC /* stack.c in Sources */,
+				1F433E7C1C6D1B610046E5BC /* strtab.c in Sources */,
+				1F433E7D1C6D1B610046E5BC /* symbol.c in Sources */,
+				1F433E7E1C6D1B610046E5BC /* tdata.c in Sources */,
+				1F433E7F1C6D1B610046E5BC /* traverse.c in Sources */,
+				1F433E801C6D1B610046E5BC /* util.c in Sources */,
+				1F433E811C6D1B610046E5BC /* utils.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -8617,6 +8792,30 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F433E831C6D1BC50046E5BC /* alist.c in Sources */,
+				1F433E541C6D1B340046E5BC /* barrier.c in Sources */,
+				1F433E551C6D1B340046E5BC /* ctf.c in Sources */,
+				1F433E561C6D1B340046E5BC /* ctfconvert.c in Sources */,
+				1F433E571C6D1B340046E5BC /* darwin_shim.c in Sources */,
+				1F433E581C6D1B340046E5BC /* dwarf.c in Sources */,
+				1F433E591C6D1B340046E5BC /* fifo.c in Sources */,
+				1F433E5A1C6D1B340046E5BC /* hash.c in Sources */,
+				1F433E5B1C6D1B340046E5BC /* iidesc.c in Sources */,
+				1F433E5C1C6D1B340046E5BC /* input.c in Sources */,
+				1F433E5D1C6D1B340046E5BC /* list.c in Sources */,
+				1F433E5E1C6D1B340046E5BC /* memory.c in Sources */,
+				1F433E5F1C6D1B340046E5BC /* merge.c in Sources */,
+				1F433E601C6D1B340046E5BC /* output.c in Sources */,
+				1F433E611C6D1B340046E5BC /* st_bugs.c in Sources */,
+				1F433E621C6D1B340046E5BC /* st_parse.c in Sources */,
+				1F433E631C6D1B340046E5BC /* stabs.c in Sources */,
+				1F433E641C6D1B340046E5BC /* stack.c in Sources */,
+				1F433E651C6D1B340046E5BC /* strtab.c in Sources */,
+				1F433E661C6D1B340046E5BC /* symbol.c in Sources */,
+				1F433E671C6D1B340046E5BC /* tdata.c in Sources */,
+				1F433E681C6D1B340046E5BC /* traverse.c in Sources */,
+				1F433E691C6D1B340046E5BC /* util.c in Sources */,
+				1F433E6A1C6D1B340046E5BC /* utils.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -8624,6 +8823,53 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1F433E251C6D1A9D0046E5BC /* ndxscn.c in Sources */,
+				1F433E261C6D1A9D0046E5BC /* newdata.c in Sources */,
+				1F433E271C6D1A9D0046E5BC /* newehdr.c in Sources */,
+				1F433E281C6D1A9D0046E5BC /* newehdr_ELF64.c in Sources */,
+				1F433E291C6D1A9D0046E5BC /* newphdr.c in Sources */,
+				1F433E2A1C6D1A9D0046E5BC /* newphdr_ELF64.c in Sources */,
+				1F433E2B1C6D1A9D0046E5BC /* newscn.c in Sources */,
+				1F433E2C1C6D1A9D0046E5BC /* next.c in Sources */,
+				1F433E2D1C6D1A9D0046E5BC /* nextscn.c in Sources */,
+				1F433E2E1C6D1A9D0046E5BC /* output.c in Sources */,
+				1F433E2F1C6D1A9D0046E5BC /* rand.c in Sources */,
+				1F433E301C6D1A9D0046E5BC /* rawdata.c in Sources */,
+				1F433E311C6D1A9D0046E5BC /* rawfile.c in Sources */,
+				1F433E321C6D1A9D0046E5BC /* rawput.c in Sources */,
+				1F433E331C6D1A9D0046E5BC /* strptr.c in Sources */,
+				1F433E341C6D1A9D0046E5BC /* update.c in Sources */,
+				1F433E351C6D1A9D0046E5BC /* update_ELF64.c in Sources */,
+				1F433E361C6D1A9D0046E5BC /* xlate.c in Sources */,
+				1F433E371C6D1A9D0046E5BC /* xlate64.c in Sources */,
+				1F433E081C6D1A880046E5BC /* ar.c in Sources */,
+				1F433E091C6D1A880046E5BC /* begin.c in Sources */,
+				1F433E0A1C6D1A880046E5BC /* checksum.c in Sources */,
+				1F433E0B1C6D1A880046E5BC /* clscook.c in Sources */,
+				1F433E0C1C6D1A880046E5BC /* clscook_ELF64.c in Sources */,
+				1F433E0D1C6D1A880046E5BC /* cntl.c in Sources */,
+				1F433E0E1C6D1A880046E5BC /* cook.c in Sources */,
+				1F433E0F1C6D1A880046E5BC /* data.c in Sources */,
+				1F433E111C6D1A880046E5BC /* end.c in Sources */,
+				1F433E121C6D1A880046E5BC /* error.c in Sources */,
+				1F433E131C6D1A880046E5BC /* fill.c in Sources */,
+				1F433E141C6D1A880046E5BC /* flag.c in Sources */,
+				1F433E151C6D1A880046E5BC /* gelf.c in Sources */,
+				1F433E161C6D1A880046E5BC /* getarhdr.c in Sources */,
+				1F433E171C6D1A880046E5BC /* getarsym.c in Sources */,
+				1F433E181C6D1A880046E5BC /* getbase.c in Sources */,
+				1F433E191C6D1A880046E5BC /* getdata.c in Sources */,
+				1F433E1A1C6D1A880046E5BC /* getehdr.c in Sources */,
+				1F433E1B1C6D1A880046E5BC /* getident.c in Sources */,
+				1F433E1C1C6D1A880046E5BC /* getphdr.c in Sources */,
+				1F433E1D1C6D1A880046E5BC /* getphnum.c in Sources */,
+				1F433E1E1C6D1A880046E5BC /* getscn.c in Sources */,
+				1F433E1F1C6D1A880046E5BC /* getshdr.c in Sources */,
+				1F433E201C6D1A880046E5BC /* getshnum.c in Sources */,
+				1F433E211C6D1A880046E5BC /* getshstrndx.c in Sources */,
+				1F433E221C6D1A880046E5BC /* hash.c in Sources */,
+				1F433E231C6D1A880046E5BC /* input.c in Sources */,
+				1F433E241C6D1A880046E5BC /* kind.c in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
