@@ -95,7 +95,7 @@ kern_return_t is_io_catalog_send_data(
     mach_msg_type_number_t   inDataCount,
     kern_return_t          * result);
 
-void kmod_dump_log(vm_offset_t*, unsigned int);
+void kmod_dump_log(vm_offset_t*, unsigned int, boolean_t);
 
 
 #endif /* XNU_KERNEL_PRIVATE */
@@ -105,6 +105,44 @@ void kmod_dump_log(vm_offset_t*, unsigned int);
 #if PRAGMA_MARK
 #pragma mark -
 #endif
+
+struct list_head {
+    struct list_head *prev;
+    struct list_head *next;
+};
+
+struct OSKextGrabPgoStruct {
+    bool metadata;
+    uint64_t *pSize;
+    char *pBuffer;
+    uint64_t bufferSize;
+    int err;
+    struct list_head list_head;
+};
+
+#ifndef container_of
+#define container_of(ptr,type,member) ((type*)(((uintptr_t)ptr) - offsetof(type, member)))
+#endif
+/********************************************************************/
+
+#if XNU_KERNEL_PRIVATE
+
+struct OSKextAccount
+{
+    vm_allocation_site_t site;
+    uint32_t    	 loadTag;
+};
+
+struct OSKextActiveAccount
+{
+    uintptr_t       address;
+    uintptr_t       address_end;
+    OSKextAccount * account;
+};
+typedef struct OSKextActiveAccount OSKextActiveAccount;
+
+#endif /* XNU_KERNEL_PRIVATE */
+
 /*
  * @class OSKext
  */
@@ -121,6 +159,13 @@ class OSKext : public OSObject
     friend class IOCatalogue;
     friend class KLDBootstrap;
     friend class OSMetaClass;
+
+    friend int OSKextGrabPgoData(uuid_t uuid,
+                                 uint64_t *pSize,
+                                 char *pBuffer,
+                                 uint64_t bufferSize,
+                                 int wait_for_unload,
+                                 int metadata);
 
 #ifdef XNU_KERNEL_PRIVATE
     friend void OSKextVLog(
@@ -175,7 +220,7 @@ class OSKext : public OSObject
             kern_return_t          * result);
 
     friend void kmod_panic_dump(vm_offset_t*, unsigned int);
-    friend void kmod_dump_log(vm_offset_t*, unsigned int);
+    friend void kmod_dump_log(vm_offset_t*, unsigned int, boolean_t);
     friend void kext_dump_panic_lists(int (*printf_func)(const char * fmt, ...));
 
 
@@ -238,6 +283,10 @@ private:
         unsigned int jettisonLinkeditSeg:1;
     } flags;
 
+    struct list_head pendingPgoHead;
+    uuid_t instance_uuid;
+    OSKextAccount * account;
+
 #if PRAGMA_MARK
 /**************************************/
 #pragma mark Private Functions
@@ -298,7 +347,7 @@ private:
         bool           externalDataIsMkext = false);
     virtual bool registerIdentifier(void);
 
-    virtual void free(void);
+    virtual void free(void) APPLE_KEXT_OVERRIDE;
 
     static OSReturn removeKext(
         OSKext * aKext,
@@ -324,17 +373,6 @@ private:
         const char * name,
         uint32_t     compressedSize,
         uint32_t     fullSize);
-
-    static OSReturn readMkext1Archive(
-        OSData   * mkextData,
-        uint32_t * checksumPtr);
-    bool initWithMkext1Info(
-        OSDictionary * anInfoDict,
-        OSData       * executableWrapper,
-        OSData       * mkextData);
-    static OSData * extractMkext1Entry(
-        const void * mkextFileBase,
-        const void * entry);
 
    /* Dependencies.
     */
@@ -384,6 +422,7 @@ private:
     virtual OSReturn slidePrelinkedExecutable(void);
     virtual OSReturn loadExecutable(void);
     virtual void     jettisonLinkeditSegment(void);
+    virtual void     jettisonDATASegmentPadding(void);
     static  void     considerDestroyingLinkContext(void);
     virtual OSData * getExecutable(void);
     virtual void     setLinkedExecutable(OSData * anExecutable);
@@ -397,7 +436,7 @@ private:
 
     virtual OSReturn start(bool startDependenciesFlag = true);
     virtual OSReturn stop(void);
-    virtual OSReturn setVMProtections(void);
+    virtual OSReturn setVMAttributes(bool protect, bool wire);
     virtual boolean_t segmentShouldBeWired(kernel_segment_command_t *seg);
     virtual OSReturn validateKextMapping(bool startFlag);
     virtual boolean_t verifySegmentMapping(kernel_segment_command_t *seg);
@@ -477,22 +516,23 @@ private:
         vm_offset_t   * addr,
         unsigned int    cnt,
         int          (* printf_func)(const char *fmt, ...),
-        bool            lockFlag);
+        bool            lockFlag,
+        bool            doUnslide);
     static boolean_t summaryIsInBacktrace(
         OSKextLoadedKextSummary * summary,
         vm_offset_t             * addr,
         unsigned int              cnt);
     static void printSummary(
         OSKextLoadedKextSummary * summary,
-        int                    (* printf_func)(const char *fmt, ...));
+        int                    (* printf_func)(const char *fmt, ...),
+        bool                      doUnslide);
 
-    static uint32_t saveLoadedKextPanicListTyped(
+    static int saveLoadedKextPanicListTyped(
         const char * prefix,
         int          invertFlag,
         int          libsFlag,
         char       * paniclist,
-        uint32_t     list_size,
-        uint32_t   * list_length_ptr);
+        uint32_t     list_size);
     static void saveLoadedKextPanicList(void);
     void savePanicString(bool isLoading);
     static void printKextPanicLists(int (*printf_func)(const char *fmt, ...));
@@ -501,6 +541,7 @@ private:
     */
     static void updateLoadedKextSummaries(void);
     void updateLoadedKextSummary(OSKextLoadedKextSummary *summary);
+    void updateActiveAccount(OSKextActiveAccount *account);
 
     /* C++ Initialization.
      */
@@ -519,6 +560,9 @@ public:
     static OSKext * lookupKextWithIdentifier(OSString * kextIdentifier);
     static OSKext * lookupKextWithLoadTag(OSKextLoadTag aTag);
     static OSKext * lookupKextWithAddress(vm_address_t address);
+    static OSKext * lookupKextWithUUID(uuid_t uuid);
+
+    kernel_section_t *lookupSection(const char *segname, const char*secname);
     
     static bool isKextWithIdentifierLoaded(const char * kextIdentifier);
 

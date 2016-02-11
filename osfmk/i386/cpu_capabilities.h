@@ -69,6 +69,10 @@
 /* Extending into 64-bits from here: */ 
 #define	kHasRTM			0x0000000100000000ULL
 #define	kHasHLE			0x0000000200000000ULL
+#define	kHasRDSEED		0x0000000800000000ULL
+#define	kHasADX			0x0000000400000000ULL
+#define	kHasMPX			0x0000001000000000ULL
+#define	kHasSGX			0x0000002000000000ULL
 
 
 #ifndef	__ASSEMBLER__
@@ -182,7 +186,10 @@ int _NumCPUs( void )
 #define _COMM_PAGE_MEMORY_SIZE		(_COMM_PAGE_START_ADDRESS+0x038)	/* uint64_t max memory size */
 
 #define _COMM_PAGE_CPUFAMILY		(_COMM_PAGE_START_ADDRESS+0x040)	/* uint32_t hw.cpufamily, x86*/
-#define _COMM_PAGE_UNUSED2		(_COMM_PAGE_START_ADDRESS+0x044)	/* [0x44,0x50) unused */
+#define _COMM_PAGE_KDEBUG_ENABLE	(_COMM_PAGE_START_ADDRESS+0x044)	/* uint32_t export "kdebug_enable" to userspace */
+#define	_COMM_PAGE_ATM_DIAGNOSTIC_CONFIG	(_COMM_PAGE_START_ADDRESS+0x48) /* uint32_t export "atm_diagnostic_config" to userspace */
+
+#define _COMM_PAGE_UNUSED2		(_COMM_PAGE_START_ADDRESS+0x04C)	/* [0x4C,0x50) unused */
 
 #define	_COMM_PAGE_TIME_DATA_START	(_COMM_PAGE_START_ADDRESS+0x050)	/* base of offsets below (_NT_SCALE etc) */
 #define _COMM_PAGE_NT_TSC_BASE		(_COMM_PAGE_START_ADDRESS+0x050)	/* used by nanotime() */
@@ -193,6 +200,10 @@ int _NumCPUs( void )
 #define _COMM_PAGE_GTOD_GENERATION	(_COMM_PAGE_START_ADDRESS+0x06c)	/* used by gettimeofday() */
 #define _COMM_PAGE_GTOD_NS_BASE		(_COMM_PAGE_START_ADDRESS+0x070)	/* used by gettimeofday() */
 #define _COMM_PAGE_GTOD_SEC_BASE	(_COMM_PAGE_START_ADDRESS+0x078)	/* used by gettimeofday() */
+/* NOTE: APPROX_TIME must be aligned to 64-byte cache line size: */
+#define _COMM_PAGE_APPROX_TIME		(_COMM_PAGE_START_ADDRESS+0x080)	/* used by mach_approximate_time() */
+#define _COMM_PAGE_APPROX_TIME_SUPPORTED (_COMM_PAGE_START_ADDRESS+0x088)	/* used by mach_approximate_time() */
+
 
 #define _COMM_PAGE_END			(_COMM_PAGE_START_ADDRESS+0xfff)	/* end of common page */
 

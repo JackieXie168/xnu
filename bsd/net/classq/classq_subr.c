@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2011-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -95,6 +95,7 @@ ifclassq_setup(struct ifnet *ifp, u_int32_t sflags, boolean_t reuse)
 	VERIFY(IFCQ_IS_EMPTY(ifq));
 	ifq->ifcq_ifp = ifp;
 	IFCQ_LEN(ifq) = 0;
+	IFCQ_BYTES(ifq) = 0;
 	bzero(&ifq->ifcq_xmitcnt, sizeof (ifq->ifcq_xmitcnt));
 	bzero(&ifq->ifcq_dropcnt, sizeof (ifq->ifcq_dropcnt));
 
@@ -115,6 +116,14 @@ ifclassq_setup(struct ifnet *ifp, u_int32_t sflags, boolean_t reuse)
 			maxlen = if_sndq_maxlen;
 		IFCQ_SET_MAXLEN(ifq, maxlen);
 
+		if (IFCQ_MAXLEN(ifq) != if_sndq_maxlen &&
+		    IFCQ_TARGET_QDELAY(ifq) == 0) {
+			/*
+			 * Choose static queues because the interface has
+			 * maximum queue size set
+			 */
+			sflags &= ~PKTSCHEDF_QALG_DELAYBASED;
+		}
 		ifq->ifcq_sflags = sflags;
 		err = ifclassq_pktsched_setup(ifq);
 		if (err == 0)
@@ -189,6 +198,7 @@ ifclassq_teardown(struct ifnet *ifp)
 	VERIFY(ifq->ifcq_dequeue_sc == NULL);
 	VERIFY(ifq->ifcq_request == NULL);
 	IFCQ_LEN(ifq) = 0;
+	IFCQ_BYTES(ifq) = 0;
 	IFCQ_MAXLEN(ifq) = 0;
 	bzero(&ifq->ifcq_xmitcnt, sizeof (ifq->ifcq_xmitcnt));
 	bzero(&ifq->ifcq_dropcnt, sizeof (ifq->ifcq_dropcnt));
@@ -323,7 +333,6 @@ ifclassq_dequeue_common(struct ifclassq *ifq, mbuf_svc_class_t sc,
 	IFCQ_LOCK_SPIN(ifq);
 
 	while (i < limit) {
-		u_int64_t pktlen;
 #if PF_ALTQ
 		u_int32_t qlen;
 
@@ -375,13 +384,17 @@ ifclassq_dequeue_common(struct ifclassq *ifq, mbuf_svc_class_t sc,
 		last = *head;
 
 		l += (*head)->m_pkthdr.len;
-		pktlen = (*head)->m_pkthdr.len;
 
 #if MEASURE_BW
 		(*head)->m_pkthdr.pkt_bwseq =
-		    atomic_add_64_ov(&(ifp->if_bw.cur_seq), pktlen);
+		    atomic_add_64_ov(&(ifp->if_bw.cur_seq), m_pktlen(*head));
 #endif /* MEASURE_BW */
-
+		if (IFNET_IS_CELLULAR(ifp)) {
+			(*head)->m_pkthdr.pkt_flags |= PKTF_VALID_UNSENT_DATA;
+			(*head)->m_pkthdr.pkt_unsent_databytes =
+			    (total_snd_byte_count << MSIZESHIFT) +
+			    ifq->ifcq_bytes;
+		}
 		head = &(*head)->m_nextpkt;
 		i++;
 	}

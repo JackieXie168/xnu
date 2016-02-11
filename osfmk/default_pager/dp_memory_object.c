@@ -777,6 +777,9 @@ dp_memory_object_data_return(
 	vs_lookup(mem_obj, vs);
 
         default_pager_total++;
+
+	/* might be unreachable if VS_TRY_LOCK is, by definition, always true */
+	__unreachable_ok_push
 	if(!VS_TRY_LOCK(vs)) {
 		/* the call below will not be done by caller when we have */
 		/* a synchronous interface */
@@ -793,6 +796,7 @@ dp_memory_object_data_return(
 		upl_deallocate(upl);
 		return KERN_SUCCESS;
 	}
+	__unreachable_ok_pop
 
 	if ((vs->vs_seqno != vs->vs_next_seqno++)
 			|| (vs->vs_readers)
@@ -984,7 +988,7 @@ default_pager_objects(
 	osize = vm_map_round_page(actual * sizeof (*objects),
 				  vm_map_page_mask(ipc_kernel_map));
 	opotential = (unsigned int) (osize / sizeof (*objects));
-	kr = kmem_alloc(ipc_kernel_map, &oaddr, osize);
+	kr = kmem_alloc(ipc_kernel_map, &oaddr, osize, VM_KERN_MEMORY_IPC);
 	if (KERN_SUCCESS != kr) {
 		kfree(pagers, psize);
 		return KERN_RESOURCE_SHORTAGE;
@@ -1076,7 +1080,7 @@ default_pager_objects(
 			   FALSE);
 	assert(KERN_SUCCESS == kr);
 	kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)oaddr,
-			   (vm_map_size_t)osize, TRUE, &pcopy);
+			   (vm_map_size_t)(num_objects * sizeof(*objects)), TRUE, &pcopy);
 	assert(KERN_SUCCESS == kr);
 
 	*objectsp = (default_pager_object_array_t)objects;
@@ -1157,7 +1161,7 @@ default_pager_object_pages(
 
 		size = vm_map_round_page(actual * sizeof (*pages),
 					 vm_map_page_mask(ipc_kernel_map));
-		kr = kmem_alloc(ipc_kernel_map, &addr, size);
+		kr = kmem_alloc(ipc_kernel_map, &addr, size, VM_KERN_MEMORY_IPC);
 		if (KERN_SUCCESS != kr)
 			return KERN_RESOURCE_SHORTAGE;
 
@@ -1179,7 +1183,7 @@ default_pager_object_pages(
 			   FALSE);
 	assert(KERN_SUCCESS == kr);
 	kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)addr,
-			   (vm_map_size_t)size, TRUE, &copy);
+			   (vm_map_size_t)(actual * sizeof(*pages)), TRUE, &copy);
 	assert(KERN_SUCCESS == kr);
 
 	

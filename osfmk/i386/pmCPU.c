@@ -677,18 +677,6 @@ machine_run_count(uint32_t count)
 	saved_run_count = count;
 }
 
-boolean_t
-machine_processor_is_inactive(processor_t processor)
-{
-    int		cpu = processor->cpu_id;
-
-    if (pmDispatch != NULL
-	&& pmDispatch->pmIsCPUUnAvailable != NULL)
-	return(pmDispatch->pmIsCPUUnAvailable(cpu_to_lcpu(cpu)));
-    else
-	return(FALSE);
-}
-
 processor_t
 machine_choose_processor(processor_set_t pset,
 			 processor_t preferred)
@@ -742,8 +730,6 @@ pmThreadGetUrgency(uint64_t *rt_period, uint64_t *rt_deadline)
 			*rt_deadline = arg2;
 	}
 
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_SCHED, MACH_SCHED_GET_URGENCY), urgency, arg1, arg2, 0, 0);
-
 	return(urgency);
 }
 
@@ -758,6 +744,7 @@ void
 thread_tell_urgency(int urgency,
     uint64_t rt_period,
     uint64_t rt_deadline,
+    uint64_t sched_latency,
     thread_t nthread)
 {
 	uint64_t	urgency_notification_time_start, delta;
@@ -771,7 +758,7 @@ thread_tell_urgency(int urgency,
 	    || pmDispatch->pmThreadTellUrgency == NULL)
 		return;
 
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_START, urgency, rt_period, rt_deadline, 0, 0);
+	SCHED_DEBUG_PLATFORM_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_START, urgency, rt_period, rt_deadline, sched_latency, 0);
 
 	if (__improbable((urgency_assert == TRUE)))
 		urgency_notification_time_start = mach_absolute_time();
@@ -794,7 +781,38 @@ thread_tell_urgency(int urgency,
 		}
 	}
 
-	KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_END, urgency, rt_period, rt_deadline, 0, 0);
+	SCHED_DEBUG_PLATFORM_KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED,MACH_URGENCY) | DBG_FUNC_END, urgency, rt_period, rt_deadline, 0, 0);
+}
+
+void
+machine_thread_going_on_core(__unused thread_t      new_thread,
+							 __unused int           urgency,
+							 __unused uint64_t      sched_latency)
+{
+}
+
+void
+machine_thread_going_off_core(__unused thread_t old_thread, __unused boolean_t thread_terminating)
+{
+}
+
+void
+machine_max_runnable_latency(__unused uint64_t bg_max_latency,
+							 __unused uint64_t default_max_latency,
+							 __unused uint64_t realtime_max_latency)
+{
+}
+
+void
+machine_work_interval_notify(__unused thread_t thread,
+							 __unused uint64_t work_interval_id,
+							 __unused uint64_t start_abstime,
+							 __unused uint64_t finish_abstime,
+							 __unused uint64_t deadline_abstime,
+							 __unused uint64_t next_start_abstime,
+							 __unused uint16_t urgency,
+							 __unused uint32_t flags)
+{
 }
 
 void

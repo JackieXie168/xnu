@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -89,6 +89,7 @@
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/uio.h>
+#include <sys/uio_internal.h>
 #include <sys/ev.h>
 #include <sys/kdebug.h>
 #include <sys/un.h>
@@ -98,6 +99,7 @@
 #include <net/route.h>
 #include <net/init.h>
 #include <net/ntstat.h>
+#include <net/content_filter.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip6.h>
@@ -112,6 +114,7 @@
 #include <kern/task.h>
 #include <sys/kpi_mbuf.h>
 #include <sys/mcache.h>
+#include <sys/unpcb.h>
 
 #if CONFIG_MACF
 #include <security/mac.h>
@@ -120,7 +123,16 @@
 
 #if MULTIPATH
 #include <netinet/mp_pcb.h>
+#include <netinet/mptcp_var.h>
 #endif /* MULTIPATH */
+
+#define ROUNDUP(a, b) (((a) + ((b) - 1)) & (~((b) - 1)))
+
+#if DEBUG || DEVELOPMENT
+#define	DEBUG_KERNEL_ADDRPERM(_v) (_v)
+#else
+#define	DEBUG_KERNEL_ADDRPERM(_v) VM_KERNEL_ADDRPERM(_v)
+#endif
 
 /* TODO: this should be in a header file somewhere */
 extern char *proc_name_address(void *p);
@@ -148,6 +160,8 @@ static void	filt_sowdetach(struct knote *kn);
 static int	filt_sowrite(struct knote *kn, long hint);
 static void	filt_sockdetach(struct knote *kn);
 static int	filt_sockev(struct knote *kn, long hint);
+static void	filt_socktouch(struct knote *kn, struct kevent_internal_s *kev,
+    long type);
 
 static int sooptcopyin_timeval(struct sockopt *, struct timeval *);
 static int sooptcopyout_timeval(struct sockopt *, const struct timeval *);
@@ -168,10 +182,17 @@ static struct filterops sock_filtops = {
 	.f_isfd = 1,
 	.f_detach = filt_sockdetach,
 	.f_event = filt_sockev,
+	.f_touch = filt_socktouch,
 };
 
+SYSCTL_DECL(_kern_ipc);
+
 #define	EVEN_MORE_LOCKING_DEBUG 0
+
 int socket_debug = 0;
+SYSCTL_INT(_kern_ipc, OID_AUTO, socket_debug,
+	CTLFLAG_RW | CTLFLAG_LOCKED, &socket_debug, 0, "");
+
 static int socket_zone = M_SOCKET;
 so_gen_t	so_gencnt;	/* generation count for sockets */
 
@@ -183,12 +204,12 @@ MALLOC_DEFINE(M_PCB, "pcb", "protocol control block");
 #define	DBG_LAYER_OUT_BEG	NETDBG_CODE(DBG_NETSOCK, 1)
 #define	DBG_LAYER_OUT_END	NETDBG_CODE(DBG_NETSOCK, 3)
 #define	DBG_FNC_SOSEND		NETDBG_CODE(DBG_NETSOCK, (4 << 8) | 1)
+#define	DBG_FNC_SOSEND_LIST	NETDBG_CODE(DBG_NETSOCK, (4 << 8) | 3)
 #define	DBG_FNC_SORECEIVE	NETDBG_CODE(DBG_NETSOCK, (8 << 8))
+#define	DBG_FNC_SORECEIVE_LIST	NETDBG_CODE(DBG_NETSOCK, (8 << 8) | 3)
 #define	DBG_FNC_SOSHUTDOWN	NETDBG_CODE(DBG_NETSOCK, (9 << 8))
 
 #define	MAX_SOOPTGETM_SIZE	(128 * MCLBYTES)
-
-SYSCTL_DECL(_kern_ipc);
 
 int somaxconn = SOMAXCONN;
 SYSCTL_INT(_kern_ipc, KIPC_SOMAXCONN, somaxconn,
@@ -226,6 +247,19 @@ int sosendjcl_ignore_capab = 0;
 SYSCTL_INT(_kern_ipc, OID_AUTO, sosendjcl_ignore_capab,
 	CTLFLAG_RW | CTLFLAG_LOCKED, &sosendjcl_ignore_capab, 0, "");
 
+/*
+ * Set this to ignore SOF1_IF_2KCL and use big clusters for large
+ * writes on the socket for all protocols on any network interfaces.
+ * Be extra careful when setting this to 1, because sending down packets with
+ * clusters larger that 2 KB might lead to system panics or data corruption.
+ * When set to 0, the system will respect SOF1_IF_2KCL, which is set
+ * on the outgoing interface
+ * Set this to 1  for testing/debugging purposes only.
+ */
+int sosendbigcl_ignore_capab = 0;
+SYSCTL_INT(_kern_ipc, OID_AUTO, sosendbigcl_ignore_capab,
+	CTLFLAG_RW | CTLFLAG_LOCKED, &sosendbigcl_ignore_capab, 0, "");
+
 int sodefunctlog = 0;
 SYSCTL_INT(_kern_ipc, OID_AUTO, sodefunctlog, CTLFLAG_RW | CTLFLAG_LOCKED,
 	&sodefunctlog, 0, "");
@@ -238,18 +272,14 @@ int sorestrictrecv = 1;
 SYSCTL_INT(_kern_ipc, OID_AUTO, sorestrictrecv, CTLFLAG_RW | CTLFLAG_LOCKED,
 	&sorestrictrecv, 0, "Enable inbound interface restrictions");
 
-/*
- * Socket operation routines.
- * These routines are called by the routines in
- * sys_socket.c or from a system process, and
- * implement the semantics of socket operations by
- * switching out to the protocol specific routines.
- */
+int sorestrictsend = 1;
+SYSCTL_INT(_kern_ipc, OID_AUTO, sorestrictsend, CTLFLAG_RW | CTLFLAG_LOCKED,
+	&sorestrictsend, 0, "Enable outbound interface restrictions");
 
-/* sys_generic.c */
-extern void postevent(struct socket *, struct sockbuf *, int);
-extern void evsofree(struct socket *);
-extern int tcp_notsent_lowat_check(struct socket *so);
+int soreserveheadroom = 1;
+SYSCTL_INT(_kern_ipc, OID_AUTO, soreserveheadroom, CTLFLAG_RW | CTLFLAG_LOCKED,
+	&soreserveheadroom, 0, "To allocate contiguous datagram buffers");
+
 extern struct inpcbinfo tcbinfo;
 
 /* TODO: these should be in header file */
@@ -264,9 +294,38 @@ static struct zone *se_zone;			/* zone for sockaddr_entry */
 
 vm_size_t	so_cache_zone_element_size;
 
-static int sodelayed_copy(struct socket *, struct uio *, struct mbuf **, user_ssize_t *);
+static int sodelayed_copy(struct socket *, struct uio *, struct mbuf **,
+    user_ssize_t *);
 static void cached_sock_alloc(struct socket **, int);
 static void cached_sock_free(struct socket *);
+
+/*
+ * Maximum of extended background idle sockets per process
+ * Set to zero to disable further setting of the option
+ */
+
+#define	SO_IDLE_BK_IDLE_MAX_PER_PROC	1
+#define	SO_IDLE_BK_IDLE_TIME		600
+#define	SO_IDLE_BK_IDLE_RCV_HIWAT	131072
+
+struct soextbkidlestat soextbkidlestat;
+
+SYSCTL_UINT(_kern_ipc, OID_AUTO, maxextbkidleperproc,
+	CTLFLAG_RW | CTLFLAG_LOCKED, &soextbkidlestat.so_xbkidle_maxperproc, 0,
+	"Maximum of extended background idle sockets per process");
+
+SYSCTL_UINT(_kern_ipc, OID_AUTO, extbkidletime, CTLFLAG_RW | CTLFLAG_LOCKED,
+	&soextbkidlestat.so_xbkidle_time, 0,
+	"Time in seconds to keep extended background idle sockets");
+
+SYSCTL_UINT(_kern_ipc, OID_AUTO, extbkidlercvhiwat, CTLFLAG_RW | CTLFLAG_LOCKED,
+	&soextbkidlestat.so_xbkidle_rcvhiwat, 0,
+	"High water mark for extended background idle sockets");
+
+SYSCTL_STRUCT(_kern_ipc, OID_AUTO, extbkidlestat, CTLFLAG_RD | CTLFLAG_LOCKED,
+	&soextbkidlestat, soextbkidlestat, "");
+
+int so_set_extended_bk_idle(struct socket *, int);
 
 /*
  * SOTCDB_NO_DSCP is set by default, to prevent the networking stack from
@@ -280,6 +339,25 @@ SYSCTL_INT(_kern_ipc, OID_AUTO, sotcdb, CTLFLAG_RW | CTLFLAG_LOCKED,
 void
 socketinit(void)
 {
+	_CASSERT(sizeof(so_gencnt) == sizeof(uint64_t));
+	VERIFY(IS_P2ALIGNED(&so_gencnt, sizeof(uint32_t)));
+
+#ifdef __LP64__
+	_CASSERT(sizeof(struct sa_endpoints) == sizeof(struct user64_sa_endpoints));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcif) == offsetof(struct user64_sa_endpoints, sae_srcif));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcaddr) == offsetof(struct user64_sa_endpoints, sae_srcaddr));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcaddrlen) == offsetof(struct user64_sa_endpoints, sae_srcaddrlen));
+	_CASSERT(offsetof(struct sa_endpoints, sae_dstaddr) == offsetof(struct user64_sa_endpoints, sae_dstaddr));
+	_CASSERT(offsetof(struct sa_endpoints, sae_dstaddrlen) == offsetof(struct user64_sa_endpoints, sae_dstaddrlen));
+#else
+	_CASSERT(sizeof(struct sa_endpoints) == sizeof(struct user32_sa_endpoints));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcif) == offsetof(struct user32_sa_endpoints, sae_srcif));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcaddr) == offsetof(struct user32_sa_endpoints, sae_srcaddr));
+	_CASSERT(offsetof(struct sa_endpoints, sae_srcaddrlen) == offsetof(struct user32_sa_endpoints, sae_srcaddrlen));
+	_CASSERT(offsetof(struct sa_endpoints, sae_dstaddr) == offsetof(struct user32_sa_endpoints, sae_dstaddr));
+	_CASSERT(offsetof(struct sa_endpoints, sae_dstaddrlen) == offsetof(struct user32_sa_endpoints, sae_dstaddrlen));
+#endif
+
 	if (socketinit_done) {
 		printf("socketinit: already called...\n");
 		return;
@@ -312,7 +390,7 @@ socketinit(void)
 	so_cache_zone_element_size = (vm_size_t)(sizeof (struct socket) + 4
 	    + get_inpcb_str_size() + 4 + get_tcp_str_size());
 
-	so_cache_zone = zinit(so_cache_zone_element_size, 
+	so_cache_zone = zinit(so_cache_zone_element_size,
 	    (120000 * so_cache_zone_element_size), 8192, "socache zone");
 	zone_change(so_cache_zone, Z_CALLERACCT, FALSE);
 	zone_change(so_cache_zone, Z_NOENCRYPT, TRUE);
@@ -335,6 +413,10 @@ socketinit(void)
 	zone_change(se_zone, Z_CALLERACCT, FALSE);
 	zone_change(se_zone, Z_EXPAND, TRUE);
 
+	bzero(&soextbkidlestat, sizeof(struct soextbkidlestat));
+	soextbkidlestat.so_xbkidle_maxperproc = SO_IDLE_BK_IDLE_MAX_PER_PROC;
+	soextbkidlestat.so_xbkidle_time = SO_IDLE_BK_IDLE_TIME;
+	soextbkidlestat.so_xbkidle_rcvhiwat = SO_IDLE_BK_IDLE_RCV_HIWAT;
 
 	in_pcbinit();
 	sflt_init();
@@ -381,8 +463,8 @@ cached_sock_alloc(struct socket **so, int waitok)
 		bzero((caddr_t)*so, sizeof (struct socket));
 
 		/*
-		 * Define offsets for extra structures into our 
-		 * single block of memory. Align extra structures 
+		 * Define offsets for extra structures into our
+		 * single block of memory. Align extra structures
 		 * on longword boundaries.
 		 */
 
@@ -400,7 +482,7 @@ cached_sock_alloc(struct socket **so, int waitok)
 		    (caddr_t)offset;
 	}
 
-	(*so)->cached_in_sock_layer = true;
+	OSBitOrAtomic(SOF1_CACHED_IN_SOCK_LAYER, &(*so)->so_flags1);
 }
 
 static void
@@ -443,6 +525,7 @@ so_update_last_owner_locked(struct socket *so, proc_t self)
 			proc_getexecutableuuid(self, so->last_uuid,
 			    sizeof (so->last_uuid));
 		}
+		proc_pidoriginatoruuid(so->so_vuuid, sizeof(so->so_vuuid));
 	}
 }
 
@@ -452,6 +535,17 @@ so_update_policy(struct socket *so)
 	if (SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6)
 		(void) inp_update_policy(sotoinpcb(so));
 }
+
+#if NECP
+static void
+so_update_necp_policy(struct socket *so, struct sockaddr *override_local_addr,
+    struct sockaddr *override_remote_addr)
+{
+	if (SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6)
+		inp_update_necp_policy(sotoinpcb(so), override_local_addr,
+		    override_remote_addr, 0);
+}
+#endif /* NECP */
 
 boolean_t
 so_cache_timer(void)
@@ -467,7 +561,7 @@ so_cache_timer(void)
 	while (!STAILQ_EMPTY(&so_cache_head)) {
 		VERIFY(cached_sock_count > 0);
 		p = STAILQ_FIRST(&so_cache_head);
-		if ((so_cache_time - p->cache_timestamp) < 
+		if ((so_cache_time - p->cache_timestamp) <
 			SO_CACHE_TIME_LIMIT)
 			break;
 
@@ -511,7 +605,7 @@ soalloc(int waitok, int dom, int type)
 			bzero(so, sizeof (*so));
 	}
 	if (so != NULL) {
-		so->so_gencnt = ++so_gencnt;
+		so->so_gencnt = OSIncrementAtomic64((SInt64 *)&so_gencnt);
 		so->so_zone = socket_zone;
 #if CONFIG_MACF_SOCKET
 		/* Convert waitok to  M_WAITOK/M_NOWAIT for MAC Framework. */
@@ -580,6 +674,7 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	so->last_upid = proc_uniqueid(p);
 	so->last_pid = proc_pid(p);
 	proc_getexecutableuuid(p, so->last_uuid, sizeof (so->last_uuid));
+	proc_pidoriginatoruuid(so->so_vuuid, sizeof(so->so_vuuid));
 
 	if (ep != PROC_NULL && ep != p) {
 		so->e_upid = proc_uniqueid(ep);
@@ -637,7 +732,8 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	 * If this thread or task is marked to create backgrounded sockets,
 	 * mark the socket as background.
 	 */
-	if (proc_get_effective_thread_policy(current_thread(), TASK_POLICY_NEW_SOCKETS_BG)) {
+	if (proc_get_effective_thread_policy(current_thread(),
+	    TASK_POLICY_NEW_SOCKETS_BG)) {
 		socket_set_traffic_mgt_flags(so, TRAFFIC_MGT_SO_BACKGROUND);
 		so->so_background_thread = current_thread();
 	}
@@ -655,6 +751,17 @@ socreate_internal(int dom, struct socket **aso, int type, int proto,
 	default:
 		break;
 	}
+
+	/*
+	 * Entitlements can't be checked at socket creation time except if the
+	 * application requested a feature guarded by a privilege (c.f., socket
+	 * delegation).
+	 * The priv(9) and the Sandboxing APIs are designed with the idea that
+	 * a privilege check should only be triggered by a userland request.
+	 * A privilege check at socket creation time is time consuming and
+	 * could trigger many authorisation error messages from the security
+	 * APIs.
+	 */
 
 	*aso = so;
 
@@ -738,6 +845,10 @@ sobindlock(struct socket *so, struct sockaddr *nam, int dolock)
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
 
+#if NECP
+	so_update_necp_policy(so, nam, NULL);
+#endif /* NECP */
+
 	/*
 	 * If this is a bind request on a socket that has been marked
 	 * as inactive, reject it now before we go any further.
@@ -745,7 +856,7 @@ sobindlock(struct socket *so, struct sockaddr *nam, int dolock)
 	if (so->so_flags & SOF_DEFUNCT) {
 		error = EINVAL;
 		SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] (%d)\n",
-		    __func__, proc_pid(p), (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    __func__, proc_pid(p), (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    SOCK_DOM(so), SOCK_TYPE(so), error));
 		goto out;
 	}
@@ -773,6 +884,10 @@ sodealloc(struct socket *so)
 	/* Remove any filters */
 	sflt_termsock(so);
 
+#if CONTENT_FILTER
+	cfil_sock_detach(so);
+#endif /* CONTENT_FILTER */
+
 	/* Delete the state allocated for msg queues on a socket */
 	if (so->so_flags & SOF_ENABLE_MSGS) {
 		FREE(so->so_msg_state, M_TEMP);
@@ -780,13 +895,13 @@ sodealloc(struct socket *so)
 	}
 	VERIFY(so->so_msg_state == NULL);
 
-	so->so_gencnt = ++so_gencnt;
+	so->so_gencnt = OSIncrementAtomic64((SInt64 *)&so_gencnt);
 
 #if CONFIG_MACF_SOCKET
 	mac_socket_label_destroy(so);
 #endif /* MAC_SOCKET */
 
-	if (so->cached_in_sock_layer) {
+	if (so->so_flags1 & SOF1_CACHED_IN_SOCK_LAYER) {
 		cached_sock_free(so);
 	} else {
 		FREE_ZONE(so, sizeof (*so), so->so_zone);
@@ -823,6 +938,10 @@ solisten(struct socket *so, int backlog)
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
 
+#if NECP
+	so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
+
 	if (so->so_proto == NULL) {
 		error = EINVAL;
 		goto out;
@@ -844,7 +963,7 @@ solisten(struct socket *so, int backlog)
 		if (so->so_flags & SOF_DEFUNCT) {
 			SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 			    SOCK_DOM(so), SOCK_TYPE(so), error));
 		}
 		goto out;
@@ -902,7 +1021,7 @@ sofreelastref(struct socket *so, int dealloc)
 		selthreadclear(&so->so_rcv.sb_sel);
 		so->so_rcv.sb_flags &= ~(SB_SEL|SB_UPCALL);
 		so->so_snd.sb_flags &= ~(SB_SEL|SB_UPCALL);
-		so->so_event = NULL;
+		so->so_event = sonullevent;
 		return;
 	}
 	if (head != NULL) {
@@ -921,7 +1040,7 @@ sofreelastref(struct socket *so, int dealloc)
 			selthreadclear(&so->so_rcv.sb_sel);
 			so->so_rcv.sb_flags &= ~(SB_SEL|SB_UPCALL);
 			so->so_snd.sb_flags &= ~(SB_SEL|SB_UPCALL);
-			so->so_event = NULL;
+			so->so_event = sonullevent;
 			socket_unlock(head, 1);
 			return;
 		} else {
@@ -944,7 +1063,7 @@ sofreelastref(struct socket *so, int dealloc)
 	/* 3932268: disable upcall */
 	so->so_rcv.sb_flags &= ~SB_UPCALL;
 	so->so_snd.sb_flags &= ~SB_UPCALL;
-	so->so_event = NULL;
+	so->so_event = sonullevent;
 
 	if (dealloc)
 		sodealloc(so);
@@ -997,6 +1116,22 @@ soclose_locked(struct socket *so)
 
 	if (so->so_upcallusecount)
 		soclose_wait_locked(so);
+
+#if CONTENT_FILTER
+	/*
+	 * We have to wait until the content filters are done
+	 */
+	if ((so->so_flags & SOF_CONTENT_FILTER) != 0) {
+		cfil_sock_close_wait(so);
+		cfil_sock_is_closed(so);
+		cfil_sock_detach(so);
+	}
+#endif /* CONTENT_FILTER */
+
+	if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG) {
+		soresume(current_proc(), so, 1);
+		so->so_flags1 &= ~SOF1_EXTEND_BK_IDLE_WANTED;
+	}
 
 	if ((so->so_options & SO_ACCEPTCONN)) {
 		struct socket *sp, *sonext;
@@ -1114,14 +1249,6 @@ drop:
 		/* NOTREACHED */
 	}
 	if (so->so_pcb != NULL && !(so->so_flags & SOF_PCBCLEARING)) {
-		/*
-		 * Let NetworkStatistics know this PCB is going away
-		 * before we detach it.
-		 */
-		if (nstat_collect &&
-		    (SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6))
-			nstat_pcb_detach(so->so_pcb);
-
 		int error2 = (*so->so_proto->pr_usrreqs->pru_detach)(so);
 		if (error == 0)
 			error = error2;
@@ -1214,6 +1341,9 @@ soacceptlock(struct socket *so, struct sockaddr **nam, int dolock)
 
 	so_update_last_owner_locked(so, PROC_NULL);
 	so_update_policy(so);
+#if NECP
+	so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
 
 	if ((so->so_state & SS_NOFDREF) == 0)
 		panic("soaccept: !NOFDREF");
@@ -1315,6 +1445,10 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 	so_update_last_owner_locked(so, p);
 	so_update_policy(so);
 
+#if NECP
+	so_update_necp_policy(so, NULL, nam);
+#endif /* NECP */
+
 	/*
 	 * If this is a listening socket or if this is a previously-accepted
 	 * socket that has been marked as inactive, reject the connect request.
@@ -1324,7 +1458,7 @@ soconnectlock(struct socket *so, struct sockaddr *nam, int dolock)
 		if (so->so_flags & SOF_DEFUNCT) {
 			SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 			    SOCK_DOM(so), SOCK_TYPE(so), error));
 		}
 		if (dolock)
@@ -1401,10 +1535,13 @@ soconnect2(struct socket *so1, struct socket *so2)
 int
 soconnectxlocked(struct socket *so, struct sockaddr_list **src_sl,
     struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
-    associd_t aid, connid_t *pcid, uint32_t flags, void *arg,
-    uint32_t arglen)
+    sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
+    uint32_t arglen, uio_t auio, user_ssize_t *bytes_written)
 {
 	int error;
+
+	so_update_last_owner_locked(so, p);
+	so_update_policy(so);
 
 	/*
 	 * If this is a listening socket or if this is a previously-accepted
@@ -1415,7 +1552,7 @@ soconnectxlocked(struct socket *so, struct sockaddr_list **src_sl,
 		if (so->so_flags & SOF_DEFUNCT) {
 			SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] "
 			    "(%d)\n", __func__, proc_pid(p),
-			    (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 			    SOCK_DOM(so), SOCK_TYPE(so), error));
 		}
 		return (error);
@@ -1447,7 +1584,7 @@ soconnectxlocked(struct socket *so, struct sockaddr_list **src_sl,
 		} else {
 			error = (*so->so_proto->pr_usrreqs->pru_connectx)
 			    (so, src_sl, dst_sl, p, ifscope, aid, pcid,
-			    flags, arg, arglen);
+			    flags, arg, arglen, auio, bytes_written);
 		}
 	}
 
@@ -1489,7 +1626,7 @@ sodisconnect(struct socket *so)
 }
 
 int
-sodisconnectxlocked(struct socket *so, associd_t aid, connid_t cid)
+sodisconnectxlocked(struct socket *so, sae_associd_t aid, sae_connid_t cid)
 {
 	int error;
 
@@ -1510,7 +1647,7 @@ sodisconnectxlocked(struct socket *so, associd_t aid, connid_t cid)
 }
 
 int
-sodisconnectx(struct socket *so, associd_t aid, connid_t cid)
+sodisconnectx(struct socket *so, sae_associd_t aid, sae_connid_t cid)
 {
 	int error;
 
@@ -1521,7 +1658,7 @@ sodisconnectx(struct socket *so, associd_t aid, connid_t cid)
 }
 
 int
-sopeelofflocked(struct socket *so, associd_t aid, struct socket **psop)
+sopeelofflocked(struct socket *so, sae_associd_t aid, struct socket **psop)
 {
 	return ((*so->so_proto->pr_usrreqs->pru_peeloff)(so, aid, psop));
 }
@@ -1580,14 +1717,27 @@ restart:
 defunct:
 		error = EPIPE;
 		SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] (%d)\n",
-		    __func__, proc_selfpid(), (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    __func__, proc_selfpid(),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    SOCK_DOM(so), SOCK_TYPE(so), error));
 		return (error);
 	}
 
-	if (so->so_state & SS_CANTSENDMORE)
-		return (EPIPE);
-
+	if (so->so_state & SS_CANTSENDMORE) {
+#if CONTENT_FILTER
+		/*
+		 * Can re-inject data of half closed connections
+		 */
+		if ((so->so_state & SS_ISDISCONNECTED) == 0 &&
+			so->so_snd.sb_cfil_thread == current_thread() &&
+			cfil_sock_data_pending(&so->so_snd) != 0)
+			CFIL_LOG(LOG_INFO,
+				"so %llx ignore SS_CANTSENDMORE",
+				(uint64_t)DEBUG_KERNEL_ADDRPERM(so));
+		else
+#endif /* CONTENT_FILTER */
+			return (EPIPE);
+	}
 	if (so->so_error) {
 		error = so->so_error;
 		so->so_error = 0;
@@ -1596,14 +1746,26 @@ defunct:
 
 	if ((so->so_state & SS_ISCONNECTED) == 0) {
 		if ((so->so_proto->pr_flags & PR_CONNREQUIRED) != 0) {
-			if ((so->so_state & SS_ISCONFIRMING) == 0 &&
-			    !(resid == 0 && clen != 0))
+			if (((so->so_state & SS_ISCONFIRMING) == 0) &&
+			    (resid != 0 || clen == 0) &&
+			    !(so->so_flags1 & SOF1_PRECONNECT_DATA)) {
+#if MPTCP
+				/*
+				 * MPTCP Fast Join sends data before the
+				 * socket is truly connected.
+				 */
+				if ((so->so_flags & (SOF_MP_SUBFLOW |
+					SOF_MPTCP_FASTJOIN)) !=
+				    (SOF_MP_SUBFLOW | SOF_MPTCP_FASTJOIN))
+#endif /* MPTCP */
 				return (ENOTCONN);
+			}
 		} else if (addr == 0 && !(flags&MSG_HOLD)) {
 			return ((so->so_proto->pr_flags & PR_CONNREQUIRED) ?
 			    ENOTCONN : EDESTADDRREQ);
 		}
 	}
+
 	if (so->so_flags & SOF_ENABLE_MSGS)
 		space = msgq_sbspace(so, control);
 	else
@@ -1616,8 +1778,21 @@ defunct:
 		return (EMSGSIZE);
 
 	if ((space < resid + clen &&
-	    (atomic || space < (int32_t)so->so_snd.sb_lowat || space < clen)) ||
+	    (atomic || (space < (int32_t)so->so_snd.sb_lowat) ||
+	    space < clen)) ||
 	    (so->so_type == SOCK_STREAM && so_wait_for_if_feedback(so))) {
+		/*
+		 * don't block the connectx call when there's more data
+		 * than can be copied.
+		 */
+		if (so->so_flags1 & SOF1_PRECONNECT_DATA) {
+			if (space == 0) {
+				return (EWOULDBLOCK);
+			}
+			if (space < (int32_t)so->so_snd.sb_lowat) {
+				return (0);
+			}
+		}
 		if ((so->so_state & SS_NBIO) || (flags & MSG_NBIO) ||
 		    assumelock) {
 			return (EWOULDBLOCK);
@@ -1701,12 +1876,14 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 {
 	struct mbuf **mp;
 	struct mbuf *m, *freelist = NULL;
-	user_ssize_t space, len, resid;
+	user_ssize_t space, len, resid, orig_resid;
 	int clen = 0, error, dontroute, mlen, sendflags;
 	int atomic = sosendallatonce(so) || top;
 	int sblocked = 0;
 	struct proc *p = current_proc();
 	struct mbuf *control_copy = NULL;
+	uint16_t headroom = 0;
+	boolean_t en_tracing = FALSE;
 
 	if (uio != NULL)
 		resid = uio_resid(uio);
@@ -1717,8 +1894,36 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	    so->so_snd.sb_cc, so->so_snd.sb_lowat, so->so_snd.sb_hiwat);
 
 	socket_lock(so, 1);
-	so_update_last_owner_locked(so, p);
-	so_update_policy(so);
+
+	/*
+	 * trace if tracing & network (vs. unix) sockets & and
+	 * non-loopback
+	 */
+	if (ENTR_SHOULDTRACE &&
+	    (SOCK_CHECK_DOM(so, AF_INET) || SOCK_CHECK_DOM(so, AF_INET6))) {
+		struct inpcb *inp = sotoinpcb(so);
+		if (inp->inp_last_outifp != NULL &&
+		    !(inp->inp_last_outifp->if_flags & IFF_LOOPBACK)) {
+			en_tracing = TRUE;
+			KERNEL_ENERGYTRACE(kEnTrActKernSockWrite, DBG_FUNC_START,
+			    VM_KERNEL_ADDRPERM(so),
+			    ((so->so_state & SS_NBIO) ? kEnTrFlagNonBlocking : 0),
+			    (int64_t)resid);
+			orig_resid = resid;
+		}
+	}
+
+	/*
+	 * Re-injection should not affect process accounting
+	 */
+	if ((flags & MSG_SKIPCFIL) == 0) {
+		so_update_last_owner_locked(so, p);
+		so_update_policy(so);
+
+#if NECP
+		so_update_necp_policy(so, NULL, addr);
+#endif /* NECP */
+	}
 
 	if (so->so_type != SOCK_STREAM && (flags & MSG_OOB) != 0) {
 		error = EOPNOTSUPP;
@@ -1736,10 +1941,10 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 	 * Usually, MSG_EOR isn't used on SOCK_STREAM type sockets.
 	 * But it will be used by sockets doing message delivery.
 	 *
-	 * Note: We limit resid to be a positive 32 bits value as we use
+	 * Note: We limit resid to be a positive int value as we use
 	 * imin() to set bytes_to_copy -- radr://14558484
 	 */
-	if ((int32_t)resid < 0 || (so->so_type == SOCK_STREAM &&
+	if (resid < 0 || resid > INT_MAX || (so->so_type == SOCK_STREAM &&
 	    !(so->so_flags & SOF_ENABLE_MSGS) && (flags & MSG_EOR))) {
 		error = EINVAL;
 		socket_unlock(so, 1);
@@ -1753,6 +1958,9 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 
 	if (control != NULL)
 		clen = control->m_len;
+
+	if (soreserveheadroom != 0)
+		headroom = so->so_pktheadroom;
 
 	do {
 		error = sosendcheck(so, addr, resid, clen, atomic, flags,
@@ -1779,13 +1987,26 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 				int chainlength;
 				int bytes_to_copy;
 				boolean_t jumbocl;
+				boolean_t bigcl;
+				int bytes_to_alloc;
 
 				bytes_to_copy = imin(resid, space);
+
+				bytes_to_alloc = bytes_to_copy;
+				if (top == NULL)
+					bytes_to_alloc += headroom;
 
 				if (sosendminchain > 0)
 					chainlength = 0;
 				else
 					chainlength = sosendmaxchain;
+
+				/*
+				 * Use big 4 KB cluster when the outgoing interface
+				 * does not prefer 2 KB clusters
+				 */
+				bigcl = !(so->so_flags1 & SOF1_IF_2KCL) ||
+				    sosendbigcl_ignore_capab;
 
 				/*
 				 * Attempt to use larger than system page-size
@@ -1795,7 +2016,8 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 				 */
 				jumbocl = sosendjcl && njcl > 0 &&
 				    ((so->so_flags & SOF_MULTIPAGES) ||
-				    sosendjcl_ignore_capab);
+				    sosendjcl_ignore_capab) &&
+				    bigcl;
 
 				socket_unlock(so, 0);
 
@@ -1819,12 +2041,12 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 					 * haven't yet consumed.
 					 */
 					if (freelist == NULL &&
-					    bytes_to_copy > MBIGCLBYTES &&
+					    bytes_to_alloc > MBIGCLBYTES &&
 					    jumbocl) {
 						num_needed =
-						    bytes_to_copy / M16KCLBYTES;
+						    bytes_to_alloc / M16KCLBYTES;
 
-						if ((bytes_to_copy -
+						if ((bytes_to_alloc -
 						    (num_needed * M16KCLBYTES))
 						    >= MINCLSIZE)
 							num_needed++;
@@ -1841,11 +2063,12 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 					}
 
 					if (freelist == NULL &&
-					    bytes_to_copy > MCLBYTES) {
+					    bytes_to_alloc > MCLBYTES &&
+					    bigcl) {
 						num_needed =
-						    bytes_to_copy / MBIGCLBYTES;
+						    bytes_to_alloc / MBIGCLBYTES;
 
-						if ((bytes_to_copy -
+						if ((bytes_to_alloc -
 						    (num_needed * MBIGCLBYTES)) >=
 						    MINCLSIZE)
 							num_needed++;
@@ -1861,12 +2084,34 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 						 */
 					}
 
-					if (freelist == NULL &&
-					    bytes_to_copy > MINCLSIZE) {
+					/*
+					 * Allocate a cluster as we want to
+					 * avoid to split the data in more
+					 * that one segment and using MINCLSIZE
+					 * would lead us to allocate two mbufs
+					 */
+					if (soreserveheadroom != 0 &&
+					    freelist == NULL &&
+					    ((top == NULL &&
+					    bytes_to_alloc > _MHLEN) ||
+					    bytes_to_alloc > _MLEN)) {
+						num_needed = ROUNDUP(bytes_to_alloc, MCLBYTES) /
+						    MCLBYTES;
+						freelist =
+						    m_getpackets_internal(
+						    (unsigned int *)&num_needed,
+						    hdrs_needed, M_WAIT, 0,
+						    MCLBYTES);
+						/*
+						 * Fall back to a single mbuf
+						 * if allocation failed
+						 */
+					} else if (freelist == NULL &&
+					    bytes_to_alloc > MINCLSIZE) {
 						num_needed =
-						    bytes_to_copy / MCLBYTES;
+						    bytes_to_alloc / MCLBYTES;
 
-						if ((bytes_to_copy -
+						if ((bytes_to_alloc -
 						    (num_needed * MCLBYTES)) >=
 						    MINCLSIZE)
 							num_needed++;
@@ -1881,7 +2126,20 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 						 * if allocation failed
 						 */
 					}
-
+					/*
+					 * For datagram protocols, leave
+					 * headroom for protocol headers
+					 * in the first cluster of the chain
+					 */
+					if (freelist != NULL && atomic &&
+					    top == NULL && headroom > 0) {
+						freelist->m_data += headroom;
+					}
+					
+					/*
+					 * Fall back to regular mbufs without
+					 * reserving the socket headroom
+					 */
 					if (freelist == NULL) {
 						if (top == NULL)
 							MGETHDR(freelist,
@@ -1911,12 +2169,13 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 					m->m_next = NULL;
 
 					if ((m->m_flags & M_EXT))
-						mlen = m->m_ext.ext_size;
+						mlen = m->m_ext.ext_size -
+						    m_leadingspace(m);
 					else if ((m->m_flags & M_PKTHDR))
 						mlen =
 						    MHLEN - m_leadingspace(m);
 					else
-						mlen = MLEN;
+						mlen = MLEN - m_leadingspace(m);
 					len = imin(mlen, bytes_to_copy);
 
 					chainlength += len;
@@ -1975,39 +2234,54 @@ sosend(struct socket *so, struct sockaddr *addr, struct uio *uio,
 			if (dontroute)
 				so->so_options |= SO_DONTROUTE;
 
-			/* Compute flags here, for pru_send and NKEs */
+			/*
+			 * Compute flags here, for pru_send and NKEs
+			 *
+			 * If the user set MSG_EOF, the protocol
+			 * understands this flag and nothing left to
+			 * send then use PRU_SEND_EOF instead of PRU_SEND.
+			 */
 			sendflags = (flags & MSG_OOB) ? PRUS_OOB :
-			    /*
-			     * If the user set MSG_EOF, the protocol
-			     * understands this flag and nothing left to
-			     * send then use PRU_SEND_EOF instead of PRU_SEND.
-			     */
 			    ((flags & MSG_EOF) &&
-			     (so->so_proto->pr_flags & PR_IMPLOPCL) &&
-			     (resid <= 0)) ? PRUS_EOF :
-			     /* If there is more to send set PRUS_MORETOCOME */
-			     (resid > 0 && space > 0) ? PRUS_MORETOCOME : 0;
+			    (so->so_proto->pr_flags & PR_IMPLOPCL) &&
+			    (resid <= 0)) ? PRUS_EOF :
+			    /* If there is more to send set PRUS_MORETOCOME */
+			    (resid > 0 && space > 0) ? PRUS_MORETOCOME : 0;
 
-			/*
-			 * Socket filter processing
-			 */
-			error = sflt_data_out(so, addr, &top,
-			    &control, (sendflags & MSG_OOB) ?
-			    sock_data_filt_flag_oob : 0);
-			if (error) {
-				if (error == EJUSTRETURN) {
-					error = 0;
-					clen = 0;
-					control = NULL;
-					top = NULL;
+			if ((flags & MSG_SKIPCFIL) == 0) {
+				/*
+				 * Socket filter processing
+				 */
+				error = sflt_data_out(so, addr, &top,
+				    &control, (sendflags & MSG_OOB) ?
+				    sock_data_filt_flag_oob : 0);
+				if (error) {
+					if (error == EJUSTRETURN) {
+						error = 0;
+						clen = 0;
+						control = NULL;
+						top = NULL;
+					}
+					goto release;
 				}
-
-				goto release;
+#if CONTENT_FILTER
+				/*
+				 * Content filter processing
+				 */
+				error = cfil_sock_data_out(so, addr, top,
+				    control, (sendflags & MSG_OOB) ?
+				    sock_data_filt_flag_oob : 0);
+				if (error) {
+					if (error == EJUSTRETURN) {
+						error = 0;
+						clen = 0;
+						control = NULL;
+						top = NULL;
+						}
+					goto release;
+				}
+#endif /* CONTENT_FILTER */
 			}
-			/*
-			 * End Socket filter processing
-			 */
-
 			if (so->so_flags & SOF_ENABLE_MSGS) {
 				/*
 				 * Make a copy of control mbuf,
@@ -2050,8 +2324,574 @@ out:
 	if (control_copy != NULL)
 		m_freem(control_copy);
 
-	KERNEL_DEBUG(DBG_FNC_SOSEND | DBG_FUNC_END, so, resid, so->so_snd.sb_cc,
-	    space, error);
+	/*
+	 * One write has been done. This was enough. Get back to "normal"
+	 * behavior.
+	 */
+	if (so->so_flags1 & SOF1_PRECONNECT_DATA)
+		so->so_flags1 &= ~SOF1_PRECONNECT_DATA;
+
+	if (en_tracing) {
+		/* resid passed here is the bytes left in uio */
+		KERNEL_ENERGYTRACE(kEnTrActKernSockWrite, DBG_FUNC_END,
+		    VM_KERNEL_ADDRPERM(so),
+		    ((error == EWOULDBLOCK) ? kEnTrFlagNoWork : 0),
+		    (int64_t)(orig_resid - resid));
+	}
+	KERNEL_DEBUG(DBG_FNC_SOSEND | DBG_FUNC_END, so, resid,
+	    so->so_snd.sb_cc, space, error);
+
+	return (error);
+}
+
+/*
+ * Supported only connected sockets (no address) without ancillary data
+ * (control mbuf) for atomic protocols
+ */
+int
+sosend_list(struct socket *so, struct uio **uioarray, u_int uiocnt, int flags)
+{
+	struct mbuf *m, *freelist = NULL;
+	user_ssize_t len, resid;
+	int error, dontroute, mlen;
+	int atomic = sosendallatonce(so);
+	int sblocked = 0;
+	struct proc *p = current_proc();
+	u_int uiofirst = 0;
+	u_int uiolast = 0;
+	struct mbuf *top = NULL;
+	uint16_t headroom = 0;
+	boolean_t bigcl;
+
+	KERNEL_DEBUG((DBG_FNC_SOSEND_LIST | DBG_FUNC_START), so, uiocnt,
+	    so->so_snd.sb_cc, so->so_snd.sb_lowat, so->so_snd.sb_hiwat);
+
+	if (so->so_type != SOCK_DGRAM) {
+		error = EINVAL;
+		goto out;
+	}
+	if (atomic == 0) {
+		error = EINVAL;
+		goto out;
+	}
+	if (so->so_proto->pr_usrreqs->pru_send_list == NULL) {
+		error = EPROTONOSUPPORT;
+		goto out;
+	}
+	if (flags & ~(MSG_DONTWAIT | MSG_NBIO)) {
+		error = EINVAL;
+		goto out;
+	}
+	resid = uio_array_resid(uioarray, uiocnt);
+
+	/*
+	 * In theory resid should be unsigned.
+	 * However, space must be signed, as it might be less than 0
+	 * if we over-committed, and we must use a signed comparison
+	 * of space and resid.  On the other hand, a negative resid
+	 * causes us to loop sending 0-length segments to the protocol.
+	 *
+	 * Note: We limit resid to be a positive int value as we use
+	 * imin() to set bytes_to_copy -- radr://14558484
+	 */
+	if (resid < 0 || resid > INT_MAX) {
+		error = EINVAL;
+		goto out;
+	}
+
+	socket_lock(so, 1);
+	so_update_last_owner_locked(so, p);
+	so_update_policy(so);
+
+#if NECP
+	so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
+
+	dontroute = (flags & MSG_DONTROUTE) &&
+	    (so->so_options & SO_DONTROUTE) == 0 &&
+	    (so->so_proto->pr_flags & PR_ATOMIC);
+	OSIncrementAtomicLong(&p->p_stats->p_ru.ru_msgsnd);
+
+	error = sosendcheck(so, NULL, resid, 0, atomic, flags,
+	    &sblocked, NULL);
+	if (error)
+		goto release;
+
+	/*
+	 * Use big 4 KB clusters when the outgoing interface does not prefer
+	 * 2 KB clusters
+	 */
+	bigcl = !(so->so_flags1 & SOF1_IF_2KCL) || sosendbigcl_ignore_capab;
+
+	if (soreserveheadroom != 0)
+		headroom = so->so_pktheadroom;
+
+	do {
+		int i;
+		int num_needed = 0;
+		int chainlength;
+		size_t maxpktlen = 0;
+		int bytes_to_alloc;
+
+		if (sosendminchain > 0)
+			chainlength = 0;
+		else
+			chainlength = sosendmaxchain;
+
+		socket_unlock(so, 0);
+
+		/*
+		 * Find a set of uio that fit in a reasonable number
+		 * of mbuf packets
+		 */
+		for (i = uiofirst; i < uiocnt; i++) {
+			struct uio *auio = uioarray[i];
+
+			len = uio_resid(auio);
+
+			/* Do nothing for empty messages */
+			if (len == 0)
+				continue;
+
+			num_needed += 1;
+			uiolast += 1;
+
+			if (len > maxpktlen)
+				maxpktlen = len;
+
+			chainlength += len;
+			if (chainlength > sosendmaxchain)
+				break;
+		}
+		/*
+		 * Nothing left to send
+		 */
+		if (num_needed == 0) {
+			socket_lock(so, 0);
+			break;
+		}
+		/*
+		 * Allocate buffer large enough to include headroom space for
+		 * network and link header
+		 * 
+		 */
+		bytes_to_alloc = maxpktlen + headroom;
+
+		/*
+		 * Allocate a single contiguous buffer of the smallest available
+		 * size when possible
+		 */
+		if (bytes_to_alloc > MCLBYTES &&
+		    bytes_to_alloc <= MBIGCLBYTES && bigcl) {
+			freelist = m_getpackets_internal(
+			    (unsigned int *)&num_needed,
+			    num_needed, M_WAIT, 1,
+			    MBIGCLBYTES);
+		} else if (bytes_to_alloc > _MHLEN &&
+		    bytes_to_alloc <= MCLBYTES) {
+			freelist = m_getpackets_internal(
+			    (unsigned int *)&num_needed,
+			    num_needed, M_WAIT, 1,
+			    MCLBYTES);
+		} else {
+			freelist = m_allocpacket_internal(
+			    (unsigned int *)&num_needed,
+			    bytes_to_alloc, NULL, M_WAIT, 1, 0);
+		}
+		
+		if (freelist == NULL) {
+			socket_lock(so, 0);
+			error = ENOMEM;
+			goto release;
+		}
+		/*
+		 * Copy each uio of the set into its own mbuf packet
+		 */
+		for (i = uiofirst, m = freelist;
+		    i < uiolast && m != NULL;
+		    i++) {
+			int bytes_to_copy;
+			struct mbuf *n;
+			struct uio *auio = uioarray[i];
+
+			bytes_to_copy = uio_resid(auio);
+
+			/* Do nothing for empty messages */
+			if (bytes_to_copy == 0)
+				continue;
+			/*
+			 * Leave headroom for protocol headers
+			 * in the first mbuf of the chain
+			 */
+			m->m_data += headroom;
+
+			for (n = m; n != NULL; n = n->m_next) {
+				if ((m->m_flags & M_EXT))
+					mlen = m->m_ext.ext_size -
+					    m_leadingspace(m);
+				else if ((m->m_flags & M_PKTHDR))
+					mlen =
+					    MHLEN - m_leadingspace(m);
+				else
+					mlen = MLEN - m_leadingspace(m);
+				len = imin(mlen, bytes_to_copy);
+
+				/*
+				 * Note: uiomove() decrements the iovec
+				 * length
+				 */
+				error = uiomove(mtod(n, caddr_t),
+				    len, auio);
+				if (error != 0)
+					break;
+				n->m_len = len;
+				m->m_pkthdr.len += len;
+
+				VERIFY(m->m_pkthdr.len <= maxpktlen);
+
+				bytes_to_copy -= len;
+				resid -= len;
+			}
+			if (m->m_pkthdr.len == 0) {
+				printf(
+				    "%s:%d so %llx pkt %llx type %u len null\n",
+				    __func__, __LINE__,
+				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+				    (uint64_t)DEBUG_KERNEL_ADDRPERM(m),
+				    m->m_type);
+			}
+			if (error != 0)
+				break;
+			m = m->m_nextpkt;
+		}
+
+		socket_lock(so, 0);
+
+		if (error)
+			goto release;
+		top = freelist;
+		freelist = NULL;
+
+		if (dontroute)
+			so->so_options |= SO_DONTROUTE;
+
+		if ((flags & MSG_SKIPCFIL) == 0) {
+			struct mbuf **prevnextp = NULL;
+
+			for (i = uiofirst, m = top;
+			    i < uiolast && m != NULL;
+			    i++) {
+				struct mbuf *nextpkt = m->m_nextpkt;
+
+				/*
+				 * Socket filter processing
+				 */
+				error = sflt_data_out(so, NULL, &m,
+				    NULL, 0);
+				if (error != 0 && error != EJUSTRETURN)
+					goto release;
+
+#if CONTENT_FILTER
+				if (error == 0) {
+					/*
+					 * Content filter processing
+					 */
+					error = cfil_sock_data_out(so, NULL, m,
+					    NULL, 0);
+					if (error != 0 && error != EJUSTRETURN)
+						goto release;
+				}
+#endif /* CONTENT_FILTER */
+				/*
+				 * Remove packet from the list when
+				 * swallowed by a filter
+				 */
+				if (error == EJUSTRETURN) {
+					error = 0;
+					if (prevnextp != NULL)
+						*prevnextp = nextpkt;
+					else
+						top = nextpkt;
+				}
+
+				m = nextpkt;
+				if (m != NULL)
+					prevnextp = &m->m_nextpkt;
+			}
+		}
+		if (top != NULL)
+			error = (*so->so_proto->pr_usrreqs->pru_send_list)
+			    (so, 0, top, NULL, NULL, p);
+
+		if (dontroute)
+			so->so_options &= ~SO_DONTROUTE;
+
+		top = NULL;
+		uiofirst = uiolast;
+	} while (resid > 0 && error == 0);
+release:
+	if (sblocked)
+		sbunlock(&so->so_snd, FALSE);	/* will unlock socket */
+	else
+		socket_unlock(so, 1);
+out:
+	if (top != NULL)
+		m_freem(top);
+	if (freelist != NULL)
+		m_freem_list(freelist);
+
+	KERNEL_DEBUG(DBG_FNC_SOSEND_LIST | DBG_FUNC_END, so, resid,
+	    so->so_snd.sb_cc, 0, error);
+
+	return (error);
+}
+
+/*
+ * May return ERESTART when packet is dropped by MAC policy check
+ */
+static int
+soreceive_addr(struct proc *p, struct socket *so, struct sockaddr **psa,
+    int flags, struct mbuf **mp, struct mbuf **nextrecordp, int canwait)
+{
+	int error = 0;
+	struct mbuf *m = *mp;
+	struct mbuf *nextrecord = *nextrecordp;
+
+	KASSERT(m->m_type == MT_SONAME, ("receive 1a"));
+#if CONFIG_MACF_SOCKET_SUBSET
+	/*
+	 * Call the MAC framework for policy checking if we're in
+	 * the user process context and the socket isn't connected.
+	 */
+	if (p != kernproc && !(so->so_state & SS_ISCONNECTED)) {
+		struct mbuf *m0 = m;
+		/*
+		 * Dequeue this record (temporarily) from the receive
+		 * list since we're about to drop the socket's lock
+		 * where a new record may arrive and be appended to
+		 * the list.  Upon MAC policy failure, the record
+		 * will be freed.  Otherwise, we'll add it back to
+		 * the head of the list.  We cannot rely on SB_LOCK
+		 * because append operation uses the socket's lock.
+		 */
+		do {
+			m->m_nextpkt = NULL;
+			sbfree(&so->so_rcv, m);
+			m = m->m_next;
+		} while (m != NULL);
+		m = m0;
+		so->so_rcv.sb_mb = nextrecord;
+		SB_EMPTY_FIXUP(&so->so_rcv);
+		SBLASTRECORDCHK(&so->so_rcv, "soreceive 1a");
+		SBLASTMBUFCHK(&so->so_rcv, "soreceive 1a");
+		socket_unlock(so, 0);
+
+		if (mac_socket_check_received(proc_ucred(p), so,
+		    mtod(m, struct sockaddr *)) != 0) {
+			/*
+			 * MAC policy failure; free this record and
+			 * process the next record (or block until
+			 * one is available).  We have adjusted sb_cc
+			 * and sb_mbcnt above so there is no need to
+			 * call sbfree() again.
+			 */
+			m_freem(m);
+			/*
+			 * Clear SB_LOCK but don't unlock the socket.
+			 * Process the next record or wait for one.
+			 */
+			socket_lock(so, 0);
+			sbunlock(&so->so_rcv, TRUE); /* stay locked */
+			error = ERESTART;
+			goto done;
+		}
+		socket_lock(so, 0);
+		/*
+		 * If the socket has been defunct'd, drop it.
+		 */
+		if (so->so_flags & SOF_DEFUNCT) {
+			m_freem(m);
+			error = ENOTCONN;
+			goto done;
+		}
+		/*
+		 * Re-adjust the socket receive list and re-enqueue
+		 * the record in front of any packets which may have
+		 * been appended while we dropped the lock.
+		 */
+		for (m = m0; m->m_next != NULL; m = m->m_next)
+			sballoc(&so->so_rcv, m);
+		sballoc(&so->so_rcv, m);
+		if (so->so_rcv.sb_mb == NULL) {
+			so->so_rcv.sb_lastrecord = m0;
+			so->so_rcv.sb_mbtail = m;
+		}
+		m = m0;
+		nextrecord = m->m_nextpkt = so->so_rcv.sb_mb;
+		so->so_rcv.sb_mb = m;
+		SBLASTRECORDCHK(&so->so_rcv, "soreceive 1b");
+		SBLASTMBUFCHK(&so->so_rcv, "soreceive 1b");
+	}
+#endif /* CONFIG_MACF_SOCKET_SUBSET */
+	if (psa != NULL) {
+		*psa = dup_sockaddr(mtod(m, struct sockaddr *), canwait);
+		if ((*psa == NULL) && (flags & MSG_NEEDSA)) {
+			error = EWOULDBLOCK;
+			goto done;
+		}
+	}
+	if (flags & MSG_PEEK) {
+		m = m->m_next;
+	} else {
+		sbfree(&so->so_rcv, m);
+		if (m->m_next == NULL && so->so_rcv.sb_cc != 0) {
+			panic("%s: about to create invalid socketbuf",
+			    __func__);
+			/* NOTREACHED */
+		}
+		MFREE(m, so->so_rcv.sb_mb);
+		m = so->so_rcv.sb_mb;
+		if (m != NULL) {
+			m->m_nextpkt = nextrecord;
+		} else {
+			so->so_rcv.sb_mb = nextrecord;
+			SB_EMPTY_FIXUP(&so->so_rcv);
+		}
+	}
+done:
+	*mp = m;
+	*nextrecordp = nextrecord;
+
+	return (error);
+}
+
+/*
+ * Process one or more MT_CONTROL mbufs present before any data mbufs
+ * in the first mbuf chain on the socket buffer.  If MSG_PEEK, we
+ * just copy the data; if !MSG_PEEK, we call into the protocol to
+ * perform externalization.
+ */
+static int
+soreceive_ctl(struct socket *so, struct mbuf **controlp, int flags,
+    struct mbuf **mp, struct mbuf **nextrecordp)
+{
+	int error = 0;
+	struct mbuf *cm = NULL, *cmn;
+	struct mbuf **cme = &cm;
+	struct sockbuf *sb_rcv = &so->so_rcv;
+	struct mbuf **msgpcm = NULL;
+	struct mbuf *m = *mp;
+	struct mbuf *nextrecord = *nextrecordp;
+	struct protosw *pr = so->so_proto;
+
+	/*
+	 * Externalizing the control messages would require us to
+	 * drop the socket's lock below.  Once we re-acquire the
+	 * lock, the mbuf chain might change.  In order to preserve
+	 * consistency, we unlink all control messages from the
+	 * first mbuf chain in one shot and link them separately
+	 * onto a different chain.
+	 */
+	do {
+		if (flags & MSG_PEEK) {
+			if (controlp != NULL) {
+				if (*controlp == NULL) {
+					msgpcm = controlp;
+				}
+				*controlp = m_copy(m, 0, m->m_len);
+
+				/*
+				 * If we failed to allocate an mbuf,
+				 * release any previously allocated
+				 * mbufs for control data. Return
+				 * an error. Keep the mbufs in the
+				 * socket as this is using
+				 * MSG_PEEK flag.
+				 */
+				if (*controlp == NULL) {
+					m_freem(*msgpcm);
+					error = ENOBUFS;
+					goto done;
+				}
+				controlp = &(*controlp)->m_next;
+			}
+			m = m->m_next;
+		} else {
+			m->m_nextpkt = NULL;
+			sbfree(sb_rcv, m);
+			sb_rcv->sb_mb = m->m_next;
+			m->m_next = NULL;
+			*cme = m;
+			cme = &(*cme)->m_next;
+			m = sb_rcv->sb_mb;
+		}
+	} while (m != NULL && m->m_type == MT_CONTROL);
+
+	if (!(flags & MSG_PEEK)) {
+		if (sb_rcv->sb_mb != NULL) {
+			sb_rcv->sb_mb->m_nextpkt = nextrecord;
+		} else {
+			sb_rcv->sb_mb = nextrecord;
+			SB_EMPTY_FIXUP(sb_rcv);
+		}
+		if (nextrecord == NULL)
+			sb_rcv->sb_lastrecord = m;
+	}
+
+	SBLASTRECORDCHK(&so->so_rcv, "soreceive ctl");
+	SBLASTMBUFCHK(&so->so_rcv, "soreceive ctl");
+
+	while (cm != NULL) {
+		int cmsg_type;
+
+		cmn = cm->m_next;
+		cm->m_next = NULL;
+		cmsg_type = mtod(cm, struct cmsghdr *)->cmsg_type;
+
+		/*
+		 * Call the protocol to externalize SCM_RIGHTS message
+		 * and return the modified message to the caller upon
+		 * success.  Otherwise, all other control messages are
+		 * returned unmodified to the caller.  Note that we
+		 * only get into this loop if MSG_PEEK is not set.
+		 */
+		if (pr->pr_domain->dom_externalize != NULL &&
+		    cmsg_type == SCM_RIGHTS) {
+			/*
+			 * Release socket lock: see 3903171.  This
+			 * would also allow more records to be appended
+			 * to the socket buffer.  We still have SB_LOCK
+			 * set on it, so we can be sure that the head
+			 * of the mbuf chain won't change.
+			 */
+			socket_unlock(so, 0);
+			error = (*pr->pr_domain->dom_externalize)(cm);
+			socket_lock(so, 0);
+		} else {
+			error = 0;
+		}
+
+		if (controlp != NULL && error == 0) {
+			*controlp = cm;
+			controlp = &(*controlp)->m_next;
+		} else {
+			(void) m_free(cm);
+		}
+		cm = cmn;
+	}
+	/*
+	 * Update the value of nextrecord in case we received new
+	 * records when the socket was unlocked above for
+	 * externalizing SCM_RIGHTS.
+	 */
+	if (m != NULL)
+		nextrecord = sb_rcv->sb_mb->m_nextpkt;
+	else
+		nextrecord = sb_rcv->sb_mb;
+
+done:
+	*mp = m;
+	*nextrecordp = nextrecord;
 
 	return (error);
 }
@@ -2102,15 +2942,24 @@ soreceive(struct socket *so, struct sockaddr **psa, struct uio *uio,
 	int flags, error, offset;
 	user_ssize_t len;
 	struct protosw *pr = so->so_proto;
-	int moff, type =0;
+	int moff, type = 0;
 	user_ssize_t orig_resid = uio_resid(uio);
 	user_ssize_t delayed_copy_len;
 	int can_delay;
 	int need_event;
 	struct proc *p = current_proc();
+	boolean_t en_tracing = FALSE;
 
-	KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_START, so, uio_resid(uio),
-	    so->so_rcv.sb_cc, so->so_rcv.sb_lowat, so->so_rcv.sb_hiwat);
+	/*
+	 * Sanity check on the length passed by caller as we are making 'int'
+	 * comparisons
+	 */
+	if (orig_resid < 0 || orig_resid > INT_MAX)
+		return (EINVAL);
+
+	KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_START, so,
+	    uio_resid(uio), so->so_rcv.sb_cc, so->so_rcv.sb_lowat,
+	    so->so_rcv.sb_hiwat);
 
 	socket_lock(so, 1);
 	so_update_last_owner_locked(so, p);
@@ -2142,7 +2991,7 @@ soreceive(struct socket *so, struct sockaddr **psa, struct uio *uio,
 
 		error = ENOTCONN;
 		SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] (%d)\n",
-		    __func__, proc_pid(p), (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    __func__, proc_pid(p), (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    SOCK_DOM(so), SOCK_TYPE(so), error));
 		/*
 		 * This socket should have been disconnected and flushed
@@ -2153,6 +3002,40 @@ soreceive(struct socket *so, struct sockaddr **psa, struct uio *uio,
 			sb_empty_assert(sb, __func__);
 		socket_unlock(so, 1);
 		return (error);
+	}
+
+	if ((so->so_flags1 & SOF1_PRECONNECT_DATA) &&
+	    pr->pr_usrreqs->pru_preconnect) {
+		/*
+		 * A user may set the CONNECT_RESUME_ON_READ_WRITE-flag but not
+		 * calling write() right after this. *If* the app calls a read
+		 * we do not want to block this read indefinetely. Thus,
+		 * we trigger a connect so that the session gets initiated.
+		 */
+		error = (*pr->pr_usrreqs->pru_preconnect)(so);
+
+		if (error) {
+			socket_unlock(so, 1);
+			return (error);
+		}
+	}
+
+	if (ENTR_SHOULDTRACE &&
+	    (SOCK_CHECK_DOM(so, AF_INET) || SOCK_CHECK_DOM(so, AF_INET6))) {
+		/*
+		 * enable energy tracing for inet sockets that go over
+		 * non-loopback interfaces only.
+		 */
+		struct inpcb *inp = sotoinpcb(so);
+		if (inp->inp_last_outifp != NULL &&
+		    !(inp->inp_last_outifp->if_flags & IFF_LOOPBACK)) {
+			en_tracing = TRUE;
+			KERNEL_ENERGYTRACE(kEnTrActKernSockRead, DBG_FUNC_START,
+			    VM_KERNEL_ADDRPERM(so),
+			    ((so->so_state & SS_NBIO) ?
+			    kEnTrFlagNonBlocking : 0),
+			    (int64_t)orig_resid);
+		}
 	}
 
 	/*
@@ -2200,6 +3083,11 @@ bad:
 			}
 		}
 		socket_unlock(so, 1);
+		if (en_tracing) {
+			KERNEL_ENERGYTRACE(kEnTrActKernSockRead, DBG_FUNC_END,
+			    VM_KERNEL_ADDRPERM(so), 0,
+			    (int64_t)(orig_resid - uio_resid(uio)));
+		}
 		KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_END, error,
 		    0, 0, 0, 0);
 
@@ -2208,16 +3096,18 @@ bad:
 nooob:
 	if (mp != NULL)
 		*mp = NULL;
-	if (so->so_state & SS_ISCONFIRMING && uio_resid(uio))
+
+	if (so->so_state & SS_ISCONFIRMING && uio_resid(uio)) {
 		(*pr->pr_usrreqs->pru_rcvd)(so, 0);
+	}
 
 	free_list = NULL;
 	delayed_copy_len = 0;
 restart:
 #ifdef MORE_LOCKING_DEBUG
 	if (so->so_usecount <= 1)
-		printf("soreceive: sblock so=%p ref=%d on socket\n",
-		    so, so->so_usecount);
+		printf("soreceive: sblock so=0x%llx ref=%d on socket\n",
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), so->so_usecount);
 #endif
 	/*
 	 * See if the socket has been closed (SS_NOFDREF|SS_CANTRCVMORE)
@@ -2246,6 +3136,11 @@ restart:
 		socket_unlock(so, 1);
 		KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_END, error,
 		    0, 0, 0, 0);
+		if (en_tracing) {
+			KERNEL_ENERGYTRACE(kEnTrActKernSockRead, DBG_FUNC_END,
+			    VM_KERNEL_ADDRPERM(so), 0,
+			    (int64_t)(orig_resid - uio_resid(uio)));
+		}
 		return (error);
 	}
 
@@ -2284,6 +3179,17 @@ restart:
 			goto release;
 		}
 		if (so->so_state & SS_CANTRCVMORE) {
+#if CONTENT_FILTER
+			/*
+			 * Deal with half closed connections
+			 */
+			if ((so->so_state & SS_ISDISCONNECTED) == 0 &&
+				cfil_sock_data_pending(&so->so_rcv) != 0)
+				CFIL_LOG(LOG_INFO,
+					"so %llx ignore SS_CANTRCVMORE",
+					(uint64_t)DEBUG_KERNEL_ADDRPERM(so));
+			else
+#endif /* CONTENT_FILTER */
 			if (m != NULL)
 				goto dontblock;
 			else
@@ -2301,6 +3207,7 @@ restart:
 		}
 		if (uio_resid(uio) == 0)
 			goto release;
+
 		if ((so->so_state & SS_NBIO) ||
 		    (flags & (MSG_DONTWAIT|MSG_NBIO))) {
 			error = EWOULDBLOCK;
@@ -2328,6 +3235,11 @@ restart:
 			socket_unlock(so, 1);
 			KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_END, error,
 			    0, 0, 0, 0);
+			if (en_tracing) {
+				KERNEL_ENERGYTRACE(kEnTrActKernSockRead, DBG_FUNC_END,
+				    VM_KERNEL_ADDRPERM(so), 0,
+				    (int64_t)(orig_resid - uio_resid(uio)));
+			}
 			return (error);
 		}
 		goto restart;
@@ -2337,110 +3249,15 @@ dontblock:
 	SBLASTRECORDCHK(&so->so_rcv, "soreceive 1");
 	SBLASTMBUFCHK(&so->so_rcv, "soreceive 1");
 	nextrecord = m->m_nextpkt;
+
 	if ((pr->pr_flags & PR_ADDR) && m->m_type == MT_SONAME) {
-		KASSERT(m->m_type == MT_SONAME, ("receive 1a"));
-#if CONFIG_MACF_SOCKET_SUBSET
-		/*
-		 * Call the MAC framework for policy checking if we're in
-		 * the user process context and the socket isn't connected.
-		 */
-		if (p != kernproc && !(so->so_state & SS_ISCONNECTED)) {
-			struct mbuf *m0 = m;
-			/*
-			 * Dequeue this record (temporarily) from the receive
-			 * list since we're about to drop the socket's lock
-			 * where a new record may arrive and be appended to
-			 * the list.  Upon MAC policy failure, the record
-			 * will be freed.  Otherwise, we'll add it back to
-			 * the head of the list.  We cannot rely on SB_LOCK
-			 * because append operation uses the socket's lock.
-			 */
-			do {
-				m->m_nextpkt = NULL;
-				sbfree(&so->so_rcv, m);
-				m = m->m_next;
-			} while (m != NULL);
-			m = m0;
-			so->so_rcv.sb_mb = nextrecord;
-			SB_EMPTY_FIXUP(&so->so_rcv);
-			SBLASTRECORDCHK(&so->so_rcv, "soreceive 1a");
-			SBLASTMBUFCHK(&so->so_rcv, "soreceive 1a");
-			socket_unlock(so, 0);
-			if (mac_socket_check_received(proc_ucred(p), so,
-			    mtod(m, struct sockaddr *)) != 0) {
-				/*
-				 * MAC policy failure; free this record and
-				 * process the next record (or block until
-				 * one is available).  We have adjusted sb_cc
-				 * and sb_mbcnt above so there is no need to
-				 * call sbfree() again.
-				 */
-				do {
-					m = m_free(m);
-				} while (m != NULL);
-				/*
-				 * Clear SB_LOCK but don't unlock the socket.
-				 * Process the next record or wait for one.
-				 */
-				socket_lock(so, 0);
-				sbunlock(&so->so_rcv, TRUE); /* stay locked */
-				goto restart;
-			}
-			socket_lock(so, 0);
-			/*
-			 * If the socket has been defunct'd, drop it.
-			 */
-			if (so->so_flags & SOF_DEFUNCT) {
-				m_freem(m);
-				error = ENOTCONN;
-				goto release;
-			}
-			/*
-			 * Re-adjust the socket receive list and re-enqueue
-			 * the record in front of any packets which may have
-			 * been appended while we dropped the lock.
-			 */
-			for (m = m0; m->m_next != NULL; m = m->m_next)
-				sballoc(&so->so_rcv, m);
-			sballoc(&so->so_rcv, m);
-			if (so->so_rcv.sb_mb == NULL) {
-				so->so_rcv.sb_lastrecord = m0;
-				so->so_rcv.sb_mbtail = m;
-			}
-			m = m0;
-			nextrecord = m->m_nextpkt = so->so_rcv.sb_mb;
-			so->so_rcv.sb_mb = m;
-			SBLASTRECORDCHK(&so->so_rcv, "soreceive 1b");
-			SBLASTMBUFCHK(&so->so_rcv, "soreceive 1b");
-		}
-#endif /* CONFIG_MACF_SOCKET_SUBSET */
+		error = soreceive_addr(p, so, psa, flags, &m, &nextrecord,
+		    mp0 == NULL);
+		if (error == ERESTART)
+			goto restart;
+		else if (error != 0)
+			goto release;
 		orig_resid = 0;
-		if (psa != NULL) {
-			*psa = dup_sockaddr(mtod(m, struct sockaddr *),
-			    mp0 == NULL);
-			if ((*psa == NULL) && (flags & MSG_NEEDSA)) {
-				error = EWOULDBLOCK;
-				goto release;
-			}
-		}
-		if (flags & MSG_PEEK) {
-			m = m->m_next;
-		} else {
-			sbfree(&so->so_rcv, m);
-			if (m->m_next == NULL && so->so_rcv.sb_cc != 0) {
-				panic("%s: about to create invalid socketbuf",
-				    __func__);
-				/* NOTREACHED */
-			}
-			MFREE(m, so->so_rcv.sb_mb);
-			m = so->so_rcv.sb_mb;
-			if (m != NULL) {
-				m->m_nextpkt = nextrecord;
-			} else {
-				so->so_rcv.sb_mb = nextrecord;
-				SB_EMPTY_FIXUP(&so->so_rcv);
-			}
-		}
 	}
 
 	/*
@@ -2450,116 +3267,9 @@ dontblock:
 	 * perform externalization.
 	 */
 	if (m != NULL && m->m_type == MT_CONTROL) {
-		struct mbuf *cm = NULL, *cmn;
-		struct mbuf **cme = &cm;
-		struct sockbuf *sb_rcv = &so->so_rcv;
-		struct mbuf **msgpcm = NULL;
-
-		/*
-		 * Externalizing the control messages would require us to
-		 * drop the socket's lock below.  Once we re-acquire the
-		 * lock, the mbuf chain might change.  In order to preserve
-		 * consistency, we unlink all control messages from the
-		 * first mbuf chain in one shot and link them separately
-		 * onto a different chain.
-		 */
-		do {
-			if (flags & MSG_PEEK) {
-				if (controlp != NULL) {
-					if (*controlp == NULL) {
-						msgpcm = controlp;
-					}
-					*controlp = m_copy(m, 0, m->m_len);
-
-					/*
-					 * If we failed to allocate an mbuf,
-					 * release any previously allocated
-					 * mbufs for control data. Return
-					 * an error. Keep the mbufs in the
-					 * socket as this is using
-					 * MSG_PEEK flag.
-					 */
-					if (*controlp == NULL) {
-						m_freem(*msgpcm);
-						error = ENOBUFS;
-						goto release;
-					}
-					controlp = &(*controlp)->m_next;
-				}
-				m = m->m_next;
-			} else {
-				m->m_nextpkt = NULL;
-				sbfree(sb_rcv, m);
-				sb_rcv->sb_mb = m->m_next;
-				m->m_next = NULL;
-				*cme = m;
-				cme = &(*cme)->m_next;
-				m = sb_rcv->sb_mb;
-			}
-		} while (m != NULL && m->m_type == MT_CONTROL);
-
-		if (!(flags & MSG_PEEK)) {
-			if (sb_rcv->sb_mb != NULL) {
-				sb_rcv->sb_mb->m_nextpkt = nextrecord;
-			} else {
-				sb_rcv->sb_mb = nextrecord;
-				SB_EMPTY_FIXUP(sb_rcv);
-			}
-			if (nextrecord == NULL)
-				sb_rcv->sb_lastrecord = m;
-		}
-
-		SBLASTRECORDCHK(&so->so_rcv, "soreceive ctl");
-		SBLASTMBUFCHK(&so->so_rcv, "soreceive ctl");
-
-		while (cm != NULL) {
-			int cmsg_type;
-
-			cmn = cm->m_next;
-			cm->m_next = NULL;
-			cmsg_type = mtod(cm, struct cmsghdr *)->cmsg_type;
-
-			/*
-			 * Call the protocol to externalize SCM_RIGHTS message
-			 * and return the modified message to the caller upon
-			 * success.  Otherwise, all other control messages are
-			 * returned unmodified to the caller.  Note that we
-			 * only get into this loop if MSG_PEEK is not set.
-			 */
-			if (pr->pr_domain->dom_externalize != NULL &&
-			    cmsg_type == SCM_RIGHTS) {
-				/*
-				 * Release socket lock: see 3903171.  This
-				 * would also allow more records to be appended
-				 * to the socket buffer.  We still have SB_LOCK
-				 * set on it, so we can be sure that the head
-				 * of the mbuf chain won't change.
-				 */
-				socket_unlock(so, 0);
-				error = (*pr->pr_domain->dom_externalize)(cm);
-				socket_lock(so, 0);
-			} else {
-				error = 0;
-			}
-
-			if (controlp != NULL && error == 0) {
-				*controlp = cm;
-				controlp = &(*controlp)->m_next;
-				orig_resid = 0;
-			} else {
-				(void) m_free(cm);
-			}
-			cm = cmn;
-		}
-		/*
-		 * Update the value of nextrecord in case we received new
-		 * records when the socket was unlocked above for
-		 * externalizing SCM_RIGHTS.
-		 */
-		if (m != NULL)
-			nextrecord = sb_rcv->sb_mb->m_nextpkt;
-		else
-			nextrecord = sb_rcv->sb_mb;
+		error = soreceive_ctl(so, controlp, flags, &m, &nextrecord);
+		if (error != 0)
+			goto release;
 		orig_resid = 0;
 	}
 
@@ -2826,7 +3536,11 @@ dontblock:
 		while (flags & (MSG_WAITALL|MSG_WAITSTREAM) && m == NULL &&
 		    (uio_resid(uio) - delayed_copy_len) > 0 &&
 		    !sosendallatonce(so) && !nextrecord) {
-			if (so->so_error || so->so_state & SS_CANTRCVMORE)
+			if (so->so_error || ((so->so_state & SS_CANTRCVMORE)
+#if CONTENT_FILTER
+			    && cfil_sock_data_pending(&so->so_rcv) == 0
+#endif /* CONTENT_FILTER */
+			    ))
 				goto release;
 
 			/*
@@ -2970,6 +3684,12 @@ release:
 
 	sbunlock(&so->so_rcv, FALSE);	/* will unlock socket */
 
+	if (en_tracing) {
+		KERNEL_ENERGYTRACE(kEnTrActKernSockRead, DBG_FUNC_END,
+		    VM_KERNEL_ADDRPERM(so),
+		    ((error == EWOULDBLOCK) ? kEnTrFlagNoWork : 0),
+		    (int64_t)(orig_resid - uio_resid(uio)));
+	}
 	KERNEL_DEBUG(DBG_FNC_SORECEIVE | DBG_FUNC_END, so, uio_resid(uio),
 	    so->so_rcv.sb_cc, 0, error);
 
@@ -3005,6 +3725,469 @@ sodelayed_copy(struct socket *so, struct uio *uio, struct mbuf **free_list,
 	return (error);
 }
 
+static int
+sodelayed_copy_list(struct socket *so, struct recv_msg_elem *msgarray,
+    u_int uiocnt, struct mbuf **free_list, user_ssize_t *resid)
+{
+#pragma unused(so)
+	int error = 0;
+	struct mbuf *ml, *m;
+	int i = 0;
+	struct uio *auio;
+
+	for (ml = *free_list, i = 0; ml != NULL && i < uiocnt;
+	    ml = ml->m_nextpkt, i++) {
+		auio = msgarray[i].uio;
+		for (m = ml; m != NULL; m = m->m_next) {
+			error = uiomove(mtod(m, caddr_t), m->m_len, auio);
+			if (error != 0)
+				goto out;
+		}
+	}
+out:
+	m_freem_list(*free_list);
+
+	*free_list = NULL;
+	*resid = 0;
+
+	return (error);
+}
+
+int
+soreceive_list(struct socket *so, struct recv_msg_elem *msgarray, u_int uiocnt,
+    int *flagsp)
+{
+	struct mbuf *m;
+	struct mbuf *nextrecord;
+	struct mbuf *ml = NULL, *free_list = NULL, *free_tail = NULL;
+	int error;
+	user_ssize_t len, pktlen, delayed_copy_len = 0;
+	struct protosw *pr = so->so_proto;
+	user_ssize_t resid;
+	struct proc *p = current_proc();
+	struct uio *auio = NULL;
+	int npkts = 0;
+	int sblocked = 0;
+	struct sockaddr **psa = NULL;
+	struct mbuf **controlp = NULL;
+	int can_delay;
+	int flags;
+	struct mbuf *free_others = NULL;
+
+	KERNEL_DEBUG(DBG_FNC_SORECEIVE_LIST | DBG_FUNC_START,
+	    so, uiocnt,
+	    so->so_rcv.sb_cc, so->so_rcv.sb_lowat, so->so_rcv.sb_hiwat);
+
+	/*
+	 * Sanity checks:
+	 * - Only supports don't wait flags
+	 * - Only support datagram sockets (could be extended to raw)
+	 * - Must be atomic
+	 * - Protocol must support packet chains
+	 * - The uio array is NULL (should we panic?)
+	 */
+	if (flagsp != NULL)
+		flags = *flagsp;
+	else
+		flags = 0;
+	if (flags & ~(MSG_PEEK | MSG_WAITALL | MSG_DONTWAIT | MSG_NEEDSA |
+	    MSG_NBIO)) {
+		printf("%s invalid flags 0x%x\n", __func__, flags);
+		error = EINVAL;
+		goto out;
+	}
+	if (so->so_type != SOCK_DGRAM) {
+		error = EINVAL;
+		goto out;
+	}
+	if (sosendallatonce(so) == 0) {
+		error = EINVAL;
+		goto out;
+	}
+	if (so->so_proto->pr_usrreqs->pru_send_list == NULL) {
+		error = EPROTONOSUPPORT;
+		goto out;
+	}
+	if (msgarray == NULL) {
+		printf("%s uioarray is NULL\n", __func__);
+		error = EINVAL;
+		goto out;
+	}
+	if (uiocnt == 0) {
+		printf("%s uiocnt is 0\n", __func__);
+		error = EINVAL;
+		goto out;
+	}
+	/*
+	 * Sanity check on the length passed by caller as we are making 'int'
+	 * comparisons
+	 */
+	resid = recv_msg_array_resid(msgarray, uiocnt);
+	if (resid < 0 || resid > INT_MAX) {
+		error = EINVAL;
+		goto out;
+	}
+
+	if (!(flags & MSG_PEEK) && sorecvmincopy > 0)
+		can_delay = 1;
+	else
+		can_delay = 0;
+
+	socket_lock(so, 1);
+	so_update_last_owner_locked(so, p);
+	so_update_policy(so);
+
+#if NECP
+	so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
+
+	/*
+	 * If a recv attempt is made on a previously-accepted socket
+	 * that has been marked as inactive (disconnected), reject
+	 * the request.
+	 */
+	if (so->so_flags & SOF_DEFUNCT) {
+		struct sockbuf *sb = &so->so_rcv;
+
+		error = ENOTCONN;
+		SODEFUNCTLOG(("%s[%d]: defunct so 0x%llx [%d,%d] (%d)\n",
+		    __func__, proc_pid(p), (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so), error));
+		/*
+		 * This socket should have been disconnected and flushed
+		 * prior to being returned from sodefunct(); there should
+		 * be no data on its receive list, so panic otherwise.
+		 */
+		if (so->so_state & SS_DEFUNCT)
+			sb_empty_assert(sb, __func__);
+		goto release;
+	}
+
+next:
+	/*
+	 * The uio may be empty
+	 */
+	if (npkts >= uiocnt) {
+		error = 0;
+		goto release;
+	}
+restart:
+	/*
+	 * See if the socket has been closed (SS_NOFDREF|SS_CANTRCVMORE)
+	 * and if so just return to the caller.  This could happen when
+	 * soreceive() is called by a socket upcall function during the
+	 * time the socket is freed.  The socket buffer would have been
+	 * locked across the upcall, therefore we cannot put this thread
+	 * to sleep (else we will deadlock) or return EWOULDBLOCK (else
+	 * we may livelock), because the lock on the socket buffer will
+	 * only be released when the upcall routine returns to its caller.
+	 * Because the socket has been officially closed, there can be
+	 * no further read on it.
+	 */
+	if ((so->so_state & (SS_NOFDREF | SS_CANTRCVMORE)) ==
+	    (SS_NOFDREF | SS_CANTRCVMORE)) {
+		error = 0;
+		goto release;
+	}
+
+	error = sblock(&so->so_rcv, SBLOCKWAIT(flags));
+	if (error) {
+		goto release;
+	}
+	sblocked = 1;
+
+	m = so->so_rcv.sb_mb;
+	/*
+	 * Block awaiting more datagram if needed
+	 */
+	if (m == NULL || (((flags & MSG_DONTWAIT) == 0 &&
+	    (so->so_rcv.sb_cc < so->so_rcv.sb_lowat ||
+	    ((flags & MSG_WAITALL) && npkts < uiocnt))))) {
+		/*
+		 * Panic if we notice inconsistencies in the socket's
+		 * receive list; both sb_mb and sb_cc should correctly
+		 * reflect the contents of the list, otherwise we may
+		 * end up with false positives during select() or poll()
+		 * which could put the application in a bad state.
+		 */
+		SB_MB_CHECK(&so->so_rcv);
+
+		if (so->so_error) {
+			error = so->so_error;
+			if ((flags & MSG_PEEK) == 0)
+				so->so_error = 0;
+			goto release;
+		}
+		if (so->so_state & SS_CANTRCVMORE) {
+			goto release;
+		}
+		if ((so->so_state & (SS_ISCONNECTED|SS_ISCONNECTING)) == 0 &&
+		    (so->so_proto->pr_flags & PR_CONNREQUIRED)) {
+			error = ENOTCONN;
+			goto release;
+		}
+		if ((so->so_state & SS_NBIO) ||
+		    (flags & (MSG_DONTWAIT|MSG_NBIO))) {
+			error = EWOULDBLOCK;
+			goto release;
+		}
+		/*
+		 * Do not block if we got some data
+		 */
+		if (free_list != NULL) {
+			error = 0;
+			goto release;
+		}
+
+		SBLASTRECORDCHK(&so->so_rcv, "soreceive sbwait 1");
+		SBLASTMBUFCHK(&so->so_rcv, "soreceive sbwait 1");
+
+		sbunlock(&so->so_rcv, TRUE);	/* keep socket locked */
+		sblocked = 0;
+
+		error = sbwait(&so->so_rcv);
+		if (error) {
+			goto release;
+		}
+		goto restart;
+	}
+
+	OSIncrementAtomicLong(&p->p_stats->p_ru.ru_msgrcv);
+	SBLASTRECORDCHK(&so->so_rcv, "soreceive 1");
+	SBLASTMBUFCHK(&so->so_rcv, "soreceive 1");
+
+	/*
+	 * Consume the current uio index as we have a datagram
+	 */
+	auio = msgarray[npkts].uio;
+	resid = uio_resid(auio);
+	msgarray[npkts].which |= SOCK_MSG_DATA;
+	psa = (msgarray[npkts].which & SOCK_MSG_SA) ?
+	    &msgarray[npkts].psa : NULL;
+	controlp = (msgarray[npkts].which & SOCK_MSG_CONTROL) ?
+	    &msgarray[npkts].controlp : NULL;
+	npkts += 1;
+	nextrecord = m->m_nextpkt;
+
+	if ((pr->pr_flags & PR_ADDR) && m->m_type == MT_SONAME) {
+		error = soreceive_addr(p, so, psa, flags, &m, &nextrecord, 1);
+		if (error == ERESTART)
+			goto restart;
+		else if (error != 0)
+			goto release;
+	}
+
+	if (m != NULL && m->m_type == MT_CONTROL) {
+		error = soreceive_ctl(so, controlp, flags, &m, &nextrecord);
+		if (error != 0)
+			goto release;
+	}
+
+	if (m->m_pkthdr.len == 0) {
+		printf("%s:%d so %llx pkt %llx type %u pktlen null\n",
+		    __func__, __LINE__,
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(m),
+		    m->m_type);
+	}
+
+	/*
+	 * Loop to copy the mbufs of the current record
+	 * Support zero length packets
+	 */
+	ml = NULL;
+	pktlen = 0;
+	while (m != NULL && (len = resid - pktlen) >= 0 && error == 0) {
+		if (m->m_len == 0)
+			panic("%p m_len zero", m);
+		if (m->m_type == 0)
+			panic("%p m_type zero", m);
+		/*
+		 * Clip to the residual length
+		 */
+		if (len > m->m_len)
+			len = m->m_len;
+		pktlen += len;
+		/*
+		 * Copy the mbufs via the uio or delay the copy
+		 * Sockbuf must be consistent here (points to current mbuf,
+		 * it points to next record) when we drop priority;
+		 * we must note any additions to the sockbuf when we
+		 * block interrupts again.
+		 */
+		if (len > 0 && can_delay == 0) {
+			socket_unlock(so, 0);
+			error = uiomove(mtod(m, caddr_t), (int)len, auio);
+			socket_lock(so, 0);
+			if (error)
+				goto release;
+		} else {
+			delayed_copy_len += len;
+		}
+
+		if (len == m->m_len) {
+			/*
+			 * m was entirely copied
+			 */
+			sbfree(&so->so_rcv, m);
+			nextrecord = m->m_nextpkt;
+			m->m_nextpkt = NULL;
+
+			/*
+			 * Set the first packet to the head of the free list
+			 */
+			if (free_list == NULL)
+				free_list = m;
+			/*
+			 * Link current packet to tail of free list
+			 */
+			if (ml == NULL) {
+				if (free_tail != NULL)
+					free_tail->m_nextpkt = m;
+				free_tail = m;
+			}
+			/*
+			 * Link current mbuf to last mbuf of current packet
+			 */
+			if (ml != NULL)
+				ml->m_next = m;
+			ml = m;
+
+			/*
+			 * Move next buf to head of socket buffer
+			 */
+			so->so_rcv.sb_mb = m = ml->m_next;
+			ml->m_next = NULL;
+
+			if (m != NULL) {
+				m->m_nextpkt = nextrecord;
+				if (nextrecord == NULL)
+					so->so_rcv.sb_lastrecord = m;
+			} else {
+				so->so_rcv.sb_mb = nextrecord;
+				SB_EMPTY_FIXUP(&so->so_rcv);
+			}
+			SBLASTRECORDCHK(&so->so_rcv, "soreceive 3");
+			SBLASTMBUFCHK(&so->so_rcv, "soreceive 3");
+		} else {
+			/*
+			 * Stop the loop on partial copy
+			 */
+			break;
+		}
+	}
+#ifdef MORE_LOCKING_DEBUG
+	if (so->so_usecount <= 1) {
+		panic("%s: after big while so=%llx ref=%d on socket\n",
+		    __func__,
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), so->so_usecount);
+		/* NOTREACHED */
+	}
+#endif
+	/*
+	 * Tell the caller we made a partial copy
+	 */
+	if (m != NULL) {
+		if (so->so_options & SO_DONTTRUNC) {
+			/*
+			 * Copyout first the freelist then the partial mbuf
+			 */
+			socket_unlock(so, 0);
+			if (delayed_copy_len)
+				error = sodelayed_copy_list(so, msgarray,
+				    uiocnt, &free_list, &delayed_copy_len);
+
+			if (error == 0) {
+				error = uiomove(mtod(m, caddr_t), (int)len,
+				    auio);
+			}
+			socket_lock(so, 0);
+			if (error)
+				goto release;
+
+			m->m_data += len;
+			m->m_len -= len;
+			so->so_rcv.sb_cc -= len;
+			flags |= MSG_RCVMORE;
+		} else {
+			(void) sbdroprecord(&so->so_rcv);
+			nextrecord = so->so_rcv.sb_mb;
+			m = NULL;
+			flags |= MSG_TRUNC;
+		}
+	}
+
+	if (m == NULL) {
+		so->so_rcv.sb_mb = nextrecord;
+		/*
+		 * First part is an inline SB_EMPTY_FIXUP().  Second
+		 * part makes sure sb_lastrecord is up-to-date if
+		 * there is still data in the socket buffer.
+		 */
+		if (so->so_rcv.sb_mb == NULL) {
+			so->so_rcv.sb_mbtail = NULL;
+			so->so_rcv.sb_lastrecord = NULL;
+		} else if (nextrecord->m_nextpkt == NULL) {
+			so->so_rcv.sb_lastrecord = nextrecord;
+		}
+		SB_MB_CHECK(&so->so_rcv);
+	}
+	SBLASTRECORDCHK(&so->so_rcv, "soreceive 4");
+	SBLASTMBUFCHK(&so->so_rcv, "soreceive 4");
+
+	/*
+	 * We can continue to the next packet as long as:
+	 * - We haven't exhausted the uio array
+	 * - There was no error
+	 * - A packet was not truncated
+	 * - We can still receive more data
+	 */
+	if (npkts < uiocnt && error == 0 &&
+	    (flags & (MSG_RCVMORE | MSG_TRUNC)) == 0 &&
+	    (so->so_state & SS_CANTRCVMORE) == 0) {
+		sbunlock(&so->so_rcv, TRUE);	/* keep socket locked */
+		sblocked = 0;
+
+		goto next;
+	}
+	if (flagsp != NULL)
+		*flagsp |= flags;
+
+release:
+	/*
+	 * pru_rcvd may cause more data to be received if the socket lock
+	 * is dropped so we set MSG_HAVEMORE now based on what we know.
+	 * That way the caller won't be surprised if it receives less data
+	 * than requested.
+	 */
+	if ((so->so_options & SO_WANTMORE) && so->so_rcv.sb_cc > 0)
+		flags |= MSG_HAVEMORE;
+
+	if (pr->pr_flags & PR_WANTRCVD && so->so_pcb)
+		(*pr->pr_usrreqs->pru_rcvd)(so, flags);
+
+	if (sblocked)
+		sbunlock(&so->so_rcv, FALSE);	/* will unlock socket */
+	else
+		socket_unlock(so, 1);
+
+	if (delayed_copy_len)
+		error = sodelayed_copy_list(so, msgarray, uiocnt,
+		    &free_list, &delayed_copy_len);
+out:
+	/*
+	 * Amortize the cost of freeing the mbufs
+	 */
+	if (free_list != NULL)
+		m_freem_list(free_list);
+	if (free_others != NULL)
+		m_freem_list(free_others);
+
+	KERNEL_DEBUG(DBG_FNC_SORECEIVE_LIST | DBG_FUNC_END, error,
+	    0, 0, 0, 0);
+	return (error);
+}
+
 /*
  * Returns:	0			Success
  *		EINVAL
@@ -3028,6 +4211,8 @@ soshutdown(struct socket *so, int how)
 {
 	int error;
 
+	KERNEL_DEBUG(DBG_FNC_SOSHUTDOWN | DBG_FUNC_START, how, 0, 0, 0, 0);
+
 	switch (how) {
 	case SHUT_RD:
 	case SHUT_WR:
@@ -3046,11 +4231,13 @@ soshutdown(struct socket *so, int how)
 		break;
 	}
 
+	KERNEL_DEBUG(DBG_FNC_SOSHUTDOWN | DBG_FUNC_END, how, error, 0, 0, 0);
+
 	return (error);
 }
 
 int
-soshutdownlock(struct socket *so, int how)
+soshutdownlock_final(struct socket *so, int how)
 {
 	struct protosw *pr = so->so_proto;
 	int error = 0;
@@ -3076,7 +4263,34 @@ soshutdownlock(struct socket *so, int how)
 		postevent(so, 0, EV_WCLOSED);
 	}
 done:
-	KERNEL_DEBUG(DBG_FNC_SOSHUTDOWN | DBG_FUNC_END, 0, 0, 0, 0, 0);
+	KERNEL_DEBUG(DBG_FNC_SOSHUTDOWN, how, 1, 0, 0, 0);
+	return (error);
+}
+
+int
+soshutdownlock(struct socket *so, int how)
+{
+	int error = 0;
+
+#if CONTENT_FILTER
+	/*
+	 * A content filter may delay the actual shutdown until it
+	 * has processed the pending data
+	 */
+	if (so->so_flags & SOF_CONTENT_FILTER) {
+		error = cfil_sock_shutdown(so, &how);
+		if (error == EJUSTRETURN) {
+			error = 0;
+			goto done;
+		} else if (error != 0) {
+			goto done;
+		}
+	}
+#endif /* CONTENT_FILTER */
+
+	error = soshutdownlock_final(so, how);
+
+done:
 	return (error);
 }
 
@@ -3416,6 +4630,7 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 		case SO_DONTTRUNC:
 		case SO_WANTMORE:
 		case SO_WANTOOBFLAG:
+		case SO_NOWAKEFROMSLEEP:
 			error = sooptcopyin(sopt, &optval, sizeof (optval),
 			    sizeof (optval));
 			if (error != 0)
@@ -3463,16 +4678,39 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			 * Make sure the low-water is never greater than
 			 * the high-water.
 			 */
-			case SO_SNDLOWAT:
+			case SO_SNDLOWAT: {
+				int space = sbspace(&so->so_snd);
+				u_int32_t hiwat = so->so_snd.sb_hiwat;
+
+				if (so->so_snd.sb_flags & SB_UNIX) {
+					struct unpcb *unp =
+					    (struct unpcb *)(so->so_pcb);
+					if (unp != NULL &&
+					    unp->unp_conn != NULL) {
+						hiwat += unp->unp_conn->unp_cc;
+					}
+				}
+
 				so->so_snd.sb_lowat =
-				    (optval > so->so_snd.sb_hiwat) ?
-				    so->so_snd.sb_hiwat : optval;
+				    (optval > hiwat) ?
+				    hiwat : optval;
+
+				if (space >= so->so_snd.sb_lowat) {
+					sowwakeup(so);
+				}
 				break;
-			case SO_RCVLOWAT:
+			}
+			case SO_RCVLOWAT: {
+				int64_t data_len;
 				so->so_rcv.sb_lowat =
 				    (optval > so->so_rcv.sb_hiwat) ?
 				    so->so_rcv.sb_hiwat : optval;
+				data_len = so->so_rcv.sb_cc
+				    - so->so_rcv.sb_ctl;
+				if (data_len >= so->so_rcv.sb_lowat)
+				    sorwakeup(so);
 				break;
+			}
 			}
 			break;
 
@@ -3559,6 +4797,39 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 				goto out;
 
 			error = so_set_restrictions(so, optval);
+			break;
+
+		case SO_AWDL_UNRESTRICTED:
+			if (SOCK_DOM(so) != PF_INET &&
+			    SOCK_DOM(so) != PF_INET6) {
+				error = EOPNOTSUPP;
+				goto out;
+			}
+			error = sooptcopyin(sopt, &optval, sizeof(optval),
+			    sizeof(optval));
+			if (error != 0)
+				goto out;
+			if (optval != 0) {
+				kauth_cred_t cred =  NULL;
+				proc_t ep = PROC_NULL;
+
+				if (so->so_flags & SOF_DELEGATED) {
+					ep = proc_find(so->e_pid);
+					if (ep)
+						cred = kauth_cred_proc_ref(ep);
+				}
+				error = priv_check_cred(
+				    cred ? cred : so->so_cred,
+				    PRIV_NET_RESTRICTED_AWDL, 0);
+				if (error == 0)
+					inp_set_awdl_unrestricted(
+					    sotoinpcb(so));
+				if (cred)
+					kauth_cred_unref(&cred);
+				if (ep != PROC_NULL)
+					proc_rele(ep);
+			} else
+				inp_clear_awdl_unrestricted(sotoinpcb(so));
 			break;
 
 		case SO_LABEL:
@@ -3702,7 +4973,7 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 				SODEFUNCTLOG(("%s[%d]: so 0x%llx [%s %s:%d -> "
 				    "%s:%d] is now marked as %seligible for "
 				    "defunct\n", __func__, proc_selfpid(),
-				    (uint64_t)VM_KERNEL_ADDRPERM(so),
+				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 				    (SOCK_TYPE(so) == SOCK_STREAM) ?
 				    "TCP" : "UDP", inet_ntop(SOCK_DOM(so),
 				    ((SOCK_DOM(so) == PF_INET) ?
@@ -3720,7 +4991,7 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 				SODEFUNCTLOG(("%s[%d]: so 0x%llx [%d,%d] is "
 				    "now marked as %seligible for defunct\n",
 				    __func__, proc_selfpid(),
-				    (uint64_t)VM_KERNEL_ADDRPERM(so),
+				    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 				    SOCK_DOM(so), SOCK_TYPE(so),
 				    (so->so_flags & SOF_NODEFUNCT) ?
 				    "not " : ""));
@@ -3782,6 +5053,39 @@ sosetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 			error = so_set_effective_uuid(so, euuid, sopt->sopt_p);
 			break;
 		}
+
+#if NECP
+		case SO_NECP_ATTRIBUTES:
+			error = necp_set_socket_attributes(so, sopt);
+			break;
+#endif /* NECP */
+
+#if MPTCP
+		case SO_MPTCP_FASTJOIN:
+			if (!((so->so_flags & SOF_MP_SUBFLOW) ||
+			    ((SOCK_CHECK_DOM(so, PF_MULTIPATH)) &&
+			    (SOCK_CHECK_PROTO(so, IPPROTO_TCP))))) {
+				error = ENOPROTOOPT;
+				break;
+			}
+
+			error = sooptcopyin(sopt, &optval, sizeof (optval),
+			    sizeof (optval));
+			if (error != 0)
+				goto out;
+			if (optval == 0)
+				so->so_flags &= ~SOF_MPTCP_FASTJOIN;
+			else
+				so->so_flags |= SOF_MPTCP_FASTJOIN;
+			break;
+#endif /* MPTCP */
+
+		case SO_EXTENDED_BK_IDLE:
+			error = sooptcopyin(sopt, &optval, sizeof (optval),
+			    sizeof (optval));
+			if (error == 0)
+				error = so_set_extended_bk_idle(so, optval);
+			break;
 
 		default:
 			error = ENOPROTOOPT;
@@ -3932,6 +5236,7 @@ sogetoptlock(struct socket *so, struct sockopt *sopt, int dolock)
 		case SO_DONTTRUNC:
 		case SO_WANTMORE:
 		case SO_WANTOOBFLAG:
+		case SO_NOWAKEFROMSLEEP:
 			optval = so->so_options & sopt->sopt_name;
 integer:
 			error = sooptcopyout(sopt, &optval, sizeof (optval));
@@ -3961,6 +5266,26 @@ integer:
 			}
 			goto integer;
 
+		case SO_NUMRCVPKT:
+			if (so->so_proto->pr_flags & PR_ATOMIC) {
+				int cnt = 0;
+				struct mbuf *m1;
+
+				m1 = so->so_rcv.sb_mb;
+				while (m1 != NULL) {
+					if (m1->m_type == MT_DATA ||
+					    m1->m_type == MT_HEADER ||
+					    m1->m_type == MT_OOBDATA)
+						cnt += 1;
+					m1 = m1->m_nextpkt;
+				}
+				optval = cnt;
+				goto integer;
+			} else {
+				error = EINVAL;
+				break;
+			}
+
 		case SO_NWRITE:
 			optval = so->so_snd.sb_cc;
 			goto integer;
@@ -3970,10 +5295,20 @@ integer:
 			so->so_error = 0;
 			goto integer;
 
-		case SO_SNDBUF:
-			optval = so->so_snd.sb_hiwat;
-			goto integer;
+		case SO_SNDBUF: {
+			u_int32_t hiwat = so->so_snd.sb_hiwat;
 
+			if (so->so_snd.sb_flags & SB_UNIX) {
+				struct unpcb *unp =
+				    (struct unpcb *)(so->so_pcb);
+				if (unp != NULL && unp->unp_conn != NULL) {
+					hiwat += unp->unp_conn->unp_cc;
+				}
+			}
+
+			optval = hiwat;
+			goto integer;
+		}
 		case SO_RCVBUF:
 			optval = so->so_rcv.sb_hiwat;
 			goto integer;
@@ -4014,6 +5349,16 @@ integer:
 		case SO_RESTRICTIONS:
 			optval = so_get_restrictions(so);
 			goto integer;
+
+		case SO_AWDL_UNRESTRICTED:
+			if (SOCK_DOM(so) == PF_INET ||
+			    SOCK_DOM(so) == PF_INET6) {
+				optval = inp_get_awdl_unrestricted(
+				    sotoinpcb(so));
+				goto integer;
+			} else
+				error = EOPNOTSUPP;
+			break;
 
 		case SO_LABEL:
 #if CONFIG_MACF_SOCKET
@@ -4119,6 +5464,41 @@ integer:
 			error = flow_divert_token_get(so, sopt);
 			break;
 #endif	/* FLOW_DIVERT */
+
+#if NECP
+		case SO_NECP_ATTRIBUTES:
+			error = necp_get_socket_attributes(so, sopt);
+			break;
+#endif /* NECP */
+
+#if CONTENT_FILTER
+		case SO_CFIL_SOCK_ID: {
+			cfil_sock_id_t sock_id;
+
+			sock_id = cfil_sock_id_from_socket(so);
+
+			error = sooptcopyout(sopt, &sock_id,
+				sizeof(cfil_sock_id_t));
+			break;
+		}
+#endif	/* CONTENT_FILTER */
+
+#if MPTCP
+		case SO_MPTCP_FASTJOIN:
+			if (!((so->so_flags & SOF_MP_SUBFLOW) ||
+			    ((SOCK_CHECK_DOM(so, PF_MULTIPATH)) &&
+			    (SOCK_CHECK_PROTO(so, IPPROTO_TCP))))) {
+				error = ENOPROTOOPT;
+				break;
+			}
+			optval = (so->so_flags & SOF_MPTCP_FASTJOIN);
+			/* Fixed along with rdar://19391339 */
+			goto integer;
+#endif /* MPTCP */
+
+		case SO_EXTENDED_BK_IDLE:
+			optval = (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED);
+			goto integer;
 
 		default:
 			error = ENOPROTOOPT;
@@ -4341,6 +5721,17 @@ soo_kqfilter(struct fileproc *fp, struct knote *kn, vfs_context_t ctx)
 	switch (kn->kn_filter) {
 	case EVFILT_READ:
 		kn->kn_fop = &soread_filtops;
+		/*
+		 * If the caller explicitly asked for OOB results (e.g. poll()),
+		 * save that off in the hookid field and reserve the kn_flags
+		 * EV_OOBAND bit for output only.
+		 */
+		if (kn->kn_flags & EV_OOBAND) {
+			kn->kn_flags &= ~EV_OOBAND;
+			kn->kn_hookid = EV_OOBAND;
+		} else {
+			kn->kn_hookid = 0;
+		}
 		skl = &so->so_rcv.sb_sel.si_note;
 		break;
 	case EVFILT_WRITE:
@@ -4350,6 +5741,8 @@ soo_kqfilter(struct fileproc *fp, struct knote *kn, vfs_context_t ctx)
 	case EVFILT_SOCK:
 		kn->kn_fop = &sock_filtops;
 		skl = &so->so_klist;
+		kn->kn_hookid = 0;
+		kn->kn_status |= KN_TOUCH;
 		break;
 	default:
 		socket_unlock(so, 1);
@@ -4416,40 +5809,47 @@ filt_soread(struct knote *kn, long hint)
 	}
 
 	/* socket isn't a listener */
-
+	/*
+	 * NOTE_LOWAT specifies new low water mark in data, i.e.
+	 * the bytes of protocol data. We therefore exclude any
+	 * control bytes.
+	 */
 	kn->kn_data = so->so_rcv.sb_cc - so->so_rcv.sb_ctl;
 
-	if (so->so_oobmark) {
-		if (kn->kn_flags & EV_OOBAND) {
-			kn->kn_data -= so->so_oobmark;
-			if ((hint & SO_FILT_HINT_LOCKED) == 0)
-				socket_unlock(so, 1);
-			return (1);
-		}
-		kn->kn_data = so->so_oobmark;
+	/*
+	 * Clear out EV_OOBAND that filt_soread may have set in the
+	 * past.
+	 */
+	kn->kn_flags &= ~EV_OOBAND;
+	if ((so->so_oobmark) || (so->so_state & SS_RCVATMARK)) {
 		kn->kn_flags |= EV_OOBAND;
-	} else {
-		if (so->so_state & SS_CANTRCVMORE) {
-			kn->kn_flags |= EV_EOF;
-			kn->kn_fflags = so->so_error;
+		/*
+		 * If caller registered explicit interest in OOB data,
+		 * return immediately (data == amount beyond mark, for
+		 * legacy reasons - that should be changed later).
+		 */
+		if (kn->kn_hookid == EV_OOBAND) {
+			/*
+			 * When so_state is SS_RCVATMARK, so_oobmark
+			 * is 0.
+			 */
+			kn->kn_data -= so->so_oobmark;
 			if ((hint & SO_FILT_HINT_LOCKED) == 0)
 				socket_unlock(so, 1);
 			return (1);
 		}
 	}
 
-	if (so->so_state & SS_RCVATMARK) {
-		if (kn->kn_flags & EV_OOBAND) {
-			if ((hint & SO_FILT_HINT_LOCKED) == 0)
-				socket_unlock(so, 1);
-			return (1);
-		}
-		kn->kn_flags |= EV_OOBAND;
-	} else if (kn->kn_flags & EV_OOBAND) {
-		kn->kn_data = 0;
+	if ((so->so_state & SS_CANTRCVMORE)
+#if CONTENT_FILTER
+	    && cfil_sock_data_pending(&so->so_rcv) == 0
+#endif /* CONTENT_FILTER */
+	   ) {
+		kn->kn_flags |= EV_EOF;
+		kn->kn_fflags = so->so_error;
 		if ((hint & SO_FILT_HINT_LOCKED) == 0)
 			socket_unlock(so, 1);
-		return (0);
+		return (1);
 	}
 
 	if (so->so_error) {	/* temporary udp error */
@@ -4459,6 +5859,11 @@ filt_soread(struct knote *kn, long hint)
 	}
 
 	int64_t	lowwat = so->so_rcv.sb_lowat;
+	/*
+	 * Ensure that when NOTE_LOWAT is used, the derived
+	 * low water mark is bounded by socket's rcv buf's
+	 * high and low water mark values.
+	 */
 	if (kn->kn_sfflags & NOTE_LOWAT) {
 		if (kn->kn_sdata > so->so_rcv.sb_hiwat)
 			lowwat = so->so_rcv.sb_hiwat;
@@ -4469,7 +5874,15 @@ filt_soread(struct knote *kn, long hint)
 	if ((hint & SO_FILT_HINT_LOCKED) == 0)
 		socket_unlock(so, 1);
 
-	return ((kn->kn_flags & EV_OOBAND) || kn->kn_data >= lowwat);
+	/*
+	 * The order below is important. Since NOTE_LOWAT
+	 * overrides sb_lowat, check for NOTE_LOWAT case
+	 * first.
+	 */
+	if (kn->kn_sfflags & NOTE_LOWAT)
+		return (kn->kn_data >= lowwat);
+
+	return (so->so_rcv.sb_cc >= lowwat);
 }
 
 static void
@@ -4517,9 +5930,12 @@ filt_sowrite(struct knote *kn, long hint)
 		ret = 1;
 		goto out;
 	}
-	if (((so->so_state & SS_ISCONNECTED) == 0) &&
-	    (so->so_proto->pr_flags & PR_CONNREQUIRED)) {
+	if (!socanwrite(so)) {
 		ret = 0;
+		goto out;
+	}
+	if (so->so_flags1 & SOF1_PRECONNECT_DATA) {
+		ret = 1;
 		goto out;
 	}
 	int64_t	lowwat = so->so_snd.sb_lowat;
@@ -4530,8 +5946,22 @@ filt_sowrite(struct knote *kn, long hint)
 			lowwat = kn->kn_sdata;
 	}
 	if (kn->kn_data >= lowwat) {
-		if ((so->so_flags & SOF_NOTSENT_LOWAT) != 0) {
-			ret = tcp_notsent_lowat_check(so);
+		if (so->so_flags & SOF_NOTSENT_LOWAT) {
+			if ((SOCK_DOM(so) == PF_INET
+			    || SOCK_DOM(so) == PF_INET6)
+			    && so->so_type == SOCK_STREAM) {
+				ret = tcp_notsent_lowat_check(so);
+			}
+#if MPTCP
+			else if ((SOCK_DOM(so) == PF_MULTIPATH) &&
+			    (SOCK_PROTO(so) == IPPROTO_TCP)) {
+				ret = mptcp_notsent_lowat_check(so);
+			}
+#endif
+			else {
+				ret = 1;
+				goto out;
+			}
 		} else {
 			ret = 1;
 		}
@@ -4562,6 +5992,7 @@ filt_sockev(struct knote *kn, long hint)
 	int ret = 0, locked = 0;
 	struct socket *so = (struct socket *)kn->kn_fp->f_fglob->fg_data;
 	long ev_hint = (hint & SO_FILT_HINT_EV);
+	uint32_t level_trigger = 0;
 
 	if ((hint & SO_FILT_HINT_LOCKED) == 0) {
 		socket_lock(so, 1);
@@ -4569,68 +6000,76 @@ filt_sockev(struct knote *kn, long hint)
 	}
 
 	if (ev_hint & SO_FILT_HINT_CONNRESET) {
-		if (kn->kn_sfflags & NOTE_CONNRESET)
-			kn->kn_fflags |= NOTE_CONNRESET;
+		kn->kn_fflags |= NOTE_CONNRESET;
 	}
 	if (ev_hint & SO_FILT_HINT_TIMEOUT) {
-		if (kn->kn_sfflags & NOTE_TIMEOUT)
-			kn->kn_fflags |= NOTE_TIMEOUT;
+		kn->kn_fflags |= NOTE_TIMEOUT;
 	}
 	if (ev_hint & SO_FILT_HINT_NOSRCADDR) {
-		if (kn->kn_sfflags & NOTE_NOSRCADDR)
-			kn->kn_fflags |= NOTE_NOSRCADDR;
+		kn->kn_fflags |= NOTE_NOSRCADDR;
 	}
 	if (ev_hint & SO_FILT_HINT_IFDENIED) {
-		if ((kn->kn_sfflags & NOTE_IFDENIED))
-			kn->kn_fflags |= NOTE_IFDENIED;
+		kn->kn_fflags |= NOTE_IFDENIED;
 	}
 	if (ev_hint & SO_FILT_HINT_KEEPALIVE) {
-		if (kn->kn_sfflags & NOTE_KEEPALIVE)
-			kn->kn_fflags |= NOTE_KEEPALIVE;
+		kn->kn_fflags |= NOTE_KEEPALIVE;
 	}
 	if (ev_hint & SO_FILT_HINT_ADAPTIVE_WTIMO) {
-		if (kn->kn_sfflags & NOTE_ADAPTIVE_WTIMO)
-			kn->kn_fflags |= NOTE_ADAPTIVE_WTIMO;
+		kn->kn_fflags |= NOTE_ADAPTIVE_WTIMO;
 	}
 	if (ev_hint & SO_FILT_HINT_ADAPTIVE_RTIMO) {
-		if (kn->kn_sfflags & NOTE_ADAPTIVE_RTIMO)
-			kn->kn_fflags |= NOTE_ADAPTIVE_RTIMO;
+		kn->kn_fflags |= NOTE_ADAPTIVE_RTIMO;
 	}
-	if (ev_hint & SO_FILT_HINT_CONNECTED) {
-		if (kn->kn_sfflags & NOTE_CONNECTED)
-			kn->kn_fflags |= NOTE_CONNECTED;
+	if ((ev_hint & SO_FILT_HINT_CONNECTED) ||
+	    (so->so_state & SS_ISCONNECTED)) {
+		kn->kn_fflags |= NOTE_CONNECTED;
+		level_trigger |= NOTE_CONNECTED;
 	}
-	if (ev_hint & SO_FILT_HINT_DISCONNECTED) {
-		if (kn->kn_sfflags & NOTE_DISCONNECTED)
-			kn->kn_fflags |= NOTE_DISCONNECTED;
+	if ((ev_hint & SO_FILT_HINT_DISCONNECTED) ||
+	    (so->so_state & SS_ISDISCONNECTED)) {
+		kn->kn_fflags |= NOTE_DISCONNECTED;
+		level_trigger |= NOTE_DISCONNECTED;
 	}
 	if (ev_hint & SO_FILT_HINT_CONNINFO_UPDATED) {
 		if (so->so_proto != NULL &&
-		    (so->so_proto->pr_flags & PR_EVCONNINFO) &&
-		    (kn->kn_sfflags & NOTE_CONNINFO_UPDATED))
+		    (so->so_proto->pr_flags & PR_EVCONNINFO))
 			kn->kn_fflags |= NOTE_CONNINFO_UPDATED;
 	}
 
-	if ((kn->kn_sfflags & NOTE_READCLOSED) &&
-	    (so->so_state & SS_CANTRCVMORE))
+	if ((so->so_state & SS_CANTRCVMORE)
+#if CONTENT_FILTER
+	    && cfil_sock_data_pending(&so->so_rcv) == 0
+#endif /* CONTENT_FILTER */
+	    ) {
 		kn->kn_fflags |= NOTE_READCLOSED;
-
-	if ((kn->kn_sfflags & NOTE_WRITECLOSED) &&
-	    (so->so_state & SS_CANTSENDMORE))
-		kn->kn_fflags |= NOTE_WRITECLOSED;
-
-	if ((kn->kn_sfflags & NOTE_SUSPEND) &&
-	    ((ev_hint & SO_FILT_HINT_SUSPEND) ||
-	    (so->so_flags & SOF_SUSPENDED))) {
-		kn->kn_fflags &= ~(NOTE_SUSPEND | NOTE_RESUME);
-		kn->kn_fflags |= NOTE_SUSPEND;
+		level_trigger |= NOTE_READCLOSED;
 	}
 
-	if ((kn->kn_sfflags & NOTE_RESUME) &&
-	    ((ev_hint & SO_FILT_HINT_RESUME) ||
-	    (so->so_flags & SOF_SUSPENDED) == 0)) {
+	if (so->so_state & SS_CANTSENDMORE) {
+		kn->kn_fflags |= NOTE_WRITECLOSED;
+		level_trigger |= NOTE_WRITECLOSED;
+	}
+
+	if ((ev_hint & SO_FILT_HINT_SUSPEND) ||
+	    (so->so_flags & SOF_SUSPENDED)) {
 		kn->kn_fflags &= ~(NOTE_SUSPEND | NOTE_RESUME);
+
+		/* If resume event was delivered before, reset it */
+		kn->kn_hookid &= ~NOTE_RESUME;
+
+		kn->kn_fflags |= NOTE_SUSPEND;
+		level_trigger |= NOTE_SUSPEND;
+	}
+
+	if ((ev_hint & SO_FILT_HINT_RESUME) ||
+	    (so->so_flags & SOF_SUSPENDED) == 0) {
+		kn->kn_fflags &= ~(NOTE_SUSPEND | NOTE_RESUME);
+
+		/* If suspend event was delivered before, reset it */
+		kn->kn_hookid &= ~NOTE_SUSPEND;
+
 		kn->kn_fflags |= NOTE_RESUME;
+		level_trigger |= NOTE_RESUME;
 	}
 
 	if (so->so_error != 0) {
@@ -4641,13 +6080,67 @@ filt_sockev(struct knote *kn, long hint)
 		get_sockev_state(so, (u_int32_t *)&(kn->kn_data));
 	}
 
-	if (kn->kn_fflags != 0)
+	/* Reset any events that are not requested on this knote */
+	kn->kn_fflags &= (kn->kn_sfflags & EVFILT_SOCK_ALL_MASK);
+	level_trigger &= (kn->kn_sfflags & EVFILT_SOCK_ALL_MASK);
+
+	/* Find the level triggerred events that are already delivered */
+	level_trigger &= kn->kn_hookid;
+	level_trigger &= EVFILT_SOCK_LEVEL_TRIGGER_MASK;
+
+	/* Do not deliver level triggerred events more than once */
+	if ((kn->kn_fflags & ~level_trigger) != 0)
 		ret = 1;
 
 	if (locked)
 		socket_unlock(so, 1);
 
 	return (ret);
+}
+
+static void
+filt_socktouch(struct knote *kn, struct kevent_internal_s *kev, long type)
+{
+#pragma unused(kev)
+	switch (type) {
+	case EVENT_REGISTER:
+	{
+		uint32_t changed_flags;
+		changed_flags = (kn->kn_sfflags ^ kn->kn_hookid);
+
+		/*
+		 * Since we keep track of events that are already
+		 * delivered, if any of those events are not requested
+		 * anymore the state related to them can be reset
+		 */
+		kn->kn_hookid &=
+		    ~(changed_flags & EVFILT_SOCK_LEVEL_TRIGGER_MASK);
+		break;
+	}
+	case EVENT_PROCESS:
+		/*
+		 * Store the state of the events being delivered. This
+		 * state can be used to deliver level triggered events
+		 * ateast once and still avoid waking up the application
+		 * multiple times as long as the event is active.
+		 */
+		if (kn->kn_fflags != 0)
+			kn->kn_hookid |= (kn->kn_fflags &
+				EVFILT_SOCK_LEVEL_TRIGGER_MASK);
+
+		/*
+		 * NOTE_RESUME and NOTE_SUSPEND are an exception, deliver
+		 * only one of them and remember the last one that was
+		 * delivered last
+		 */
+		if (kn->kn_fflags & NOTE_SUSPEND)
+			kn->kn_hookid &= ~NOTE_RESUME;
+		if (kn->kn_fflags & NOTE_RESUME)
+			kn->kn_hookid &= ~NOTE_SUSPEND;
+		break;
+	default:
+		break;
+	}
 }
 
 void
@@ -4794,6 +6287,15 @@ somultipages(struct socket *so, boolean_t set)
 		so->so_flags &= ~SOF_MULTIPAGES;
 }
 
+void
+soif2kcl(struct socket *so, boolean_t set)
+{
+	if (set)
+		so->so_flags1 |= SOF1_IF_2KCL;
+	else
+		so->so_flags1 &= ~SOF1_IF_2KCL;
+}
+
 int
 so_isdstlocal(struct socket *so) {
 
@@ -4831,15 +6333,45 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 			SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) "
 			    "so 0x%llx [%d,%d] is not eligible for defunct "
 			    "(%d)\n", __func__, proc_selfpid(), proc_pid(p),
-			    level, (uint64_t)VM_KERNEL_ADDRPERM(so),
+			    level, (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 			    SOCK_DOM(so), SOCK_TYPE(so), err));
 			return (err);
 		}
 		so->so_flags &= ~SOF_NODEFUNCT;
 		SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) so 0x%llx "
 		    "[%d,%d] defunct by force\n", __func__, proc_selfpid(),
-		    proc_pid(p), level, (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    proc_pid(p), level, (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    SOCK_DOM(so), SOCK_TYPE(so)));
+	} else if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) {
+		struct inpcb *inp = (struct inpcb *)so->so_pcb;
+		struct ifnet *ifp = inp->inp_last_outifp;
+
+		if (ifp && IFNET_IS_CELLULAR(ifp)) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_nocell);
+		} else if (so->so_flags & SOF_DELEGATED) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_nodlgtd);
+		} else if (soextbkidlestat.so_xbkidle_time == 0) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_notime);
+		} else if (noforce) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_active);
+		
+			so->so_flags1 |= SOF1_EXTEND_BK_IDLE_INPROG;
+			so->so_extended_bk_start = net_uptime();
+			OSBitOrAtomic(P_LXBKIDLEINPROG, &p->p_ladvflag);
+			
+			inpcb_timer_sched(inp->inp_pcbinfo, INPCB_TIMER_LAZY);
+			
+			err = EOPNOTSUPP;
+			SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) "
+			    "extend bk idle "
+			    "so 0x%llx rcv hw %d cc %d\n",
+			    __func__, proc_selfpid(), proc_pid(p),
+			    level, (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+			    so->so_rcv.sb_hiwat, so->so_rcv.sb_cc));
+			return (err);
+		} else {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_forced);
+		}
 	}
 
 	so->so_flags |= SOF_DEFUNCT;
@@ -4862,9 +6394,10 @@ sosetdefunct(struct proc *p, struct socket *so, int level, boolean_t noforce)
 
 done:
 	SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) so 0x%llx [%d,%d] %s "
-	    "defunct\n", __func__, proc_selfpid(), proc_pid(p), level,
-	    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so), SOCK_TYPE(so),
-	    defunct ? "is already" : "marked as"));
+	    "defunct%s\n", __func__, proc_selfpid(), proc_pid(p), level,
+	    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), SOCK_DOM(so), SOCK_TYPE(so),
+	    defunct ? "is already" : "marked as",
+	    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ? " extbkidle" : ""));
 
 	return (err);
 }
@@ -4892,7 +6425,7 @@ sodefunct(struct proc *p, struct socket *so, int level)
 		SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) so 0x%llx [%s "
 		    "%s:%d -> %s:%d] is now defunct [rcv_si 0x%x, snd_si 0x%x, "
 		    "rcv_fl 0x%x, snd_fl 0x%x]\n", __func__, proc_selfpid(),
-		    proc_pid(p), level, (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    proc_pid(p), level, (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    (SOCK_TYPE(so) == SOCK_STREAM) ? "TCP" : "UDP",
 		    inet_ntop(SOCK_DOM(so), ((SOCK_DOM(so) == PF_INET) ?
 		    (void *)&inp->inp_laddr.s_addr : (void *)&inp->in6p_laddr),
@@ -4907,7 +6440,7 @@ sodefunct(struct proc *p, struct socket *so, int level)
 		SODEFUNCTLOG(("%s[%d]: (target pid %d level %d) so 0x%llx "
 		    "[%d,%d] is now defunct [rcv_si 0x%x, snd_si 0x%x, "
 		    "rcv_fl 0x%x, snd_fl 0x%x]\n", __func__, proc_selfpid(),
-		    proc_pid(p), level, (uint64_t)VM_KERNEL_ADDRPERM(so),
+		    proc_pid(p), level, (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
 		    SOCK_DOM(so), SOCK_TYPE(so), (uint32_t)rcv->sb_sel.si_flags,
 		    (uint32_t)snd->sb_sel.si_flags, rcv->sb_flags,
 		    snd->sb_flags));
@@ -4919,6 +6452,7 @@ sodefunct(struct proc *p, struct socket *so, int level)
 	sbwakeup(rcv);
 	sbwakeup(snd);
 
+	so->so_flags1 |= SOF1_DEFUNCTINPROG;
 	if (rcv->sb_flags & SB_LOCK)
 		sbunlock(rcv, TRUE);	/* keep socket locked */
 	if (snd->sb_flags & SB_LOCK)
@@ -4930,8 +6464,8 @@ sodefunct(struct proc *p, struct socket *so, int level)
 	 * states are set for the socket.  This would also flush out data
 	 * hanging off the receive list of this socket.
 	 */
-	(void) soshutdownlock(so, SHUT_RD);
-	(void) soshutdownlock(so, SHUT_WR);
+	(void) soshutdownlock_final(so, SHUT_RD);
+	(void) soshutdownlock_final(so, SHUT_WR);
 	(void) sodisconnectlocked(so);
 
 	/*
@@ -4958,6 +6492,192 @@ sodefunct(struct proc *p, struct socket *so, int level)
 
 done:
 	return (0);
+}
+
+int
+soresume(struct proc *p, struct socket *so, int locked)
+{
+	if (locked == 0)
+		socket_lock(so, 1);
+
+	if (so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG) {
+		SODEFUNCTLOG(("%s[%d]: )target pid %d) so 0x%llx [%d,%d] "
+		    "resumed from bk idle\n",
+		    __func__, proc_selfpid(), proc_pid(p),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so)));
+
+		so->so_flags1 &= ~SOF1_EXTEND_BK_IDLE_INPROG;
+		so->so_extended_bk_start = 0;
+		OSBitAndAtomic(~P_LXBKIDLEINPROG, &p->p_ladvflag);
+
+		OSIncrementAtomic(&soextbkidlestat.so_xbkidle_resumed);
+		OSDecrementAtomic(&soextbkidlestat.so_xbkidle_active);
+		VERIFY(soextbkidlestat.so_xbkidle_active >= 0);
+	}
+	if (locked == 0)
+		socket_unlock(so, 1);
+
+	return (0);
+}
+
+/*
+ * Does not attempt to account for sockets that are delegated from
+ * the current process
+ */
+int
+so_set_extended_bk_idle(struct socket *so, int optval)
+{
+	int error = 0;
+
+	if ((SOCK_DOM(so) != PF_INET && SOCK_DOM(so) != PF_INET6) ||
+	    SOCK_PROTO(so) != IPPROTO_TCP) {
+		OSDecrementAtomic(&soextbkidlestat.so_xbkidle_notsupp);
+		error = EOPNOTSUPP;
+	} else if (optval == 0) {
+		so->so_flags1 &= ~SOF1_EXTEND_BK_IDLE_WANTED;
+
+		soresume(current_proc(), so, 1);
+	} else {
+		struct proc *p = current_proc();
+		int i;
+		struct filedesc *fdp;
+		int count = 0;
+
+		proc_fdlock(p);
+
+		fdp = p->p_fd;
+		for (i = 0; i < fdp->fd_nfiles; i++) {
+			struct fileproc *fp = fdp->fd_ofiles[i];
+			struct socket *so2;
+
+			if (fp == NULL ||
+			    (fdp->fd_ofileflags[i] & UF_RESERVED) != 0 ||
+			    FILEGLOB_DTYPE(fp->f_fglob) != DTYPE_SOCKET)
+				continue;
+
+			so2 = (struct socket *)fp->f_fglob->fg_data;
+			if (so != so2 &&
+			    so2->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED)
+				count++;
+			if (count >= soextbkidlestat.so_xbkidle_maxperproc)
+				break;
+		}
+		if (count >= soextbkidlestat.so_xbkidle_maxperproc) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_toomany);
+			error = EBUSY;
+		} else if (so->so_flags & SOF_DELEGATED) {
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_nodlgtd);
+			error = EBUSY;
+		} else {
+			so->so_flags1 |= SOF1_EXTEND_BK_IDLE_WANTED;
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_wantok);
+		}
+		SODEFUNCTLOG(("%s[%d]: so 0x%llx [%d,%d] "
+		    "%s marked for extended bk idle\n",
+		    __func__, proc_selfpid(),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so),
+		    (so->so_flags1 & SOF1_EXTEND_BK_IDLE_WANTED) ?
+		    "is" : "not"));
+
+		proc_fdunlock(p);
+	}
+
+	return (error);
+}
+
+static void
+so_stop_extended_bk_idle(struct socket *so)
+{
+	so->so_flags1 &= ~SOF1_EXTEND_BK_IDLE_INPROG;
+	so->so_extended_bk_start = 0;
+
+	OSDecrementAtomic(&soextbkidlestat.so_xbkidle_active);
+	VERIFY(soextbkidlestat.so_xbkidle_active >= 0);
+	/*
+	 * Force defunct
+	 */
+	sosetdefunct(current_proc(), so,
+	    SHUTDOWN_SOCKET_LEVEL_DISCONNECT_INTERNAL, FALSE);
+	if (so->so_flags & SOF_DEFUNCT) {
+		sodefunct(current_proc(), so,
+		    SHUTDOWN_SOCKET_LEVEL_DISCONNECT_INTERNAL);
+	}
+}
+
+void
+so_drain_extended_bk_idle(struct socket *so)
+{
+	if (so && (so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG)) {
+		/*
+		 * Only penalize sockets that have outstanding data
+		 */
+		if (so->so_rcv.sb_cc || so->so_snd.sb_cc) {
+			so_stop_extended_bk_idle(so);
+
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_drained);
+		}
+	}
+}
+
+/*
+ * Return values tells if socket is still in extended background idle
+ */
+int
+so_check_extended_bk_idle_time(struct socket *so)
+{
+	int ret = 1;
+
+	if ((so->so_flags1 & SOF1_EXTEND_BK_IDLE_INPROG)) {
+		SODEFUNCTLOG(("%s[%d]: so 0x%llx [%d,%d]\n",
+		    __func__, proc_selfpid(),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so)));
+		if (net_uptime() - so->so_extended_bk_start >
+		    soextbkidlestat.so_xbkidle_time) {
+			so_stop_extended_bk_idle(so);
+
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_expired);
+
+			ret = 0;
+		} else {
+			struct inpcb *inp = (struct inpcb *)so->so_pcb;
+
+			inpcb_timer_sched(inp->inp_pcbinfo, INPCB_TIMER_LAZY);
+			OSIncrementAtomic(&soextbkidlestat.so_xbkidle_resched);
+		}
+	}
+	
+	return (ret);
+}
+
+void
+resume_proc_sockets(proc_t p)
+{
+	if (p->p_ladvflag & P_LXBKIDLEINPROG) {
+		struct filedesc	*fdp;
+		int i;
+
+		proc_fdlock(p);
+		fdp = p->p_fd;
+		for (i = 0; i < fdp->fd_nfiles; i++) {
+			struct fileproc	*fp;
+			struct socket *so;
+
+			fp = fdp->fd_ofiles[i];
+			if (fp == NULL || 
+			    (fdp->fd_ofileflags[i] & UF_RESERVED) != 0 ||
+			    FILEGLOB_DTYPE(fp->f_fglob) != DTYPE_SOCKET)
+				continue;
+
+			so = (struct socket *)fp->f_fglob->fg_data;
+			(void) soresume(p, so, 0);
+		}
+		proc_fdunlock(p);
+
+		OSBitAndAtomic(~P_LXBKIDLEINPROG, &p->p_ladvflag);
+	}
 }
 
 __private_extern__ int
@@ -4999,7 +6719,7 @@ int
 so_set_restrictions(struct socket *so, uint32_t vals)
 {
 	int nocell_old, nocell_new;
-	int ret = 0;
+	int noexpensive_old, noexpensive_new;
 
 	/*
 	 * Deny-type restrictions are trapdoors; once set they cannot be
@@ -5015,34 +6735,43 @@ so_set_restrictions(struct socket *so, uint32_t vals)
 	 * i.e. when SO_RESTRICT_DENY_CELLULAR has not been issued.
 	 */
 	nocell_old = (so->so_restrictions & SO_RESTRICT_DENY_CELLULAR);
+	noexpensive_old = (so->so_restrictions & SO_RESTRICT_DENY_EXPENSIVE);
 	so->so_restrictions |= (vals & (SO_RESTRICT_DENY_IN |
-	    SO_RESTRICT_DENY_OUT | SO_RESTRICT_DENY_CELLULAR));
+	    SO_RESTRICT_DENY_OUT | SO_RESTRICT_DENY_CELLULAR |
+	    SO_RESTRICT_DENY_EXPENSIVE));
 	nocell_new = (so->so_restrictions & SO_RESTRICT_DENY_CELLULAR);
-
-	/* other than deny cellular, there's nothing more to do */
-	if ((nocell_new - nocell_old) == 0)
-		return (ret);
+	noexpensive_new = (so->so_restrictions & SO_RESTRICT_DENY_EXPENSIVE);
 
 	/* we can only set, not clear restrictions */
-	VERIFY((nocell_new - nocell_old) > 0);
-
+	if ((nocell_new - nocell_old) == 0 &&
+	    (noexpensive_new - noexpensive_old) == 0)
+		return (0);
 #if INET6
 	if (SOCK_DOM(so) == PF_INET || SOCK_DOM(so) == PF_INET6) {
 #else
 	if (SOCK_DOM(so) == PF_INET) {
 #endif /* !INET6 */
-		/* if deny cellular is now set, do what's needed for INPCB */
-		inp_set_nocellular(sotoinpcb(so));
+		if (nocell_new - nocell_old != 0) {
+			/*
+			 * if deny cellular is now set, do what's needed
+			 * for INPCB
+			 */
+			inp_set_nocellular(sotoinpcb(so));
+		}
+		if (noexpensive_new - noexpensive_old != 0) {
+			inp_set_noexpensive(sotoinpcb(so));
+		}
 	}
 
-	return (ret);
+	return (0);
 }
 
 uint32_t
 so_get_restrictions(struct socket *so)
 {
 	return (so->so_restrictions & (SO_RESTRICT_DENY_IN |
-	    SO_RESTRICT_DENY_OUT | SO_RESTRICT_DENY_CELLULAR));
+	    SO_RESTRICT_DENY_OUT |
+	    SO_RESTRICT_DENY_CELLULAR | SO_RESTRICT_DENY_EXPENSIVE));
 }
 
 struct sockaddr_entry *
@@ -5075,9 +6804,14 @@ sockaddrentry_dup(const struct sockaddr_entry *src_se, int how)
 	dst_se = sockaddrentry_alloc(how);
 	if (dst_se != NULL) {
 		int len = src_se->se_addr->sa_len;
+		/*
+		 * Workaround for rdar://23362120
+		 * Allways allocate a buffer that can hold an IPv6 socket address
+		 */
+		size_t alloclen = MAX(len, sizeof(struct sockaddr_in6));
 
 		MALLOC(dst_se->se_addr, struct sockaddr *,
-		    len, M_SONAME, how | M_ZERO);
+		    alloclen, M_SONAME, how | M_ZERO);
 		if (dst_se->se_addr != NULL) {
 			bcopy(src_se->se_addr, dst_se->se_addr, len);
 		} else {
@@ -5227,7 +6961,6 @@ so_set_effective_pid(struct socket *so, int epid, struct proc *p)
 		so->e_pid = proc_pid(ep);
 		proc_getexecutableuuid(ep, so->e_uuid, sizeof (so->e_uuid));
 	}
-
 done:
 	if (error == 0 && net_io_policy_log) {
 		uuid_string_t buf;
@@ -5235,15 +6968,26 @@ done:
 		uuid_unparse(so->e_uuid, buf);
 		log(LOG_DEBUG, "%s[%s,%d]: so 0x%llx [%d,%d] epid %d (%s) "
 		    "euuid %s%s\n", __func__, proc_name_address(p),
-		    proc_pid(p), (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
-		    SOCK_TYPE(so), so->e_pid, proc_name_address(ep), buf,
+		    proc_pid(p), (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so),
+		    so->e_pid, proc_name_address(ep), buf,
 		    ((so->so_flags & SOF_DELEGATED) ? " [delegated]" : ""));
 	} else if (error != 0 && net_io_policy_log) {
 		log(LOG_ERR, "%s[%s,%d]: so 0x%llx [%d,%d] epid %d (%s) "
 		    "ERROR (%d)\n", __func__, proc_name_address(p),
-		    proc_pid(p), (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
-		    SOCK_TYPE(so), epid, (ep == PROC_NULL) ? "PROC_NULL" :
+		    proc_pid(p), (uint64_t)DEBUG_KERNEL_ADDRPERM(so),
+		    SOCK_DOM(so), SOCK_TYPE(so),
+		    epid, (ep == PROC_NULL) ? "PROC_NULL" :
 		    proc_name_address(ep), error);
+	}
+
+	/* Update this socket's policy upon success */
+	if (error == 0) {
+		so->so_policy_gencnt *= -1;
+		so_update_policy(so);
+#if NECP
+		so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
 	}
 
 	if (ep != PROC_NULL)
@@ -5262,7 +7006,7 @@ so_set_effective_uuid(struct socket *so, uuid_t euuid, struct proc *p)
 	/* UUID must not be all-zeroes (reserved for kernel) */
 	if (uuid_is_null(euuid)) {
 		error = EINVAL;
-		goto done;;
+		goto done;
 	}
 
 	/*
@@ -5326,15 +7070,24 @@ done:
 		uuid_unparse(so->e_uuid, buf);
 		log(LOG_DEBUG, "%s[%s,%d]: so 0x%llx [%d,%d] epid %d "
 		    "euuid %s%s\n", __func__, proc_name_address(p), proc_pid(p),
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), SOCK_DOM(so),
 		    SOCK_TYPE(so), so->e_pid, buf,
 		    ((so->so_flags & SOF_DELEGATED) ? " [delegated]" : ""));
 	} else if (error != 0 && net_io_policy_log) {
 		uuid_unparse(euuid, buf);
 		log(LOG_DEBUG, "%s[%s,%d]: so 0x%llx [%d,%d] euuid %s "
 		    "ERROR (%d)\n", __func__, proc_name_address(p), proc_pid(p),
-		    (uint64_t)VM_KERNEL_ADDRPERM(so), SOCK_DOM(so),
+		    (uint64_t)DEBUG_KERNEL_ADDRPERM(so), SOCK_DOM(so),
 		    SOCK_TYPE(so), buf, error);
+	}
+
+	/* Update this socket's policy upon success */
+	if (error == 0) {
+		so->so_policy_gencnt *= -1;
+		so_update_policy(so);
+#if NECP
+		so_update_necp_policy(so, NULL, NULL);
+#endif /* NECP */
 	}
 
 	return (error);
@@ -5363,4 +7116,51 @@ netpolicy_post_msg(uint32_t ev_code, struct netpolicy_event_data *ev_data,
 	ev_msg.dv[0].data_length = ev_datalen;
 
 	kev_post_msg(&ev_msg);
+}
+
+void
+socket_post_kev_msg(uint32_t ev_code,
+    struct kev_socket_event_data *ev_data,
+    uint32_t ev_datalen)
+{
+	struct kev_msg ev_msg;
+
+	bzero(&ev_msg, sizeof(ev_msg));
+	ev_msg.vendor_code = KEV_VENDOR_APPLE;
+	ev_msg.kev_class = KEV_NETWORK_CLASS;
+	ev_msg.kev_subclass = KEV_SOCKET_SUBCLASS;
+	ev_msg.event_code = ev_code;
+
+	ev_msg.dv[0].data_ptr = ev_data;
+	ev_msg.dv[0]. data_length = ev_datalen;
+
+	kev_post_msg(&ev_msg);
+}
+
+void
+socket_post_kev_msg_closed(struct socket *so)
+{
+	struct kev_socket_closed ev;
+	struct sockaddr *socksa = NULL, *peersa = NULL;
+	int err;
+	bzero(&ev, sizeof(ev));
+	err = (*so->so_proto->pr_usrreqs->pru_sockaddr)(so, &socksa);
+	if (err == 0) {
+		err = (*so->so_proto->pr_usrreqs->pru_peeraddr)(so,
+		    &peersa);
+		if (err == 0) {
+			memcpy(&ev.ev_data.kev_sockname, socksa,
+			    min(socksa->sa_len,
+			    sizeof (ev.ev_data.kev_sockname)));
+			memcpy(&ev.ev_data.kev_peername, peersa,
+			    min(peersa->sa_len,
+			    sizeof (ev.ev_data.kev_peername)));
+			socket_post_kev_msg(KEV_SOCKET_CLOSED,
+			    &ev.ev_data, sizeof (ev));
+		}
+	}
+	if (socksa != NULL)
+		FREE(socksa, M_SONAME);
+	if (peersa != NULL)
+		FREE(peersa, M_SONAME);
 }

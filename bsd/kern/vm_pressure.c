@@ -54,6 +54,7 @@
  * This value is the threshold that a process must meet to be considered for scavenging.
  */
 #define VM_PRESSURE_MINIMUM_RSIZE		10	/* MB */
+
 #define VM_PRESSURE_NOTIFY_WAIT_PERIOD		10000	/* milliseconds */
 
 void vm_pressure_klist_lock(void);
@@ -62,8 +63,8 @@ void vm_pressure_klist_unlock(void);
 static void vm_dispatch_memory_pressure(void);
 void vm_reset_active_list(void);
 
-#if !(CONFIG_MEMORYSTATUS && CONFIG_JETSAM)
-static kern_return_t vm_try_pressure_candidates(void);
+#if CONFIG_MEMORYSTATUS
+static kern_return_t vm_try_pressure_candidates(boolean_t target_foreground_process);
 #endif
 
 static lck_mtx_t vm_pressure_klist_mutex;
@@ -170,17 +171,13 @@ void consider_vm_pressure_events(void)
 	vm_dispatch_memory_pressure();
 }
 
-#if CONFIG_MEMORYSTATUS && CONFIG_JETSAM
-
-static void vm_dispatch_memory_pressure(void)
-{
-	/* Update the pressure level and target the foreground or next-largest process as appropriate */
-	memorystatus_update_vm_pressure(FALSE);
-}
+#if CONFIG_MEMORYSTATUS
 
 /* Jetsam aware version. Called with lock held */
 
-static struct knote *vm_find_knote_from_pid(pid_t pid, struct klist *list) {
+struct knote *vm_find_knote_from_pid(pid_t, struct klist *);
+
+struct knote *vm_find_knote_from_pid(pid_t pid, struct klist *list) {
 	struct knote *kn = NULL;
     
 	SLIST_FOREACH(kn, list, kn_selnext) {
@@ -219,8 +216,9 @@ int vm_dispatch_pressure_note_to_pid(pid_t pid, boolean_t locked) {
     		ret = 0;
 	} else {	
 	        kn = vm_find_knote_from_pid(pid, &vm_pressure_klist_dormant);
-	        if (!kn) {
+	        if (kn) {
         		KNOTE(&vm_pressure_klist_dormant, pid);
+			ret = 0;
 	        }
 	}
 
@@ -362,7 +360,7 @@ void vm_find_pressure_candidate(void)
 		goto exit;
 	}
 
-	VM_DEBUG_EVENT(vm_pageout_scan, VM_PRESSURE_EVENT, DBG_FUNC_NONE, target_pid, resident_max, 0, 0);
+	VM_DEBUG_CONSTANT_EVENT(vm_pressure_event, VM_PRESSURE_EVENT, DBG_FUNC_NONE, target_pid, resident_max, 0, 0);
 	VM_PRESSURE_DEBUG(1, "[vm_pressure] sending event to pid %d with %u resident\n", kn_max->kn_kq->kq_p->p_pid, resident_max);
 
 	KNOTE_DETACH(&vm_pressure_klist, kn_max);
@@ -380,17 +378,17 @@ void vm_find_pressure_candidate(void)
 exit:
 	vm_pressure_klist_unlock();
 }
+#endif /* CONFIG_MEMORYSTATUS */
 
-#else /* CONFIG_MEMORYSTATUS && CONFIG_JETSAM */
 
 struct knote *
-vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int level);
+vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int level, boolean_t target_foreground_process);
 
-kern_return_t vm_pressure_notification_without_levels(void);
-kern_return_t vm_pressure_notify_dispatch_vm_clients(void);
+kern_return_t vm_pressure_notification_without_levels(boolean_t target_foreground_process);
+kern_return_t vm_pressure_notify_dispatch_vm_clients(boolean_t target_foreground_process);
 
 kern_return_t
-vm_pressure_notify_dispatch_vm_clients(void)
+vm_pressure_notify_dispatch_vm_clients(boolean_t target_foreground_process)
 {
 	vm_pressure_klist_lock();
 	
@@ -402,7 +400,7 @@ vm_pressure_notify_dispatch_vm_clients(void)
 		
 		VM_PRESSURE_DEBUG(1, "[vm_pressure] vm_dispatch_memory_pressure\n");
 		
-		if (KERN_SUCCESS == vm_try_pressure_candidates()) {
+		if (KERN_SUCCESS == vm_try_pressure_candidates(target_foreground_process)) {
 			vm_pressure_klist_unlock();
 			return KERN_SUCCESS;
 		}
@@ -424,11 +422,10 @@ extern vm_pressure_level_t
 convert_internal_pressure_level_to_dispatch_level(vm_pressure_level_t);
 
 struct knote *
-vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int level)
+vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int level, boolean_t target_foreground_process)
 {
 	struct knote	*kn = NULL, *kn_max = NULL;
         unsigned int	resident_max = 0;
-	kern_return_t	kr = KERN_SUCCESS;
 	struct timeval	curr_tstamp = {0, 0};
 	int		elapsed_msecs = 0;
 	int		selected_task_importance = 0;
@@ -473,13 +470,12 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 
         SLIST_FOREACH(kn, candidate_list, kn_selnext) {
 
-                struct mach_task_basic_info basic_info;
-                mach_msg_type_number_t  size = MACH_TASK_BASIC_INFO_COUNT;
                 unsigned int		resident_size = 0;
 		proc_t			p = PROC_NULL;
 		struct task*		t = TASK_NULL;
 		int			curr_task_importance = 0;
 		boolean_t		consider_knote = FALSE;
+		boolean_t		privileged_listener = FALSE;
 
 		p = kn->kn_kq->kq_p;
 		proc_list_lock();
@@ -490,11 +486,21 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 		}
 		proc_list_unlock();
 
+#if CONFIG_MEMORYSTATUS		
+		if (target_foreground_process == TRUE && !memorystatus_is_foreground_locked(p)) {
+			/*
+			 * Skip process not marked foreground.
+			 */
+			proc_rele(p);
+			continue;
+		}
+#endif /* CONFIG_MEMORYSTATUS */
+
 		t = (struct task *)(p->task);
 		
 		timevalsub(&curr_tstamp, &p->vm_pressure_last_notify_tstamp);
 		elapsed_msecs = curr_tstamp.tv_sec * 1000 + curr_tstamp.tv_usec / 1000;
-							
+		
 		if ((level == -1) && (elapsed_msecs < VM_PRESSURE_NOTIFY_WAIT_PERIOD)) { 
 			proc_rele(p);
 			continue;
@@ -506,26 +512,63 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 			 * registered for the current level.
 			 */
 			vm_pressure_level_t dispatch_level = convert_internal_pressure_level_to_dispatch_level(level);
-	
+			
 			if ((kn->kn_sfflags & dispatch_level) == 0) {
 				proc_rele(p);
 				continue;
 			}
 		}
-	
-                if( ( kr = task_info(t, MACH_TASK_BASIC_INFO, (task_info_t)(&basic_info), &size)) != KERN_SUCCESS ) {
-                        VM_PRESSURE_DEBUG(1, "[vm_pressure] task_info for pid %d failed with %d\n", p->p_pid, kr);
+
+#if CONFIG_MEMORYSTATUS
+		if (target_foreground_process == FALSE && !memorystatus_bg_pressure_eligible(p)) {
+			VM_PRESSURE_DEBUG(1, "[vm_pressure] skipping process %d\n", p->p_pid);
 			proc_rele(p);
-                        continue;
-                }
+			continue;			
+		}
+#endif /* CONFIG_MEMORYSTATUS */
 
 		curr_task_importance = task_importance_estimate(t);
 
-                /* 
-                * We don't want a small process to block large processes from 
-                * being notified again. <rdar://problem/7955532>
-                */
-                resident_size = (basic_info.resident_size)/(MB);
+		/*
+		 * Privileged listeners are only considered in the multi-level pressure scheme
+		 * AND only if the pressure is increasing.
+		 */
+		if (level > 0) {
+
+			if (task_has_been_notified(t, level) == FALSE) {
+
+				/*
+				 * Is this a privileged listener?
+				 */
+				if (task_low_mem_privileged_listener(t, FALSE, &privileged_listener) == 0) {
+
+					if (privileged_listener) {
+						kn_max = kn;
+						proc_rele(p);
+						goto done_scanning;
+					}
+				}
+			} else {
+				proc_rele(p);
+				continue;
+			}
+		} else if (level == 0) {
+
+			/*
+			 * Task wasn't notified when the pressure was increasing and so
+			 * no need to notify it that the pressure is decreasing.
+			 */
+			if ((task_has_been_notified(t, kVMPressureWarning) == FALSE) && (task_has_been_notified(t, kVMPressureCritical) == FALSE)) {
+				proc_rele(p);
+				continue;
+			}
+		}
+
+		/*
+                 * We don't want a small process to block large processes from 
+                 * being notified again. <rdar://problem/7955532>
+                 */
+                resident_size = (get_task_phys_footprint(t))/(1024*1024ULL); //(MB);
 
                 if (resident_size >= VM_PRESSURE_MINIMUM_RSIZE) {
 
@@ -534,27 +577,40 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 				 * Warning or Critical Pressure.
 				 */
                         	if (pressure_increase) {
-					if ((curr_task_importance <= selected_task_importance) && (resident_size > resident_max)) {
-						if (task_has_been_notified(t, level) == FALSE) {
-							consider_knote = TRUE;
-						}
+					if ((curr_task_importance < selected_task_importance) || 
+					    ((curr_task_importance == selected_task_importance) && (resident_size > resident_max))) {
+
+						/*
+ 						 * We have found a candidate process which is:
+						 * a) at a lower importance than the current selected process
+						 * OR
+						 * b) has importance equal to that of the current selected process but is larger
+						 */
+
+						consider_knote = TRUE;
 					}
 				} else {
-					if ((curr_task_importance >= selected_task_importance) && (resident_size > resident_max)) {
-						if (task_has_been_notified(t, level) == FALSE) {
-							consider_knote = TRUE;
-						}
+					if ((curr_task_importance > selected_task_importance) ||
+					    ((curr_task_importance == selected_task_importance) && (resident_size > resident_max))) {
+						
+						/*
+ 						 * We have found a candidate process which is:
+						 * a) at a higher importance than the current selected process
+						 * OR
+						 * b) has importance equal to that of the current selected process but is larger
+						 */
+
+						consider_knote = TRUE;
 					}
 				}
 			} else if (level == 0) {
                         	/*
 				 * Pressure back to normal.
 				 */
-				if ((curr_task_importance >= selected_task_importance) && (resident_size > resident_max)) {
+				if ((curr_task_importance > selected_task_importance) ||
+				    ((curr_task_importance == selected_task_importance) && (resident_size > resident_max))) {
 
-					if ((task_has_been_notified(t, kVMPressureWarning) == TRUE) || (task_has_been_notified(t, kVMPressureCritical) == TRUE)) {
-						consider_knote = TRUE;
-					}
+					consider_knote = TRUE;
 				}
 			} else if (level == -1) {
 
@@ -580,8 +636,10 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 		proc_rele(p);
         }
 
+done_scanning:
 	if (kn_max) {
-        	VM_PRESSURE_DEBUG(1, "[vm_pressure] sending event to pid %d with %u resident\n", kn_max->kn_kq->kq_p->p_pid, resident_max);
+		VM_DEBUG_CONSTANT_EVENT(vm_pressure_event, VM_PRESSURE_EVENT, DBG_FUNC_NONE, kn_max->kn_kq->kq_p->p_pid, resident_max, 0, 0);
+		VM_PRESSURE_DEBUG(1, "[vm_pressure] sending event to pid %d with %u resident\n", kn_max->kn_kq->kq_p->p_pid, resident_max);
 	}
 
 	return kn_max;
@@ -590,32 +648,50 @@ vm_pressure_select_optimal_candidate_to_notify(struct klist *candidate_list, int
 /*
  * vm_pressure_klist_lock is held for this routine.
  */
-kern_return_t vm_pressure_notification_without_levels(void)
+kern_return_t vm_pressure_notification_without_levels(boolean_t target_foreground_process)
 {
 	struct knote *kn_max = NULL;
         pid_t target_pid = -1;
         struct klist dispatch_klist = { NULL };
 	proc_t	target_proc = PROC_NULL;
+	struct klist *candidate_list = NULL;
 
-	kn_max = vm_pressure_select_optimal_candidate_to_notify(&vm_pressure_klist, -1);
+	candidate_list = &vm_pressure_klist;
+	
+	kn_max = vm_pressure_select_optimal_candidate_to_notify(candidate_list, -1, target_foreground_process);
 
         if (kn_max == NULL) {
-		return KERN_FAILURE;
+		if (target_foreground_process) {
+			/*
+			 * Doesn't matter if the process had been notified earlier on.
+			 * This is a very specific request. Deliver it.
+			 */
+			candidate_list = &vm_pressure_klist_dormant;
+			kn_max = vm_pressure_select_optimal_candidate_to_notify(candidate_list, -1, target_foreground_process);
+		}
+
+		if (kn_max == NULL) {
+			return KERN_FAILURE;
+		}
 	}
 		
 	target_proc = kn_max->kn_kq->kq_p;
 	
-        KNOTE_DETACH(&vm_pressure_klist, kn_max);
+        KNOTE_DETACH(candidate_list, kn_max);
 
 	if (target_proc != PROC_NULL) {
 	
 		target_pid = target_proc->p_pid;
-	    
+
 		memoryshot(VM_PRESSURE_EVENT, DBG_FUNC_NONE);
 
         	KNOTE_ATTACH(&dispatch_klist, kn_max);
         	KNOTE(&dispatch_klist, target_pid);
         	KNOTE_ATTACH(&vm_pressure_klist_dormant, kn_max);
+
+#if CONFIG_MEMORYSTATUS
+		memorystatus_send_pressure_note(target_pid);
+#endif /* CONFIG_MEMORYSTATUS */
 
 		microuptime(&target_proc->vm_pressure_last_notify_tstamp);
 	}
@@ -623,17 +699,15 @@ kern_return_t vm_pressure_notification_without_levels(void)
         return KERN_SUCCESS;
 }
 
-static kern_return_t vm_try_pressure_candidates(void)
+static kern_return_t vm_try_pressure_candidates(boolean_t target_foreground_process)
 {
 	/*
 	 * This takes care of candidates that use NOTE_VM_PRESSURE.
 	 * It's a notification without indication of the level
 	 * of memory pressure.
 	 */
-	return (vm_pressure_notification_without_levels());
+	return (vm_pressure_notification_without_levels(target_foreground_process));
 }
-
-#endif /* !(CONFIG_MEMORYSTATUS && CONFIG_JETSAM) */
 
 /*
  * Remove all elements from the dormant list and place them on the active list.

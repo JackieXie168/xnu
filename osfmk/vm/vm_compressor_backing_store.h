@@ -39,23 +39,6 @@
 #include <kern/host_statistics.h>
 
 
-#define SANITY_CHECK_SWAP_ROUTINES	0
-
-#if SANITY_CHECK_SWAP_ROUTINES
-
-#define MIN_SWAP_FILE_SIZE		(4 * 1024)
-
-#define MAX_SWAP_FILE_SIZE		(4 * 1024)
-
-#define	COMPRESSED_SWAP_CHUNK_SIZE	(4 * 1024)
-
-#define VM_SWAPFILE_HIWATER_SEGS	(MIN_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)
-
-#define SWAPFILE_RECLAIM_THRESHOLD_SEGS	(MIN_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)
-
-#else /* SANITY_CHECK_SWAP_ROUTINES */
-
-
 #define MIN_SWAP_FILE_SIZE		(256 * 1024 * 1024)
 
 #define MAX_SWAP_FILE_SIZE		(1 * 1024 * 1024 * 1024)
@@ -65,13 +48,15 @@
 
 #define VM_SWAPFILE_HIWATER_SEGS	(MIN_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)
 
-#define SWAPFILE_RECLAIM_THRESHOLD_SEGS	((15 * (MAX_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)) / 10)
+#define SWAPFILE_RECLAIM_THRESHOLD_SEGS	((17 * (MAX_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)) / 10)
+#define SWAPFILE_RECLAIM_MINIMUM_SEGS	((13 * (MAX_SWAP_FILE_SIZE / COMPRESSED_SWAP_CHUNK_SIZE)) / 10)
 
-#endif /* SANITY_CHECK_SWAP_ROUTINES */
 
 #define SWAP_FILE_NAME		"/var/vm/swapfile"
 #define SWAPFILENAME_LEN	(int)(strlen(SWAP_FILE_NAME))
-#define SWAPFILENAME_INDEX_LEN	2	/* Doesn't include the terminating NULL character */
+
+char	swapfilename[MAX_SWAPFILENAME_LEN + 1];
+
 
 #define SWAP_SLOT_MASK		0x1FFFFFFFF
 #define SWAP_DEVICE_SHIFT	33
@@ -99,9 +84,12 @@ uint64_t vm_swap_get_free_space(void);
 struct vnode;
 extern void vm_swapfile_open(const char *path, struct vnode **vp);
 extern void vm_swapfile_close(uint64_t path, struct vnode *vp);
-extern int vm_swapfile_preallocate(struct vnode *vp, uint64_t *size);
+extern int vm_swapfile_preallocate(struct vnode *vp, uint64_t *size, boolean_t *pin);
 extern uint64_t vm_swapfile_get_blksize(struct vnode *vp);
 extern uint64_t vm_swapfile_get_transfer_size(struct vnode *vp);
 extern int vm_swapfile_io(struct vnode *vp, uint64_t offset, uint64_t start, int npages, int flags);
 
+#if RECORD_THE_COMPRESSED_DATA
+extern int vm_record_file_write(struct vnode *vp, uint64_t offset, char *buf, int size);
+#endif
 

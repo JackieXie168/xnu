@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2007-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2007-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -48,7 +48,6 @@ enum rpcsec_gss_service {
 	RPCSEC_GSS_SVC_NONE		= 1,	// sec=krb5
 	RPCSEC_GSS_SVC_INTEGRITY	= 2,	// sec=krb5i
 	RPCSEC_GSS_SVC_PRIVACY		= 3,	// sec=krb5p
-	RPCSEC_GSS_SVC_SYS		= 4	// sec=sys (fallback)
 };
 
 /* encoded krb5 OID */
@@ -92,11 +91,14 @@ typedef uint32_t OM_uint32;
 #define GSS_SVC_MAXCONTEXTS		500000		// Max contexts supported
 #define GSS_SVC_SEQWINDOW		256		// Server's sequence window
 #define GSS_CLNT_SEQLISTMAX		32		// Max length of req seq num list
-#define GSS_CLNT_SYS_VALID		300		// Valid time (sec) for failover ctx
 
 #define SKEYLEN	8			// length of DES key
 #define SKEYLEN3 24			// length of DES3 keyboard
 #define MAX_SKEYLEN	SKEYLEN3
+
+#define GSS_MAX_NEG_CACHE_ENTRIES 16
+#define GSS_NEG_CACHE_TO 3
+#define GSS_PRINT_DELAY	 (8 * 3600)	// Wait day before printing the same error message
 
 typedef struct {
 	uint32_t type; 		// See defines below
@@ -129,7 +131,7 @@ struct nfs_gss_clnt_ctx {
 	thread_t		gss_clnt_thread;	// Thread creating context
 	TAILQ_ENTRY(nfs_gss_clnt_ctx)	gss_clnt_entries;
 	uint32_t		gss_clnt_flags;		// Flag bits - see below
-	uint32_t		gss_clnt_refcnt;	// Reference count
+	int32_t			gss_clnt_refcnt;	// Reference count
 	kauth_cred_t		gss_clnt_cred;		// Owner of this context
 	uint8_t			*gss_clnt_principal;	// Principal to use for this credential
 	uint32_t		gss_clnt_prinlen;	// Length of principal
@@ -140,7 +142,7 @@ struct nfs_gss_clnt_ctx {
 	uint32_t		gss_clnt_service;	// Indicates krb5, krb5i or krb5p
 	uint8_t			*gss_clnt_handle;	// Identifies server context
 	uint32_t		gss_clnt_handle_len;	// Size of server's ctx handle
-	time_t			gss_clnt_ctime;		// When context was created
+	time_t			gss_clnt_nctime;	// When context was put in the negative cache
 	uint32_t		gss_clnt_seqwin;	// Server's seq num window
 	uint32_t		*gss_clnt_seqbits;	// Bitmap to track seq numbers in use
 	mach_port_t		gss_clnt_mport;		// Mach port for gssd upcall
@@ -152,10 +154,11 @@ struct nfs_gss_clnt_ctx {
 	gssd_ctx		gss_clnt_context;	// Opaque context handle from gssd
 	uint8_t			*gss_clnt_token;	// GSS token exchanged via gssd & server
 	uint32_t		gss_clnt_tokenlen;	// Length of token
-	gss_key_info		gss_clnt_kinfo;		// GSS key info
+	gss_key_info		*gss_clnt_kinfo;		// GSS key info
 	uint32_t		gss_clnt_gssd_flags;	// Special flag bits to gssd
 	uint32_t		gss_clnt_major;		// GSS major result from gssd or server
 	uint32_t		gss_clnt_minor;		// GSS minor result from gssd or server
+	time_t			gss_clnt_ptime;		// When last error message was printed
 };
 
 /*
@@ -163,9 +166,10 @@ struct nfs_gss_clnt_ctx {
  */
 #define GSS_CTX_COMPLETE	0x00000001	// Context is complete
 #define GSS_CTX_INVAL		0x00000002	// Context is invalid
-#define GSS_CTX_INCOMPLETE	0x00000004	// Context needs to be inited
+#define GSS_CTX_STICKY		0x00000004	// Context has been set by user
 #define GSS_NEEDSEQ		0x00000008	// Need a sequence number
 #define GSS_NEEDCTX		0x00000010	// Need the context
+#define GSS_CTX_DESTROY		0x00000020	// Context is being destroyed, don't cache
 
 /*
  * The server's RPCSEC_GSS context information
@@ -212,9 +216,15 @@ LIST_HEAD(nfs_gss_svc_ctx_hashhead, nfs_gss_svc_ctx);
 #define GSS_TIMER_PERIOD	300		// seconds
 #define MSECS_PER_SEC		1000
 
+#define auth_is_kerberized(auth) \
+	(auth == RPCAUTH_KRB5 || \
+	 auth == RPCAUTH_KRB5I || \
+	 auth == RPCAUTH_KRB5P)
+
 __BEGIN_DECLS
 
 void	nfs_gss_init(void);
+uid_t	nfs_cred_getasid2uid(kauth_cred_t);
 int	nfs_gss_clnt_cred_put(struct nfsreq *, struct nfsm_chain *, mbuf_t);
 int	nfs_gss_clnt_verf_get(struct nfsreq *, struct nfsm_chain *,
 		uint32_t, uint32_t, uint32_t *);
@@ -224,7 +234,9 @@ int	nfs_gss_clnt_ctx_renew(struct nfsreq *);
 void	nfs_gss_clnt_ctx_ref(struct nfsreq *, struct nfs_gss_clnt_ctx *);
 void	nfs_gss_clnt_ctx_unref(struct nfsreq *);
 void	nfs_gss_clnt_ctx_unmount(struct nfsmount *);
-int	nfs_gss_clnt_ctx_destroy(struct nfsmount *, kauth_cred_t cred);
+int	nfs_gss_clnt_ctx_remove(struct nfsmount *, kauth_cred_t);
+int	nfs_gss_clnt_ctx_set_principal(struct nfsmount *, vfs_context_t, uint8_t *, uint32_t, uint32_t);
+int	nfs_gss_clnt_ctx_get_principal(struct nfsmount *, vfs_context_t, struct user_nfs_gss_principal *);
 int	nfs_gss_svc_cred_get(struct nfsrv_descript *, struct nfsm_chain *);
 int	nfs_gss_svc_verf_put(struct nfsrv_descript *, struct nfsm_chain *);
 int	nfs_gss_svc_ctx_init(struct nfsrv_descript *, struct nfsrv_sock *, mbuf_t *);

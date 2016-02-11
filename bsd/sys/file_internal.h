@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -92,7 +92,7 @@ struct fileproc {
 	unsigned int f_flags;
 	int32_t f_iocount;
 	struct fileglob * f_fglob;
-	void *	f_waddr;
+	void *f_wset;
 };
 
 #define FILEPROC_NULL (struct fileproc *)0
@@ -155,6 +155,10 @@ typedef enum {
 #define FG_WRMMSGQ	0x10 	/* wait for the fileglob to  be removed from msgqueue */
 #define FG_PORTMADE	0x20	/* a port was at some point created for this fileglob */
 #define FG_NOSIGPIPE	0x40	/* don't deliver SIGPIPE with EPIPE return */
+#define FG_OFF_LOCKED 	0x80	/* Used as a mutex for offset changes (for vnodes) */
+#define FG_OFF_LOCKWANT 0x100	/* Somebody's wating for the lock */
+#define FG_CONFINED	0x200	/* fileglob confined to process, immutably */
+#define FG_HAS_OFDLOCK	0x400	/* Has or has had an OFD lock */
 
 struct fileglob {
 	LIST_ENTRY(fileglob) f_msglist;/* list of active files */
@@ -182,6 +186,7 @@ struct fileglob {
 	} *fg_ops;
 	off_t	fg_offset;
 	void 	*fg_data;		/* vnode or socket or SHM or semaphore */
+	void	*fg_vn_data;	/* Per fd vnode data, used for directories */
 	lck_mtx_t fg_lock;
 #if CONFIG_MACF
 	struct label *fg_label;  /* JMM - use the one in the cred? */
@@ -240,18 +245,22 @@ int open1(vfs_context_t ctx, struct nameidata *ndp, int uflags,
     int32_t *retval);
 int kqueue_body(struct proc *p, fp_allocfn_t, void *cra, int32_t *retval);
 void fg_insertuipc(struct fileglob * fg);
+boolean_t fg_insertuipc_mark(struct fileglob * fg);
 void fg_removeuipc(struct fileglob * fg);
+boolean_t fg_removeuipc_mark(struct fileglob * fg);
 void unp_gc_wait(void);
 void procfdtbl_reservefd(struct proc * p, int fd);
 void procfdtbl_markclosefd(struct proc * p, int fd);
 void procfdtbl_releasefd(struct proc * p, int fd, struct fileproc * fp);
 void procfdtbl_waitfd(struct proc * p, int fd);
 void procfdtbl_clearfd(struct proc * p, int fd);
-boolean_t filetype_issendable(file_type_t type);
+boolean_t file_issendable(struct proc * p, struct fileproc *fp);
 extern int fdgetf_noref(proc_t, int, struct fileproc **);
 extern struct fileproc *fileproc_alloc_init(void *crargs);
 extern void fileproc_free(struct fileproc *fp);
 extern void guarded_fileproc_free(struct fileproc *fp);
+extern void fg_vn_data_free(void *fgvndata);
+extern int nameiat(struct nameidata *ndp, int dirfd);
 __END_DECLS
 
 #endif /* __APPLE_API_UNSTABLE */

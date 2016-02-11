@@ -59,7 +59,6 @@
 
 #include <kern/cpu_number.h>
 #include <kern/kalloc.h>
-#include <kern/lock.h>
 #include <kern/spl.h>
 #include <kern/thread.h>
 #include <kern/assert.h>
@@ -67,10 +66,12 @@
 #include <kern/misc_protos.h>
 #include <kern/clock.h>
 #include <kern/telemetry.h>
+#include <kern/ecc.h>
+#include <kern/kern_cdata.h>
 #include <vm/vm_kern.h>
 #include <vm/pmap.h>
 #include <stdarg.h>
-#if !MACH_KDP
+#if !(MACH_KDP && CONFIG_KDP_INTERACTIVE_DEBUGGING)
 #include <kdp/kdp_udp.h>
 #endif
 
@@ -87,6 +88,11 @@
 #include <libkern/OSAtomic.h>
 #include <libkern/kernel_mach_header.h>
 #include <uuid/uuid.h>
+#include <mach_debug/zone_info.h>
+
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+#include <pexpert/pexpert.h> /* For gPanicBase */
+#endif
 
 unsigned int	halt_in_debugger = 0;
 unsigned int	switch_debugger = 0;
@@ -97,6 +103,7 @@ unsigned int 	disable_debug_output = TRUE;
 unsigned int 	systemLogDiags = FALSE;
 unsigned int 	panicDebugging = FALSE;
 unsigned int	logPanicDataToScreen = FALSE;
+unsigned int	kdebug_serial = FALSE;
 
 int mach_assert = 1;
 
@@ -111,9 +118,17 @@ unsigned long		panic_caller;
 
 #define DEBUG_BUF_SIZE (3 * PAGE_SIZE)
 
+/* debug_buf is directly linked with iBoot panic region for ARM64 targets */
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+char *debug_buf_addr = NULL;
+char *debug_buf_ptr = NULL;
+unsigned int debug_buf_size = 0;
+#else
 char debug_buf[DEBUG_BUF_SIZE];
+__used char *debug_buf_addr = debug_buf;
 char *debug_buf_ptr = debug_buf;
 unsigned int debug_buf_size = sizeof(debug_buf);
+#endif
 
 static char model_name[64];
 unsigned char *kernel_uuid;
@@ -140,7 +155,7 @@ typedef struct pasc pasc_t;
 #undef Assert
 #endif
 
-void
+void __attribute__((noinline))
 Assert(
 	const char	*file,
 	int		line,
@@ -150,6 +165,7 @@ Assert(
 	int saved_return_on_panic;
 
 	if (!mach_assert) {
+		kprintf("%s:%d non-fatal Assertion: %s", file, line, expression);
 		return;
 	}
 
@@ -202,6 +218,10 @@ panic_init(void)
 	simple_lock_init(&panic_lock, 0);
 	panic_is_inited = 1;
 	panic_caller = 0;
+
+	if (!PE_parse_boot_argn("assertions", &mach_assert, sizeof(mach_assert))) {
+		mach_assert = 1;
+	}
 }
 
 void
@@ -209,8 +229,20 @@ debug_log_init(void)
 {
 	if (debug_buf_size != 0)
 		return;
+#if (defined(__arm64__) || defined(NAND_PANIC_DEVICE)) && !defined(LEGACY_PANIC_LOGS)
+	if (!gPanicBase) {
+		printf("debug_log_init: Error!! gPanicBase is still not initialized\n");
+		return;
+	}
+	/* Shift debug buf start location and size by 8 bytes for magic header and crc value */
+	debug_buf_addr = (char*)gPanicBase + 8;
+	debug_buf_ptr = debug_buf_addr;
+	debug_buf_size = gPanicSize - 8;
+#else
+	debug_buf_addr = debug_buf;
 	debug_buf_ptr = debug_buf;
 	debug_buf_size = sizeof(debug_buf);
+#endif
 }
 
 #if defined(__i386__) || defined(__x86_64__)
@@ -234,12 +266,14 @@ void _consume_panic_args(int a __unused, ...)
     panic("panic");
 }
 
+extern unsigned int write_trace_on_panic;
+
 static spl_t
 panic_prologue(const char *str)
 {
 	spl_t	s;
 
-	if (kdebug_enable) {
+	if (write_trace_on_panic && kdebug_enable) {
 		if (get_preemption_level() == 0 && !ml_at_interrupt_context()) {
 			ml_set_interrupts_enabled(TRUE);
 			kdbg_dump_trace_to_file("/var/tmp/panic.trace");
@@ -283,7 +317,8 @@ restart:
 			nestedpanic +=1;
 			PANIC_UNLOCK();
 			Debugger("double panic");
-			printf("double panic:  We are hanging here...\n");
+			// a printf statement here was removed to avoid a panic-loop caused
+			// by a panic from printf
 			panic_stop();
 			/* NOTREACHED */
 		}
@@ -307,12 +342,16 @@ panic_epilogue(spl_t	s)
 	panicstr = (char *)0;
 	PANIC_UNLOCK();
 
+#if DEVELOPMENT || DEBUG
 	if (return_on_panic) {
 		panic_normal();
 		enable_preemption();
 		splx(s);
 		return;
 	}
+#else
+	(void)s;
+#endif
 	kdb_printf("panic: We are hanging here...\n");
 	panic_stop();
 	/* NOTREACHED */
@@ -323,6 +362,7 @@ panic(const char *str, ...)
 {
 	va_list	listp;
 	spl_t	s;
+	boolean_t	old_doprnt_hide_pointers = doprnt_hide_pointers;
 
 
 	/* panic_caller is initialized to 0.  If set, don't change it */
@@ -330,6 +370,10 @@ panic(const char *str, ...)
 		panic_caller = (unsigned long)(char *)__builtin_return_address(0);
 	
 	s = panic_prologue(str);
+
+	/* Never hide pointers from panic logs. */
+	doprnt_hide_pointers = FALSE;
+
 	kdb_printf("panic(cpu %d caller 0x%lx): ", (unsigned) paniccpu, panic_caller);
 	if (str) {
 		va_start(listp, str);
@@ -343,6 +387,9 @@ panic(const char *str, ...)
 	 */
 	panicwait = 0;
 	Debugger("panic");
+
+	doprnt_hide_pointers = old_doprnt_hide_pointers;
+
 	panic_epilogue(s);
 }
 
@@ -395,7 +442,7 @@ void
 debug_putc(char c)
 {
 	if ((debug_buf_size != 0) &&
-		((debug_buf_ptr-debug_buf) < (int)debug_buf_size)) {
+		((debug_buf_ptr-debug_buf_addr) < (int)debug_buf_size)) {
 		*debug_buf_ptr=c;
 		debug_buf_ptr++;
 	}
@@ -452,12 +499,13 @@ extern void *proc_name_address(void *p);
 
 static void
 panic_display_process_name(void) {
-	char proc_name[32] = "Unknown";
+	/* because of scoping issues len(p_comm) from proc_t is hard coded here */
+	char proc_name[17] = "Unknown";
 	task_t ctask = 0;
 	void *cbsd_info = 0;
 
 	if (ml_nofault_copy((vm_offset_t)&current_thread()->task, (vm_offset_t) &ctask, sizeof(task_t)) == sizeof(task_t))
-		if(ml_nofault_copy((vm_offset_t)&ctask->bsd_info, (vm_offset_t)&cbsd_info, sizeof(&ctask->bsd_info)) == sizeof(&ctask->bsd_info))
+		if(ml_nofault_copy((vm_offset_t)&ctask->bsd_info, (vm_offset_t)&cbsd_info, sizeof(cbsd_info)) == sizeof(cbsd_info))
 			if (cbsd_info && (ml_nofault_copy((vm_offset_t) proc_name_address(cbsd_info), (vm_offset_t) &proc_name, sizeof(proc_name)) > 0))
 				proc_name[sizeof(proc_name) - 1] = '\0';
 	kdb_printf("\nBSD process name corresponding to current thread: %s\n", proc_name);
@@ -471,7 +519,7 @@ void populate_model_name(char *model_string) {
 	strlcpy(model_name, model_string, sizeof(model_name));
 }
 
-static void panic_display_model_name(void) {
+void panic_display_model_name(void) {
 	char tmp_model_name[sizeof(model_name)];
 
 	if (ml_nofault_copy((vm_offset_t) &model_name, (vm_offset_t) &tmp_model_name, sizeof(model_name)) != sizeof(model_name))
@@ -483,7 +531,7 @@ static void panic_display_model_name(void) {
 		kdb_printf("System model name: %s\n", tmp_model_name);
 }
 
-static void panic_display_kernel_uuid(void) {
+void panic_display_kernel_uuid(void) {
 	char tmp_kernel_uuid[sizeof(kernel_uuid_string)];
 
 	if (ml_nofault_copy((vm_offset_t) &kernel_uuid_string, (vm_offset_t) &tmp_kernel_uuid, sizeof(kernel_uuid_string)) != sizeof(kernel_uuid_string))
@@ -498,6 +546,12 @@ void panic_display_kernel_aslr(void) {
 		kdb_printf("Kernel slide:     0x%016lx\n", (unsigned long) vm_kernel_slide);
 		kdb_printf("Kernel text base: %p\n", (void *) vm_kernel_stext);
 	}
+}
+
+void panic_display_hibb(void) {
+#if defined(__i386__) || defined (__x86_64__)
+	kdb_printf("__HIB  text base: %p\n", (void *) vm_hib_base);
+#endif
 }
 
 static void panic_display_uptime(void) {
@@ -524,6 +578,7 @@ __private_extern__ void panic_display_system_configuration(void) {
 		kdb_printf("\nKernel version:\n%s\n",version);
 		panic_display_kernel_uuid();
 		panic_display_kernel_aslr();
+		panic_display_hibb();
 		panic_display_pal_info();
 		panic_display_model_name();
 		panic_display_uptime();
@@ -545,6 +600,8 @@ extern long long alloc_ptepages_count;
 #endif
 
 extern boolean_t	panic_include_zprint;
+extern vm_offset_t 	panic_kext_memory_info;
+extern vm_size_t 	panic_kext_memory_size;
 
 __private_extern__ void panic_display_zprint()
 {
@@ -553,11 +610,12 @@ __private_extern__ void panic_display_zprint()
 		unsigned int	i;
 		struct zone	zone_copy;
 
+		kdb_printf("%-20s %10s %10s\n", "Zone Name", "Cur Size", "Free Size");
 		if(first_zone!=NULL) {
 			if(ml_nofault_copy((vm_offset_t)first_zone, (vm_offset_t)&zone_copy, sizeof(struct zone)) == sizeof(struct zone)) {
 				for (i = 0; i < num_zones; i++) {
 					if(zone_copy.cur_size > (1024*1024)) {
-						kdb_printf("%.20s:%lu\n",zone_copy.zone_name,(uintptr_t)zone_copy.cur_size);
+						kdb_printf("%-20s %10lu %10lu\n",zone_copy.zone_name, (uintptr_t)zone_copy.cur_size,(uintptr_t)(zone_copy.countfree * zone_copy.elem_size));
 					}	
 					
 					if(zone_copy.next_zone == NULL) {
@@ -571,19 +629,41 @@ __private_extern__ void panic_display_zprint()
 			}
 		}
 
-		kdb_printf("Kernel Stacks:%lu\n",(uintptr_t)(kernel_stack_size * stack_total));
+		kdb_printf("%-20s %10lu\n", "Kernel Stacks", (uintptr_t)(kernel_stack_size * stack_total));
 
 #if defined(__i386__) || defined (__x86_64__)
-		kdb_printf("PageTables:%lu\n",(uintptr_t)(PAGE_SIZE * inuse_ptepages_count));
+		kdb_printf("%-20s %10lu\n", "PageTables",(uintptr_t)(PAGE_SIZE * inuse_ptepages_count));
 #endif
 
-		kdb_printf("Kalloc.Large:%lu\n",(uintptr_t)kalloc_large_total);
+		kdb_printf("%-20s %10lu\n", "Kalloc.Large", (uintptr_t)kalloc_large_total);
+		if (panic_kext_memory_info) {
+			mach_memory_info_t *mem_info = (mach_memory_info_t *)panic_kext_memory_info;
+			kdb_printf("\n%-5s %10s\n", "Kmod", "Size");
+			for (i = 0; i < VM_KERN_MEMORY_COUNT + VM_KERN_COUNTER_COUNT; i++) {
+				if (((mem_info[i].flags & VM_KERN_SITE_TYPE) == VM_KERN_SITE_KMOD) && (mem_info[i].size > (1024 * 1024))) {
+					kdb_printf("%-5lld %10lld\n", mem_info[i].site, mem_info[i].size);
+				}
+			}
+		}
 	}
 }
+
+#if CONFIG_ECC_LOGGING
+__private_extern__ void panic_display_ecc_errors() 
+{
+	uint32_t count = ecc_log_get_correction_count();
+
+	if (count > 0) {
+		kdb_printf("ECC Corrections:%u\n", count);
+	}
+}
+#endif /* CONFIG_ECC_LOGGING */
 
 #if CONFIG_ZLEAKS
 extern boolean_t	panic_include_ztrace;
 extern struct ztrace* top_ztrace;
+void panic_print_symbol_name(vm_address_t search);
+
 /*
  * Prints the backtrace most suspected of being a leaker, if we paniced in the zone allocator.
  * top_ztrace and panic_include_ztrace comes from osfmk/kern/zalloc.c
@@ -592,6 +672,9 @@ __private_extern__ void panic_display_ztrace(void)
 {
 	if(panic_include_ztrace == TRUE) {
 		unsigned int i = 0;
+ 		boolean_t keepsyms = FALSE;
+
+		PE_parse_boot_argn("keepsyms", &keepsyms, sizeof (keepsyms));
 		struct ztrace top_ztrace_copy;
 		
 		/* Make sure not to trip another panic if there's something wrong with memory */
@@ -599,7 +682,11 @@ __private_extern__ void panic_display_ztrace(void)
 			kdb_printf("\nBacktrace suspected of leaking: (outstanding bytes: %lu)\n", (uintptr_t)top_ztrace_copy.zt_size);
 			/* Print the backtrace addresses */
 			for (i = 0; (i < top_ztrace_copy.zt_depth && i < MAX_ZTRACE_DEPTH) ; i++) {
-				kdb_printf("%p\n", top_ztrace_copy.zt_stack[i]);
+				kdb_printf("%p ", top_ztrace_copy.zt_stack[i]);
+				if (keepsyms) {
+					panic_print_symbol_name((vm_address_t)top_ztrace_copy.zt_stack[i]);
+				}
+				kdb_printf("\n");
 			}
 			/* Print any kexts in that backtrace, along with their link addresses so we can properly blame them */
 			kmod_panic_dump((vm_offset_t *)&top_ztrace_copy.zt_stack[0], top_ztrace_copy.zt_depth);
@@ -612,7 +699,7 @@ __private_extern__ void panic_display_ztrace(void)
 }
 #endif /* CONFIG_ZLEAKS */
 
-#if !MACH_KDP
+#if ! (MACH_KDP && CONFIG_KDP_INTERACTIVE_DEBUGGING)
 static struct kdp_ether_addr kdp_current_mac_address = {{0, 0, 0, 0, 0, 0}};
 
 /* XXX ugly forward declares to stop warnings */
@@ -622,9 +709,9 @@ void kdp_set_gateway_mac(void *);
 void kdp_set_interface(void *);
 void kdp_register_send_receive(void *, void *);
 void kdp_unregister_send_receive(void *, void *);
-void kdp_snapshot_preflight(int, void *, uint32_t, uint32_t);
+void kdp_snapshot_preflight(int, void *, uint32_t, uint32_t, kcdata_descriptor_t, boolean_t enable_faulting);
 int kdp_stack_snapshot_geterror(void);
-int kdp_stack_snapshot_bytes_traced(void);
+uint32_t kdp_stack_snapshot_bytes_traced(void);
 
 void *
 kdp_get_interface( void)
@@ -664,22 +751,11 @@ void
 kdp_unregister_send_receive(__unused void *send, __unused void *receive)
 {}
 
-void
-kdp_snapshot_preflight(__unused int pid, __unused void * tracebuf,
-		__unused uint32_t tracebuf_size, __unused uint32_t options)
+void kdp_register_link(__unused kdp_link_t link, __unused kdp_mode_t mode)
 {}
 
-int
-kdp_stack_snapshot_geterror(void)
-{       
-        return -1;
-}
-
-int
-kdp_stack_snapshot_bytes_traced(void)
-{       
-        return 0;
-}
+void kdp_unregister_link(__unused kdp_link_t link, __unused kdp_mode_t mode)
+{}
 
 #endif
 

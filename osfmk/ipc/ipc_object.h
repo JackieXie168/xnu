@@ -76,8 +76,9 @@
 
 #include <mach/kern_return.h>
 #include <mach/message.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 #include <kern/macro_help.h>
+#include <kern/assert.h>
 #include <kern/zalloc.h>
 #include <ipc/ipc_types.h>
 #include <libkern/OSAtomic.h>
@@ -101,7 +102,7 @@ struct ipc_object {
 	ipc_object_bits_t io_bits;
 	ipc_object_refs_t io_references;
 	lck_spin_t	io_lock_data;
-};
+} __attribute__((__packed__));
 
 /*
  * If another object type needs to participate in io_kotype()-based

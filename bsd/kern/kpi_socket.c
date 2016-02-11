@@ -42,7 +42,7 @@
 #include <sys/fcntl.h>
 #include <sys/filio.h>
 #include <sys/uio_internal.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 #include <netinet/in.h>
 #include <libkern/OSAtomic.h>
 
@@ -1038,14 +1038,14 @@ sock_set_tcp_stream_priority(socket_t sock)
  * Caller must have ensured socket is valid and won't be going away.
  */
 void
-socket_set_traffic_mgt_flags_locked(socket_t sock, u_int32_t flags)
+socket_set_traffic_mgt_flags_locked(socket_t sock, u_int8_t flags)
 {
-	(void) OSBitOrAtomic(flags, &sock->so_traffic_mgt_flags);
+	(void) OSBitOrAtomic8(flags, &sock->so_traffic_mgt_flags);
 	sock_set_tcp_stream_priority(sock);
 }
 
 void
-socket_set_traffic_mgt_flags(socket_t sock, u_int32_t flags)
+socket_set_traffic_mgt_flags(socket_t sock, u_int8_t flags)
 {
 	socket_lock(sock, 1);
 	socket_set_traffic_mgt_flags_locked(sock, flags);
@@ -1056,14 +1056,14 @@ socket_set_traffic_mgt_flags(socket_t sock, u_int32_t flags)
  * Caller must have ensured socket is valid and won't be going away.
  */
 void
-socket_clear_traffic_mgt_flags_locked(socket_t sock, u_int32_t flags)
+socket_clear_traffic_mgt_flags_locked(socket_t sock, u_int8_t flags)
 {
-	(void) OSBitAndAtomic(~flags, &sock->so_traffic_mgt_flags);
+	(void) OSBitAndAtomic8(~flags, &sock->so_traffic_mgt_flags);
 	sock_set_tcp_stream_priority(sock);
 }
 
 void
-socket_clear_traffic_mgt_flags(socket_t sock, u_int32_t flags)
+socket_clear_traffic_mgt_flags(socket_t sock, u_int8_t flags)
 {
 	socket_lock(sock, 1);
 	socket_clear_traffic_mgt_flags_locked(sock, flags);
@@ -1183,11 +1183,20 @@ sock_catchevents(socket_t sock, sock_evupcall ecallback, void *econtext,
 		sock->so_eventarg = econtext;
 		sock->so_eventmask = emask;
 	} else {
-		sock->so_event = NULL;
+		sock->so_event = sonullevent;
 		sock->so_eventarg = NULL;
 		sock->so_eventmask = 0;
 	}
 	socket_unlock(sock, 1);
 
 	return (0);
+}
+
+/*
+ * Returns true whether or not a socket belongs to the kernel.
+ */
+int
+sock_iskernel(socket_t so)
+{
+	return (so && so->last_pid == 0);
 }

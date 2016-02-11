@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2002-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2002-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -107,7 +107,17 @@ struct cat_attr {
 	    u_int32_t	cau_dircount;	/* count of sub dirs (for posix nlink) */
 	    u_int32_t	cau_firstlink;	/* first hardlink link (files only) */
 	} ca_union3;
-	u_int8_t 	ca_finderinfo[32]; /* Opaque Finder information */
+	union {
+		u_int8_t 	ca_finderinfo[32]; /* Opaque Finder information */
+		struct {
+			FndrFileInfo 					ca_finderfileinfo;
+			struct FndrExtendedFileInfo 	ca_finderextendedfileinfo;
+		};
+		struct {
+			FndrDirInfo 					ca_finderdirinfo;
+			struct FndrExtendedDirInfo 		ca_finderextendeddirinfo;
+		};
+	};
 };
 
 /* Aliases for common fields */
@@ -138,11 +148,18 @@ struct cat_fork {
 	u_int32_t      cf_vblocks;     /* virtual (unalloated) blocks */
 	u_int32_t      cf_blocks;      /* total blocks used by this fork */
 	struct HFSPlusExtentDescriptor  cf_extents[8];  /* initial set of extents */
+
+	/*
+	 * NOTE: If you change this structure, make sure you change you change
+	 * hfs_fork_copy.
+	 */
 };
 
 #define cf_clump	cf_union.cfu_clump
 #define cf_bytesread	cf_union.cfu_bytesread
 
+void hfs_fork_copy(struct cat_fork *dst, const struct cat_fork *src,
+				   HFSPlusExtentDescriptor *extents);
 
 /*
  * Directory Hint
@@ -353,7 +370,8 @@ extern int cat_findname (struct hfsmount *hfsmp,
 extern int cat_getentriesattr(
 			struct hfsmount *hfsmp,
 			directoryhint_t *dirhint,
-			struct cat_entrylist *ce_list);
+			struct cat_entrylist *ce_list, 
+			int *reachedeof);
 
 extern int cat_rename (	struct hfsmount * hfsmp,
 			struct cat_desc * from_cdp,
@@ -364,8 +382,8 @@ extern int cat_rename (	struct hfsmount * hfsmp,
 extern int cat_update (	struct hfsmount *hfsmp,
 			struct cat_desc *descp,
 			struct cat_attr *attrp,
-			struct cat_fork *dataforkp,
-			struct cat_fork *rsrcforkp);
+			const struct cat_fork *dataforkp,
+			const struct cat_fork *rsrcforkp);
 
 extern int cat_getdirentries(
 			struct hfsmount *hfsmp,

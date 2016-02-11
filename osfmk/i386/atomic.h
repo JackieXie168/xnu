@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009 Apple Inc. All rights reserved.
+ * Copyright (c) 2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -25,21 +25,29 @@
  * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
-#include <stdio.h>
 
-#include "kxld_test.h"
-#include "kxld_util.h"
+#ifndef _I386_ATOMIC_H_
+#define _I386_ATOMIC_H_
 
-void 
-kxld_test_log(KXLDLogSubsystem sys __unused, KXLDLogLevel level __unused,
-    const char *format, va_list ap, void *user_data __unused)
-{
-    va_list args;
+#include <i386/smp.h>
 
-    va_copy(args, ap);
-    vfprintf(stderr, format, args);
-    fprintf(stderr, "\n");
-    va_end(args);
-}
+#if	__SMP__
 
+#define memory_order_consume_smp memory_order_consume
+#define memory_order_acquire_smp memory_order_acquire
+#define memory_order_release_smp memory_order_release
+#define memory_order_acq_rel_smp memory_order_acq_rel
+#define memory_order_seq_cst_smp memory_order_seq_cst
+
+#else
+
+#define memory_order_consume_smp memory_order_relaxed
+#define memory_order_acquire_smp memory_order_relaxed
+#define memory_order_release_smp memory_order_relaxed
+#define memory_order_acq_rel_smp memory_order_relaxed
+#define memory_order_seq_cst_smp memory_order_relaxed
+
+#endif
+
+#endif // _I386_ATOMIC_H_
 

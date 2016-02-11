@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2004-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2004-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -303,26 +303,6 @@ static int bond_get_status(ifbond_ref ifb, struct if_bond_req * ibr_p,
 			   user_addr_t datap);
 
 static __inline__ int
-ifbond_flags_promisc(ifbond_ref ifb)
-{
-    return ((ifb->ifb_flags & IFBF_PROMISC) != 0);
-}
-
-static __inline__ void
-ifbond_flags_set_promisc(ifbond_ref ifb)
-{
-    ifb->ifb_flags |= IFBF_PROMISC;
-    return;
-}
-
-static __inline__ void
-ifbond_flags_clear_promisc(ifbond_ref ifb)
-{
-    ifb->ifb_flags &= ~IFBF_PROMISC;
-    return;
-}
-
-static __inline__ int
 ifbond_flags_if_detaching(ifbond_ref ifb)
 {
     return ((ifb->ifb_flags & IFBF_IF_DETACHING) != 0);
@@ -339,20 +319,6 @@ static __inline__ int
 ifbond_flags_lladdr(ifbond_ref ifb)
 {
     return ((ifb->ifb_flags & IFBF_LLADDR) != 0);
-}
-
-static __inline__ void
-ifbond_flags_set_lladdr(ifbond_ref ifb)
-{
-    ifb->ifb_flags |= IFBF_LLADDR;
-    return;
-}
-
-static __inline__ void
-ifbond_flags_clear_lladdr(ifbond_ref ifb)
-{
-    ifb->ifb_flags &= ~IFBF_LLADDR;
-    return;
 }
 
 static __inline__ int
@@ -835,6 +801,10 @@ link_speed(int active)
     case IFM_10G_SR:
     case IFM_10G_LR:
 	return (10000);
+    case IFM_2500_T:
+	return (2500);
+    case IFM_5000_T:
+	return (5000);
     }
 }
 
@@ -900,11 +870,10 @@ bond_globals_create(lacp_system_priority sys_pri,
 {
     bond_globals_ref	b;
 
-    b = _MALLOC(sizeof(*b), M_BOND, M_WAITOK);
+    b = _MALLOC(sizeof(*b), M_BOND, M_WAITOK | M_ZERO);
     if (b == NULL) {
 	return (NULL);
     }
-    bzero(b, sizeof(*b));
     TAILQ_INIT(&b->ifbond_list);
     b->system = *sys;
     b->system_priority = sys_pri;
@@ -1123,11 +1092,10 @@ bond_clone_create(struct if_clone * ifc, u_int32_t unit, __unused void *params)
 		return (error);
 	}
 	
-	ifb = _MALLOC(sizeof(ifbond), M_BOND, M_WAITOK);
+	ifb = _MALLOC(sizeof(ifbond), M_BOND, M_WAITOK | M_ZERO);
 	if (ifb == NULL) {
 		return (ENOMEM);
 	}
-	bzero(ifb, sizeof(*ifb));
 	
 	ifbond_retain(ifb);
 	TAILQ_INIT(&ifb->ifb_port_list);
@@ -1852,12 +1820,11 @@ bondport_create(struct ifnet * port_ifp, lacp_port_priority priority,
     lacp_actor_partner_state	s;
 
     *ret_error = 0;
-    p = _MALLOC(sizeof(*p), M_BOND, M_WAITOK);
+    p = _MALLOC(sizeof(*p), M_BOND, M_WAITOK | M_ZERO);
     if (p == NULL) {
 	*ret_error = ENOMEM;
 	return (NULL);
     }
-    bzero(p, sizeof(*p));
     multicast_list_init(&p->po_multicast);
     if ((u_int32_t)snprintf(p->po_name, sizeof(p->po_name), "%s%d",
 			 ifnet_name(port_ifp), ifnet_unit(port_ifp)) 
@@ -2539,7 +2506,7 @@ bond_get_status(ifbond_ref ifb, struct if_bond_req * ibr_p, user_addr_t datap)
 	    break;
 	}
 	bzero(&ibs, sizeof(ibs));
-	strncpy(ibs.ibs_if_name, port->po_name, sizeof(ibs.ibs_if_name));
+	strlcpy(ibs.ibs_if_name, port->po_name, sizeof(ibs.ibs_if_name));
 	ibs.ibs_port_priority = port->po_priority;
 	if (ifb->ifb_mode == IF_BOND_MODE_LACP) {
 	    ibs.ibs_state = port->po_actor_state;
@@ -3073,7 +3040,7 @@ interface_link_event(struct ifnet * ifp, u_int32_t event_code)
     event.header.event_code    = event_code;
     event.header.event_data[0] = ifnet_family(ifp);
     event.unit                 = (u_int32_t) ifnet_unit(ifp);
-    strncpy(event.if_name, ifnet_name(ifp), IFNAMSIZ);
+    strlcpy(event.if_name, ifnet_name(ifp), IFNAMSIZ);
     ifnet_event(ifp, &event.header);
     return;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -126,25 +126,43 @@ hfs_swap_BTNode (
     	 */
     	if (btcb->totalNodes != 0) {
 			if (srcDesc->fLink >= btcb->totalNodes) {
+#if DEVELOPMENT || DEBUG
+				panic("hfs_swap_BTNode: invalid forward link (0x%08x >= 0x%08x)\n", srcDesc->fLink, btcb->totalNodes);
+#else
 				printf("hfs_swap_BTNode: invalid forward link (0x%08x >= 0x%08x)\n", srcDesc->fLink, btcb->totalNodes);
+#endif
 				error = fsBTInvalidHeaderErr;
 				goto fail;
 			}
 			if (srcDesc->bLink >= btcb->totalNodes) {
+#if DEVELOPMENT || DEBUG
+				panic("hfs_swap_BTNode: invalid backward link (0x%08x >= 0x%08x)\n", srcDesc->bLink, btcb->totalNodes);
+#else
 				printf("hfs_swap_BTNode: invalid backward link (0x%08x >= 0x%08x)\n", srcDesc->bLink, btcb->totalNodes);
+#endif
 				error = fsBTInvalidHeaderErr;
 				goto fail;
 			}
 			
 			if ((src->blockNum != 0) && (srcDesc->fLink == (u_int32_t) src->blockNum)) {
+#if DEVELOPMENT || DEBUG
+				panic("hfs_swap_BTNode: invalid forward link (0x%08x == 0x%08x)\n",
+						srcDesc->fLink, (u_int32_t) src->blockNum);
+#else
 				printf("hfs_swap_BTNode: invalid forward link (0x%08x == 0x%08x)\n",
 						srcDesc->fLink, (u_int32_t) src->blockNum);
+#endif
 				error = fsBTInvalidHeaderErr;
 				goto fail;
 			}
 			if ((src->blockNum != 0) && (srcDesc->bLink == (u_int32_t) src->blockNum)) {
+#if DEVELOPMENT || DEBUG
+				panic("hfs_swap_BTNode: invalid backward link (0x%08x == 0x%08x)\n",
+						srcDesc->bLink, (u_int32_t) src->blockNum);
+#else
 				printf("hfs_swap_BTNode: invalid backward link (0x%08x == 0x%08x)\n",
 						srcDesc->bLink, (u_int32_t) src->blockNum);
+#endif
 				error = fsBTInvalidHeaderErr;
 				goto fail;
 			}
@@ -390,7 +408,7 @@ fail:
 		 */
 		printf("hfs: node=%lld fileID=%u volume=%s device=%s\n", src->blockNum, VTOC(vp)->c_fileid,
 			VTOVCB(vp)->vcbVN, vfs_statfs(vnode_mount(vp))->f_mntfromname);
-		hfs_mark_volume_inconsistent(VTOVCB(vp));
+		hfs_mark_inconsistent(VTOVCB(vp), HFS_INCONSISTENCY_DETECTED);
 	}
 	
     return (error);

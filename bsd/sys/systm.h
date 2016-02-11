@@ -123,6 +123,7 @@ extern const char copyright[];		/* system copyright */
 
 extern int	boothowto;	/* reboot flags, from console subsystem */
 extern int	show_space;
+extern int	minimalboot;
 
 extern int nblkdev;		/* number of entries in bdevsw */
 extern int nchrdev;		/* number of entries in cdevsw */
@@ -133,12 +134,6 @@ extern int nchrdev;		/* number of entries in cdevsw */
 extern int securelevel;		/* system security level */
 extern dev_t rootdev;		/* root device */
 extern struct vnode *rootvp;	/* vnode equivalent to above */
-
-#ifdef XNU_KERNEL_PRIVATE
-#define NO_FUNNEL 0
-#define KERNEL_FUNNEL 1
-extern funnel_t * kernel_flock;
-#endif /* XNU_KERNEL_PRIVATE */
 
 #endif /* KERNEL_PRIVATE */
 
@@ -185,7 +180,6 @@ struct time_value;
 void	get_procrustime(struct time_value *tv);
 void	load_init_program(struct proc *p);
 void __pthread_testcancel(int presyscall);
-void syscall_exit_funnelcheck(void);
 void throttle_info_get_last_io_time(mount_t mp, struct timeval *tv);
 void update_last_io_time(mount_t mp);
 #endif /* BSD_KERNEL_PRIVATE */
@@ -223,6 +217,7 @@ void	bsd_timeout(void (*)(void *), void *arg, struct timespec * ts);
 void	bsd_untimeout(void (*)(void *), void *arg);
 void	set_fsblocksize(struct vnode *);
 uint64_t tvtoabstime(struct timeval *);
+uint64_t tstoabstime(struct timespec *);
 void	*throttle_info_create(void);
 void	throttle_info_mount_ref(mount_t mp, void * throttle_info);
 void	throttle_info_mount_rel(mount_t mp);
@@ -235,7 +230,7 @@ typedef struct __throttle_info_handle *throttle_info_handle_t;
 int	throttle_info_ref_by_mask(uint64_t throttle_mask, throttle_info_handle_t *throttle_info_handle);
 void	throttle_info_rel_by_mask(throttle_info_handle_t throttle_info_handle);
 void	throttle_info_update_by_mask(void *throttle_info_handle, int flags);
-
+void 	throttle_info_disable_throttle(int devno, boolean_t isfusion);
 /*
  * 'throttle_info_handle' acquired via 'throttle_info_ref_by_mask'
  * 'policy' should be specified as either IOPOL_UTILITY or IPOL_THROTTLE,

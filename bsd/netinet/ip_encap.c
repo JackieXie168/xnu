@@ -102,9 +102,6 @@
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip_encap.h>
-#if MROUTING
-#include <netinet/ip_mroute.h>
-#endif /* MROUTING */
 
 #if INET6
 #include <netinet/ip6.h>
@@ -262,18 +259,6 @@ encap4_input(m, off)
 		return;
 	}
 
-	/* for backward compatibility */
-# if MROUTING
-#  define COMPATFUNC	ipip_input
-# endif /*MROUTING*/
-
-#if COMPATFUNC
-	if (proto == IPPROTO_IPV4) {
-		COMPATFUNC(m, off);
-		return;
-	}
-#endif
-
 	/* last resort: inject to raw socket */
 	rip_input(m, off);
 }
@@ -405,12 +390,11 @@ encap_attach(af, proto, sp, sm, dp, dm, psw, arg)
 		goto fail;
 	}
 
-	ep = _MALLOC(sizeof(*ep), M_NETADDR, M_WAITOK);	/*XXX*/
+	ep = _MALLOC(sizeof(*ep), M_NETADDR, M_WAITOK | M_ZERO); /* XXX */
 	if (ep == NULL) {
 		error = ENOBUFS;
 		goto fail;
 	}
-	bzero(ep, sizeof(*ep));
 
 	ep->af = af;
 	ep->proto = proto;
@@ -447,12 +431,11 @@ encap_attach_func(af, proto, func, psw, arg)
 		goto fail;
 	}
 
-	ep = _MALLOC(sizeof(*ep), M_NETADDR, M_WAITOK);	/*XXX*/
+	ep = _MALLOC(sizeof(*ep), M_NETADDR, M_WAITOK | M_ZERO); /* XXX */
 	if (ep == NULL) {
 		error = ENOBUFS;
 		goto fail;
 	}
-	bzero(ep, sizeof(*ep));
 
 	ep->af = af;
 	ep->proto = proto;

@@ -67,7 +67,6 @@
 #include <mach/host_priv_server.h>
 #include <kern/host.h>
 #include <kern/processor.h>
-#include <kern/lock.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/ipc_host.h>
@@ -76,6 +75,10 @@
 #include <kern/spl.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
+
+#if CONFIG_MACF
+#include <security/mac_mach_internal.h>
+#endif
 
 /*
  * Forward declarations
@@ -534,7 +537,7 @@ convert_port_to_host_security(
  */
 kern_return_t
 host_set_exception_ports(
-	host_priv_t				host_priv,
+	host_priv_t			host_priv,
 	exception_mask_t		exception_mask,
 	ipc_port_t			new_port,
 	exception_behavior_t		new_behavior,
@@ -546,8 +549,6 @@ host_set_exception_ports(
 	if (host_priv == HOST_PRIV_NULL) {
 		return KERN_INVALID_ARGUMENT;
 	}
-
-	assert(host_priv == &realhost);
 
 	if (exception_mask & ~EXC_MASK_VALID) {
 		return KERN_INVALID_ARGUMENT;
@@ -563,10 +564,22 @@ host_set_exception_ports(
 			return KERN_INVALID_ARGUMENT;
 		}
 	}
-	/* Cannot easily check "new_flavor", but that just means that
-	 * the flavor in the generated exception message might be garbage:
-	 * GIGO
+
+	/*
+	 * Check the validity of the thread_state_flavor by calling the
+	 * VALID_THREAD_STATE_FLAVOR architecture dependent macro defined in
+	 * osfmk/mach/ARCHITECTURE/thread_status.h
 	 */
+	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor))
+		return (KERN_INVALID_ARGUMENT);
+
+#if CONFIG_MACF
+	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0)
+		return KERN_NO_ACCESS;
+#endif
+
+	assert(host_priv == &realhost);
+
 	host_lock(host_priv);
 
 	for (i = FIRST_EXCEPTION; i < EXC_TYPES_COUNT; i++) {
@@ -672,7 +685,7 @@ host_get_exception_ports(
 
 kern_return_t
 host_swap_exception_ports(
-	host_priv_t				host_priv,
+	host_priv_t			host_priv,
 	exception_mask_t		exception_mask,
 	ipc_port_t			new_port,
 	exception_behavior_t		new_behavior,
@@ -706,9 +719,13 @@ host_swap_exception_ports(
 		}
 	}
 
-	/* Cannot easily check "new_flavor", but that just means that
-	 * the flavor in the generated exception message might be garbage:
-	 * GIGO */
+	if (new_flavor != 0 && !VALID_THREAD_STATE_FLAVOR(new_flavor))
+		return (KERN_INVALID_ARGUMENT);
+
+#if CONFIG_MACF
+	if (mac_task_check_set_host_exception_ports(current_task(), exception_mask) != 0)
+		return KERN_NO_ACCESS;
+#endif /* CONFIG_MACF */
 
 	host_lock(host_priv);
 

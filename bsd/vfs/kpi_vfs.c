@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -476,7 +476,7 @@ vfs_isreload(mount_t mp)
 int 
 vfs_isforce(mount_t mp)
 {
-	if ((mp->mnt_lflag & MNT_LFORCE) || (mp->mnt_kern_flag & MNTK_FRCUNMOUNT))
+	if (mp->mnt_lflag & MNT_LFORCE)
 		return(1);
 	else
 		return(0);
@@ -822,7 +822,7 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t * handle)
 	newvfstbl->vfc_vfsops = vfe->vfe_vfsops;
 	strncpy(&newvfstbl->vfc_name[0], vfe->vfe_fsname, MFSNAMELEN);
 	if ((vfe->vfe_flags & VFS_TBLNOTYPENUM))
-		newvfstbl->vfc_typenum = maxvfsconf++;
+		newvfstbl->vfc_typenum = maxvfstypenum++;
 	else
 		newvfstbl->vfc_typenum = vfe->vfe_fstypenum;
 	
@@ -872,6 +872,7 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t * handle)
 	newvfstbl->vfc_descptr = descptr;
 	newvfstbl->vfc_descsize = descsize;
 	
+	newvfstbl->vfc_sysctl = NULL;
 
 	for (i= 0; i< desccount; i++ ) {
 	opv_desc_vector_p = vfe->vfe_opvdescs[i]->opv_desc_vector_p;
@@ -941,8 +942,8 @@ vfs_fsadd(struct vfs_fsentry *vfe, vfstable_t * handle)
 	
 	*handle = vfstable_add(newvfstbl);
 
-	if (newvfstbl->vfc_typenum <= maxvfsconf )
-			maxvfsconf = newvfstbl->vfc_typenum + 1;
+	if (newvfstbl->vfc_typenum <= maxvfstypenum )
+			maxvfstypenum = newvfstbl->vfc_typenum + 1;
 
 	if (newvfstbl->vfc_vfsops->vfs_init) {
 		struct vfsconf vfsc;
@@ -1371,6 +1372,17 @@ vnode_mount(vnode_t vp)
 	return (vp->v_mount);
 }
 
+#if CONFIG_IOSCHED
+vnode_t
+vnode_mountdevvp(vnode_t vp)
+{
+	if (vp->v_mount)
+		return (vp->v_mount->mnt_devvp);
+	else
+		return ((vnode_t)0);
+}
+#endif
+
 mount_t 
 vnode_mountedhere(vnode_t vp)
 {
@@ -1742,6 +1754,52 @@ vnode_clearnoreadahead(vnode_t vp)
 	vnode_unlock(vp);
 }
 
+int
+vnode_isfastdevicecandidate(vnode_t vp)
+{
+	return ((vp->v_flag & VFASTDEVCANDIDATE)? 1 : 0);
+}
+
+void
+vnode_setfastdevicecandidate(vnode_t vp)
+{
+	vnode_lock_spin(vp);
+	vp->v_flag |= VFASTDEVCANDIDATE;
+	vnode_unlock(vp);
+}
+
+void
+vnode_clearfastdevicecandidate(vnode_t vp)
+{
+	vnode_lock_spin(vp);
+	vp->v_flag &= ~VFASTDEVCANDIDATE;
+	vnode_unlock(vp);
+}
+
+int
+vnode_isautocandidate(vnode_t vp)
+{
+	return ((vp->v_flag & VAUTOCANDIDATE)? 1 : 0);
+}
+
+void
+vnode_setautocandidate(vnode_t vp)
+{
+	vnode_lock_spin(vp);
+	vp->v_flag |= VAUTOCANDIDATE;
+	vnode_unlock(vp);
+}
+
+void
+vnode_clearautocandidate(vnode_t vp)
+{
+	vnode_lock_spin(vp);
+	vp->v_flag &= ~VAUTOCANDIDATE;
+	vnode_unlock(vp);
+}
+
+
+
 
 /* mark vnode_t to skip vflush() is SKIPSYSTEM */
 void 
@@ -1821,7 +1879,7 @@ vnode_setname(vnode_t vp, char * name)
 void 
 vnode_vfsname(vnode_t vp, char * buf)
 {
-        strncpy(buf, vp->v_mount->mnt_vtable->vfc_name, MFSNAMELEN);
+        strlcpy(buf, vp->v_mount->mnt_vtable->vfc_name, MFSNAMELEN);
 }
 
 /* return the FS type number */
@@ -2447,6 +2505,11 @@ vnode_setattr(vnode_t vp, struct vnode_attr *vap, vfs_context_t ctx)
 		goto out;
 	}
 
+	/* Never allow the setting of any unsupported superuser flags. */
+	if (VATTR_IS_ACTIVE(vap, va_flags)) {
+	    vap->va_flags &= (SF_SUPPORTED | UF_SETTABLE);
+	}
+
 	error = VNOP_SETATTR(vp, vap, ctx);
 
 	if ((error == 0) && !VATTR_ALL_SUPPORTED(vap))
@@ -2800,7 +2863,7 @@ VNOP_COMPOUND_OPEN(vnode_t dvp, vnode_t *vpp, struct nameidata *ndp, int32_t fla
 	uint32_t tmp_status = 0;
 	struct componentname *cnp = &ndp->ni_cnd;
 
-	want_create = (flags & VNOP_COMPOUND_OPEN_DO_CREATE);
+	want_create = (flags & O_CREAT);
 
 	a.a_desc = &vnop_compound_open_desc;
 	a.a_dvp = dvp;
@@ -2926,23 +2989,10 @@ struct vnop_whiteout_args {
 };
 #endif /* 0*/
 errno_t 
-VNOP_WHITEOUT(vnode_t dvp, struct componentname * cnp, int flags, vfs_context_t ctx)
+VNOP_WHITEOUT(__unused vnode_t dvp, __unused struct componentname *cnp,
+	__unused int flags, __unused vfs_context_t ctx)
 {
-	int _err;
-	struct vnop_whiteout_args a;
-
-	a.a_desc = &vnop_whiteout_desc;
-	a.a_dvp = dvp;
-	a.a_cnp = cnp;
-	a.a_flags = flags;
-	a.a_context = ctx;
-
-	_err = (*dvp->v_op[vnop_whiteout_desc.vdesc_offset])(&a);
-	DTRACE_FSINFO(whiteout, vnode_t, dvp);
-
-	post_event_if_success(dvp, _err, NOTE_WRITE);
-
-	return (_err);
+	return (ENOTSUP);	// XXX OBSOLETE
 }
 
 #if 0
@@ -3235,7 +3285,7 @@ VNOP_READ(vnode_t vp, struct uio * uio, int ioflag, vfs_context_t ctx)
 #endif
 
 	if (ctx == NULL) {
-		ctx = vfs_context_current();
+		return EINVAL;
 	}
 
 	a.a_desc = &vnop_read_desc;
@@ -3276,7 +3326,7 @@ VNOP_WRITE(vnode_t vp, struct uio * uio, int ioflag, vfs_context_t ctx)
 #endif
 
 	if (ctx == NULL) {
-		ctx = vfs_context_current();
+		return EINVAL;
 	}
 
 	a.a_desc = &vnop_write_desc;
@@ -3327,7 +3377,7 @@ VNOP_IOCTL(vnode_t vp, u_long command, caddr_t data, int fflag, vfs_context_t ct
 	 * We have to be able to use the root filesystem's device vnode even when
 	 * devfs isn't mounted (yet/anymore), so we can't go looking at its mount
 	 * structure.  If there is no data pointer, it doesn't matter whether
-	 * the device is 64-bit ready.  Any command (like DKIOCSYNCHRONIZECACHE)
+	 * the device is 64-bit ready.  Any command (like DKIOCSYNCHRONIZE)
 	 * which passes NULL for its data pointer can therefore be used during
 	 * mount or unmount of the root filesystem.
 	 *
@@ -3726,6 +3776,7 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 	char *xtoname = NULL;
 #endif /* CONFIG_APPLEDOUBLE */
 	int batched;
+	uint32_t tdfflags;	// Target directory file flags
 
 	batched = vnode_compound_rename_available(fdvp);
 
@@ -3733,6 +3784,13 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 		if (*fvpp == NULLVP) 
 			panic("Not batched, and no fvp?");
 	}
+
+#if CONFIG_SECLUDED_RENAME
+	if ((fcnp->cn_flags & CN_SECLUDE_RENAME) && 
+	    (((*fvpp)->v_mount->mnt_vtable->vfc_vfsflags & VFC_VFSVNOP_SECLUDE_RENAME) == 0)) {
+	    return ENOTSUP;
+	}
+#endif
 
 #if CONFIG_APPLEDOUBLE
 	/* 
@@ -3819,6 +3877,25 @@ vn_rename(struct vnode *fdvp, struct vnode **fvpp, struct componentname *fcnp, s
 	} else {
 		_err = VNOP_RENAME(fdvp, *fvpp, fcnp, tdvp, *tvpp, tcnp, ctx);
 	}
+
+	/*
+	 * If moved to a new directory that is restricted,
+	 * set the restricted flag on the item moved.
+	 */
+	if (_err == 0) {
+		_err = vnode_flags(tdvp, &tdfflags, ctx);
+		if (_err == 0 && (tdfflags & SF_RESTRICTED)) {
+			uint32_t fflags;
+			_err = vnode_flags(*fvpp, &fflags, ctx);
+			if (_err == 0 && !(fflags & SF_RESTRICTED)) {
+				struct vnode_attr va;
+				VATTR_INIT(&va);
+				VATTR_SET(&va, va_flags, fflags | SF_RESTRICTED);
+				_err = vnode_setattr(*fvpp, &va, ctx);
+			}
+		}
+	}
+
 #if CONFIG_MACF
 	if (_err == 0) {
 		mac_vnode_notify_rename(ctx, *fvpp, tdvp, tcnp);
@@ -4611,6 +4688,49 @@ VNOP_READDIRATTR(struct vnode *vp, struct attrlist *alist, struct uio *uio, uint
 }
 
 #if 0
+struct vnop_getttrlistbulk_args {
+	struct vnodeop_desc *a_desc;
+	vnode_t a_vp;
+	struct attrlist *a_alist;
+	struct vnode_attr *a_vap;
+	struct uio *a_uio;
+	void *a_private
+	uint64_t a_options;
+	int *a_eofflag;
+	uint32_t *a_actualcount;
+	vfs_context_t a_context;
+};
+#endif /* 0*/
+errno_t
+VNOP_GETATTRLISTBULK(struct vnode *vp, struct attrlist *alist,
+    struct vnode_attr *vap, struct uio *uio, void *private, uint64_t options,
+    int32_t *eofflag, int32_t *actualcount, vfs_context_t ctx)
+{
+	int _err;
+	struct vnop_getattrlistbulk_args a;
+#if CONFIG_DTRACE
+	user_ssize_t resid = uio_resid(uio);
+#endif
+
+	a.a_desc = &vnop_getattrlistbulk_desc;
+	a.a_vp = vp;
+	a.a_alist = alist;
+	a.a_vap = vap;
+	a.a_uio = uio;
+	a.a_private = private;
+	a.a_options = options;
+	a.a_eofflag = eofflag;
+	a.a_actualcount = actualcount;
+	a.a_context = ctx;
+
+	_err = (*vp->v_op[vnop_getattrlistbulk_desc.vdesc_offset])(&a);
+	DTRACE_FSINFO_IO(getattrlistbulk,
+	    vnode_t, vp, user_ssize_t, (resid - uio_resid(uio)));
+
+	return (_err);
+}
+
+#if 0
 /*
  *#
  *#% readlink     vp      L L L
@@ -4823,6 +4943,9 @@ VNOP_ADVLOCK(struct vnode *vp, caddr_t id, int op, struct flock *fl, int flags, 
 		if ((vp->v_flag & VLOCKLOCAL)) {
 			/* Advisory locking done at this layer */
 			_err = lf_advlock(&a);
+		} else if (flags & F_OFD_LOCK) {
+			/* Non-local locking doesn't work for OFD locks */
+			_err = err_advlock(&a);
 		} else {
 			/* Advisory locking done by underlying filesystem */
 			_err = (*vp->v_op[vnop_advlock_desc.vdesc_offset])(&a);

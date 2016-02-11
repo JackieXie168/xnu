@@ -398,6 +398,10 @@ tcq_class_create(struct tcq_if *tif, int pri, u_int32_t qlimit,
 			if (flags & TQCF_SFB)
 				cl->cl_qflags |= SFBF_FLOWCTL;
 		}
+		if (flags & TQCF_DELAYBASED) {
+			if (flags & TQCF_SFB)
+				cl->cl_qflags |= SFBF_DELAYBASED;
+		}
 		if (flags & TQCF_CLEARDSCP) {
 			if (flags & TQCF_RIO)
 				cl->cl_qflags |= RIOF_CLEARDSCP;
@@ -578,6 +582,7 @@ tcq_enqueue(struct tcq_if *tif, struct tcq_class *cl, struct mbuf *m,
 		}
 	}
 	IFCQ_INC_LEN(ifq);
+	IFCQ_INC_BYTES(ifq, len);
 
 	/* successfully queued. */
 	return (ret);
@@ -621,6 +626,7 @@ tcq_dequeue_cl(struct tcq_if *tif, struct tcq_class *cl,
 	m = tcq_getq(cl);
 	if (m != NULL) {
 		IFCQ_DEC_LEN(ifq);
+		IFCQ_DEC_BYTES(ifq, m_pktlen(m));
 		if (qempty(&cl->cl_q))
 			cl->cl_period++;
 		PKTCNTR_ADD(&cl->cl_xmitcnt, 1, m_pktlen(m));
@@ -1012,6 +1018,8 @@ tcq_setup_ifclassq(struct ifclassq *ifq, u_int32_t flags)
 		qflags |= TQCF_ECN;
 	if (flags & PKTSCHEDF_QALG_FLOWCTL)
 		qflags |= TQCF_FLOWCTL;
+	if (flags & PKTSCHEDF_QALG_DELAYBASED)
+		qflags |= TQCF_DELAYBASED;
 
 	tif = tcq_alloc(ifp, M_WAITOK, FALSE);
 	if (tif == NULL)

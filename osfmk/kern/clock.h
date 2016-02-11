@@ -122,11 +122,6 @@ extern void			machine_delay_until(uint64_t interval,
 
 extern uint32_t		hz_tick_interval;
 
-extern void		absolutetime_to_nanotime(
-					uint64_t		abstime,
-					clock_sec_t		*secs,
-					clock_nsec_t	*nanosecs);
-
 extern void		nanotime_to_absolutetime(
 					clock_sec_t		secs,
 					clock_nsec_t	nanosecs,
@@ -230,6 +225,9 @@ extern void             nanoseconds_to_absolutetime(
 							uint64_t		nanoseconds,
 							uint64_t		*result);
 
+extern uint64_t mach_absolutetime_asleep;
+extern uint64_t mach_absolutetime_last_sleep;
+
 #ifdef	KERNEL_PRIVATE
 
 /*
@@ -280,6 +278,11 @@ extern mach_timespec_t	clock_get_calendar_value(void) __OSX_AVAILABLE_BUT_DEPREC
 
 extern void				delay_for_interval(
 							uint32_t		interval,
+							uint32_t		scale_factor);
+
+extern void				delay_for_interval_with_leeway(
+							uint32_t		interval,
+							uint32_t		leeway,
 							uint32_t		scale_factor);
 
 #endif	/* KERNEL_PRIVATE */

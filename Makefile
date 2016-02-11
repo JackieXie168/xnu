@@ -1,5 +1,5 @@
 #
-# Copyright (C) 1999-2010 Apple Inc. All rights reserved.
+# Copyright (C) 1999-2013 Apple Inc. All rights reserved.
 #
 
 ifndef VERSDIR
@@ -55,15 +55,21 @@ installsrc:
 
 else ifeq ($(RC_ProjectName),libkxld)
 
+include $(MakeInc_cmd)
+
 default: install
 
 installhdrs install clean:
 	 $(MAKE) -C libkern/kxld $@ USE_APPLE_PB_SUPPORT=all
 
 installsrc:
-	pax -rw . $(SRCROOT)
+	$(_v)$(MKDIR) $(SRCROOT)
+	$(_v)$(FIND) -x . \! \( \( -name BUILD -o -name .svn -o -name .git -o -name cscope.\* -o -name \*~ \) -prune \) -print0 | $(PAX) -rw -p a -d0 $(SRCROOT)
+	$(_v)$(CHMOD) -R go+rX $(SRCROOT)
 
 else ifeq ($(RC_ProjectName),libkxld_host)
+
+include $(MakeInc_cmd)
 
 default: install
 
@@ -71,7 +77,9 @@ installhdrs install clean:
 	 $(MAKE) -C libkern/kxld $@ USE_APPLE_PB_SUPPORT=all PRODUCT_TYPE=ARCHIVE
 
 installsrc:
-	pax -rw . $(SRCROOT)
+	$(_v)$(MKDIR) $(SRCROOT)
+	$(_v)$(FIND) -x . \! \( \( -name BUILD -o -name .svn -o -name .git -o -name cscope.\* -o -name \*~ \) -prune \) -print0 | $(PAX) -rw -p a -d0 $(SRCROOT)
+	$(_v)$(CHMOD) -R go+rX $(SRCROOT)
 
 else ifeq ($(RC_ProjectName),libkmod)
 
@@ -92,12 +100,25 @@ installsrc:
 	pax -rw . $(SRCROOT)
 
 else ifeq ($(RC_ProjectName),xnu_quick_test)
+# This rule should be removed once rdar://22820602 is complete.
+default: install
+
+installhdrs:
+
+install: xnu_tests
+
+clean:
+
+installsrc:
+	pax -rw . $(SRCROOT)
+
+else ifeq ($(RC_ProjectName),xnu_tests)
 
 default: install
 
 installhdrs:
 
-install: xnu_quick_test
+install: xnu_tests
 
 clean:
 
@@ -118,23 +139,58 @@ _v = @
 endif
 
 #
-# Setup for parallel sub-makes based on 2 times number of logical CPUs.
+# Setup for parallel sub-makes, taking into account physical and logical
+# CPUs. If the system does not support SMT, use N+1.
 # If MAKEJOBS or -jN is passed on the make line, that takes precedence.
 #
-MAKEJOBS := --jobs=$(shell expr `/usr/sbin/sysctl -n hw.physicalcpu` \* 2)
+export SYSCTL_HW_PHYSICALCPU := $(shell /usr/sbin/sysctl -n hw.physicalcpu)
+export SYSCTL_HW_LOGICALCPU  := $(shell /usr/sbin/sysctl -n hw.logicalcpu)
+ifeq ($(SYSCTL_HW_PHYSICALCPU),$(SYSCTL_HW_LOGICALCPU))
+MAKEJOBS := --jobs=$(shell expr $(SYSCTL_HW_PHYSICALCPU) + 1)
+else
+MAKEJOBS := --jobs=$(SYSCTL_HW_LOGICALCPU)
+endif
 
-TOP_TARGETS = clean installsrc installhdrs installhdrs_embedded installman exporthdrs setup build all all_embedded install install_embedded installopensource cscope tags help print_exports print_exports_first_build_config
+TOP_TARGETS = 								\
+	clean 								\
+	installsrc 							\
+	exporthdrs 							\
+	all all_desktop all_embedded					\
+	all_release_embedded all_development_embedded 			\
+	installhdrs installhdrs_desktop installhdrs_embedded 		\
+	installhdrs_release_embedded installhdrs_development_embedded 	\
+	install install_desktop install_embedded 			\
+	install_release_embedded install_development_embedded 		\
+	installopensource 						\
+	cscope tags TAGS reindent					\
+	help
+
+DEFAULT_TARGET = all
+
+# Targets for internal build system debugging
+TOP_TARGETS += 						\
+	print_exports print_exports_first_build_config	\
+	setup 						\
+	build						\
+	config						\
+	install_textfiles				\
+	install_config
+
+ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
+MAKEARGS += -B
+DEFAULT_TARGET := build
+endif
 
 .PHONY: $(TOP_TARGETS)
 
-default: all
+default: $(DEFAULT_TARGET)
 
 ifneq ($(REMOTEBUILD),)
 $(TOP_TARGETS):
-	$(_v)$(VERSDIR)/tools/remote_build.sh _REMOTEBUILD_TARGET=$@ _REMOTEBUILD_MAKE=$(MAKE) $(MAKEFLAGS)
+	$(_v)$(VERSDIR)/tools/remote_build.sh _REMOTEBUILD_TARGET=$@ _REMOTEBUILD_MAKE=$(MAKE) $(if $(filter --,$(MAKEFLAGS)),-,)$(MAKEFLAGS)
 else
 $(TOP_TARGETS):
-	$(_v)$(MAKE) -r $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) -f $(MakeInc_top) $@
+	$(_v)$(MAKE) $(MAKEARGS) -r $(if $(filter -j,$(MAKEFLAGS)),,$(MAKEJOBS)) -f $(MakeInc_top) $@
 endif
 
 else # CURRENT_BUILD_CONFIG
@@ -156,22 +212,24 @@ CONFIG_SUBDIRS = config tools
 
 INSTINC_SUBDIRS = $(ALL_SUBDIRS) EXTERNAL_HEADERS
 INSTINC_SUBDIRS_X86_64 = $(INSTINC_SUBDIRS)
+INSTINC_SUBDIRS_X86_64H = $(INSTINC_SUBDIRS)
 INSTINC_SUBDIRS_ARM = $(INSTINC_SUBDIRS)
+INSTINC_SUBDIRS_ARM64 = $(INSTINC_SUBDIRS)
 
 EXPINC_SUBDIRS = $(ALL_SUBDIRS)
 EXPINC_SUBDIRS_X86_64 = $(EXPINC_SUBDIRS)
+EXPINC_SUBDIRS_X86_64H = $(EXPINC_SUBDIRS)
 EXPINC_SUBDIRS_ARM = $(EXPINC_SUBDIRS)
+EXPINC_SUBDIRS_ARM64 = $(EXPINC_SUBDIRS)
 
 SETUP_SUBDIRS = SETUP
 
 COMP_SUBDIRS_X86_64 = $(ALL_SUBDIRS)
+COMP_SUBDIRS_X86_64H = $(ALL_SUBDIRS)
 COMP_SUBDIRS_ARM = $(ALL_SUBDIRS)
+COMP_SUBDIRS_ARM64 = $(ALL_SUBDIRS)
 
-INST_SUBDIRS =	\
-	bsd	\
-	config
-
-INSTMAN_SUBDIRS = \
+INSTTEXTFILES_SUBDIRS =	\
 	bsd
 
 include $(MakeInc_kernel)
@@ -182,11 +240,21 @@ endif # CURRENT_BUILD_CONFIG
 
 endif # all other RC_ProjectName
 
-# "xnu_quick_test" and "testbots" are targets that can be invoked via a standalone
-# "make xnu_quick_test" or via buildit/XBS with the RC_ProjectName=xnu_quick_test.
+installhdrs_libkdd install_libkdd:
+	cd libkdd; \
+		xcodebuild $(subst _libkdd,,$@) 	\
+			"SRCROOT=$(SRCROOT)/libkdd"		\
+			"OBJROOT=$(OBJROOT)" 			\
+			"SYMROOT=$(SYMROOT)" 			\
+			"DSTROOT=$(DSTROOT)"			\
+			"SDKROOT=$(SDKROOT)"
+
+
+# "xnu_tests" and "testbots" are targets that can be invoked via a standalone
+# "make xnu_tests" or via buildit/XBS with the RC_ProjectName=xnu_tests.
 # Define the target here in the outermost scope of the initial Makefile
 
-xnu_quick_test:
+xnu_tests xnu_quick_test:
 	$(MAKE) -C $(SRCROOT)/tools/tests					\
 		SRCROOT=$(SRCROOT)/tools/tests
 

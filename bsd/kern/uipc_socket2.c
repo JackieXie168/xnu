@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 1998-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -86,6 +86,7 @@
 #include <sys/ev.h>
 #include <kern/locks.h>
 #include <net/route.h>
+#include <net/content_filter.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <sys/kdebug.h>
@@ -97,11 +98,18 @@
 
 #include <mach/vm_param.h>
 
-/* TODO: this should be in a header file somewhere */
-extern void postevent(struct socket *, struct sockbuf *, int);
+#if MPTCP
+#include <netinet/mptcp_var.h>
+#endif
 
 #define	DBG_FNC_SBDROP		NETDBG_CODE(DBG_NETSOCK, 4)
 #define	DBG_FNC_SBAPPEND	NETDBG_CODE(DBG_NETSOCK, 5)
+
+SYSCTL_DECL(_kern_ipc);
+
+__private_extern__ u_int32_t net_io_policy_throttle_best_effort = 0;
+SYSCTL_INT(_kern_ipc, OID_AUTO, throttle_best_effort,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &net_io_policy_throttle_best_effort, 0, "");
 
 static inline void sbcompress(struct sockbuf *, struct mbuf *, struct mbuf *);
 static struct socket *sonewconn_internal(struct socket *, int);
@@ -127,7 +135,10 @@ u_int32_t	sb_max = SB_MAX;		/* XXX should be static */
 u_int32_t	high_sb_max = SB_MAX;
 
 static	u_int32_t sb_efficiency = 8;	/* parameter for sbreserve() */
-__private_extern__ int32_t total_sbmb_cnt = 0;
+int32_t total_sbmb_cnt __attribute__((aligned(8))) = 0;
+int32_t total_sbmb_cnt_peak __attribute__((aligned(8))) = 0;
+int32_t total_snd_byte_count __attribute__((aligned(8))) = 0;
+int64_t sbmb_limreached __attribute__((aligned(8))) = 0;
 
 /* Control whether to throttle sockets eligible to be throttled */
 __private_extern__ u_int32_t net_io_policy_throttled = 0;
@@ -185,6 +196,8 @@ soisconnected(struct socket *so)
 	so->so_state &= ~(SS_ISCONNECTING|SS_ISDISCONNECTING|SS_ISCONFIRMING);
 	so->so_state |= SS_ISCONNECTED;
 
+	soreserve_preconnect(so, 0);
+
 	sflt_notify(so, sock_evt_connected, NULL);
 
 	if (head && (so->so_state & SS_INCOMP)) {
@@ -214,6 +227,15 @@ soisconnected(struct socket *so)
 	}
 }
 
+boolean_t
+socanwrite(struct socket *so)
+{
+	return ((so->so_state & SS_ISCONNECTED) ||
+	       !(so->so_proto->pr_flags & PR_CONNREQUIRED) ||
+	       (so->so_flags1 & SOF1_PRECONNECT_DATA));
+
+}
+
 void
 soisdisconnecting(struct socket *so)
 {
@@ -237,6 +259,11 @@ soisdisconnected(struct socket *so)
 	wakeup((caddr_t)&so->so_timeo);
 	sowwakeup(so);
 	sorwakeup(so);
+
+#if CONTENT_FILTER
+	/* Notify content filters as soon as we cannot send/receive data */
+	cfil_sock_notify_shutdown(so, SHUT_RDWR);
+#endif /* CONTENT_FILTER */
 }
 
 /*
@@ -254,6 +281,11 @@ sodisconnectwakeup(struct socket *so)
 	wakeup((caddr_t)&so->so_timeo);
 	sowwakeup(so);
 	sorwakeup(so);
+
+#if CONTENT_FILTER
+	/* Notify content filters as soon as we cannot send/receive data */
+	cfil_sock_notify_shutdown(so, SHUT_RDWR);
+#endif /* CONTENT_FILTER */
 }
 
 /*
@@ -576,6 +608,20 @@ sowakeup(struct socket *so, struct sockbuf *sb)
 		    so->so_upcallusecount == 0)
 			wakeup((caddr_t)&so->so_upcallusecount);
 	}
+#if CONTENT_FILTER
+	/*
+	 * Trap disconnection events for content filters
+	 */
+	if ((so->so_flags & SOF_CONTENT_FILTER) != 0) {
+		if ((sb->sb_flags & SB_RECV)) {
+			if (so->so_state & (SS_CANTRCVMORE))
+				cfil_sock_notify_shutdown(so, SHUT_RD);
+		} else {
+			if (so->so_state & (SS_CANTSENDMORE))
+				cfil_sock_notify_shutdown(so, SHUT_WR);
+		}
+	}
+#endif /* CONTENT_FILTER */
 }
 
 /*
@@ -641,6 +687,14 @@ bad2:
 	sbrelease(&so->so_snd);
 bad:
 	return (ENOBUFS);
+}
+
+void
+soreserve_preconnect(struct socket *so, unsigned int pre_cc)
+{
+	/* As of now, same bytes for both preconnect read and write */
+	so->so_snd.sb_preconn_hiwat = pre_cc;
+	so->so_rcv.sb_preconn_hiwat = pre_cc;
 }
 
 /*
@@ -719,14 +773,22 @@ sbappend(struct sockbuf *sb, struct mbuf *m)
 	if (sb->sb_lastrecord != NULL && (sb->sb_mbtail->m_flags & M_EOR))
 		return (sbappendrecord(sb, m));
 
-	if (sb->sb_flags & SB_RECV) {
+	if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
 		int error = sflt_data_in(so, NULL, &m, NULL, 0);
 		SBLASTRECORDCHK(sb, "sbappend 2");
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+#endif /* CONTENT_FILTER */
+
 		if (error != 0) {
 			if (error != EJUSTRETURN)
 				m_freem(m);
 			return (0);
 		}
+	} else if (m) {
+		m->m_flags &= ~M_SKIPCFIL;
 	}
 
 	/* If this is the first record, it's also the last record */
@@ -760,14 +822,22 @@ sbappendstream(struct sockbuf *sb, struct mbuf *m)
 
 	SBLASTMBUFCHK(sb, __func__);
 
-	if (sb->sb_flags & SB_RECV) {
+	if (sb->sb_flags & SB_RECV && !(m && m->m_flags & M_SKIPCFIL)) {
 		int error = sflt_data_in(so, NULL, &m, NULL, 0);
 		SBLASTRECORDCHK(sb, "sbappendstream 1");
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(so, NULL, m, NULL, 0);
+#endif /* CONTENT_FILTER */
+
 		if (error != 0) {
 			if (error != EJUSTRETURN)
 				m_freem(m);
 			return (0);
 		}
+	} else if (m) {
+		m->m_flags &= ~M_SKIPCFIL;
 	}
 
 	sbcompress(sb, m, sb->sb_mbtail);
@@ -821,11 +891,14 @@ sblastrecordchk(struct sockbuf *sb, const char *where)
 		m = m->m_nextpkt;
 
 	if (m != sb->sb_lastrecord) {
-		printf("sblastrecordchk: mb %p lastrecord %p last %p\n",
-		    sb->sb_mb, sb->sb_lastrecord, m);
+		printf("sblastrecordchk: mb 0x%llx lastrecord 0x%llx "
+		    "last 0x%llx\n",
+		    (uint64_t)VM_KERNEL_ADDRPERM(sb->sb_mb),
+		    (uint64_t)VM_KERNEL_ADDRPERM(sb->sb_lastrecord),
+		    (uint64_t)VM_KERNEL_ADDRPERM(m));
 		printf("packet chain:\n");
 		for (m = sb->sb_mb; m != NULL; m = m->m_nextpkt)
-			printf("\t%p\n", m);
+			printf("\t0x%llx\n", (uint64_t)VM_KERNEL_ADDRPERM(m));
 		panic("sblastrecordchk from %s", where);
 	}
 }
@@ -843,13 +916,16 @@ sblastmbufchk(struct sockbuf *sb, const char *where)
 		m = m->m_next;
 
 	if (m != sb->sb_mbtail) {
-		printf("sblastmbufchk: mb %p mbtail %p last %p\n",
-		    sb->sb_mb, sb->sb_mbtail, m);
+		printf("sblastmbufchk: mb 0x%llx mbtail 0x%llx last 0x%llx\n",
+		    (uint64_t)VM_KERNEL_ADDRPERM(sb->sb_mb),
+		    (uint64_t)VM_KERNEL_ADDRPERM(sb->sb_mbtail),
+		    (uint64_t)VM_KERNEL_ADDRPERM(m));
 		printf("packet tree:\n");
 		for (m = sb->sb_mb; m != NULL; m = m->m_nextpkt) {
 			printf("\t");
 			for (n = m; n != NULL; n = n->m_next)
-				printf("%p ", n);
+				printf("0x%llx ",
+				    (uint64_t)VM_KERNEL_ADDRPERM(n));
 			printf("\n");
 		}
 		panic("sblastmbufchk from %s", where);
@@ -879,15 +955,23 @@ sbappendrecord(struct sockbuf *sb, struct mbuf *m0)
 		return (0);
 	}
 
-	if (sb->sb_flags & SB_RECV) {
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
 		    sock_data_filt_flag_record);
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0);
+#endif /* CONTENT_FILTER */
+
 		if (error != 0) {
 			SBLASTRECORDCHK(sb, "sbappendrecord 1");
 			if (error != EJUSTRETURN)
 				m_freem(m0);
 			return (0);
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	/*
@@ -930,17 +1014,25 @@ sbinsertoob(struct sockbuf *sb, struct mbuf *m0)
 
 	SBLASTRECORDCHK(sb, "sbinsertoob 1");
 
-	if ((sb->sb_flags & SB_RECV) != 0) {
+	if ((sb->sb_flags & SB_RECV && !(m0->m_flags & M_SKIPCFIL)) != 0) {
 		int error = sflt_data_in(sb->sb_so, NULL, &m0, NULL,
 		    sock_data_filt_flag_oob);
 
 		SBLASTRECORDCHK(sb, "sbinsertoob 2");
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(sb->sb_so, NULL, m0, NULL, 0);
+#endif /* CONTENT_FILTER */
+
 		if (error) {
 			if (error != EJUSTRETURN) {
 				m_freem(m0);
 			}
 			return (0);
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	for (mp = &sb->sb_mb; *mp; mp = &((*mp)->m_nextpkt)) {
@@ -1075,10 +1167,17 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 	}
 
 	/* Call socket data in filters */
-	if ((sb->sb_flags & SB_RECV) != 0) {
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 		int error;
 		error = sflt_data_in(sb->sb_so, asa, &m0, &control, 0);
 		SBLASTRECORDCHK(sb, __func__);
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(sb->sb_so, asa, m0, control,
+			    0);
+#endif /* CONTENT_FILTER */
+
 		if (error) {
 			if (error != EJUSTRETURN) {
 				if (m0)
@@ -1090,6 +1189,8 @@ sbappendaddr(struct sockbuf *sb, struct sockaddr *asa, struct mbuf *m0,
 			}
 			return (0);
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	result = sbappendaddr_internal(sb, asa, m0, control);
@@ -1168,11 +1269,18 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf	*m0, struct mbuf *control,
 		return (0);
 	}
 
-	if (sb->sb_flags & SB_RECV) {
+	if (sb->sb_flags & SB_RECV && !(m0 && m0->m_flags & M_SKIPCFIL)) {
 		int error;
 
 		error = sflt_data_in(sb->sb_so, NULL, &m0, &control, 0);
 		SBLASTRECORDCHK(sb, __func__);
+
+#if CONTENT_FILTER
+		if (error == 0)
+			error = cfil_sock_data_in(sb->sb_so, NULL, m0, control,
+			    0);
+#endif /* CONTENT_FILTER */
+
 		if (error) {
 			if (error != EJUSTRETURN) {
 				if (m0)
@@ -1184,6 +1292,8 @@ sbappendcontrol(struct sockbuf *sb, struct mbuf	*m0, struct mbuf *control,
 			}
 			return (0);
 		}
+	} else if (m0) {
+		m0->m_flags &= ~M_SKIPCFIL;
 	}
 
 	result = sbappendcontrol_internal(sb, m0, control);
@@ -1232,10 +1342,9 @@ sbappendmsgstream_rcv(struct sockbuf *sb, struct mbuf *m, uint32_t seqnum,
 			m_eor->m_flags |= M_UNORDERED_DATA;
 			data_len += m_eor->m_len;
 			so->so_msg_state->msg_uno_bytes += m_eor->m_len;
-		} else  {
+		} else {
 			m_eor->m_flags &= ~M_UNORDERED_DATA;
 		}
-
 		if (m_eor->m_next == NULL)
 			break;
 	}
@@ -1253,7 +1362,15 @@ sbappendmsgstream_rcv(struct sockbuf *sb, struct mbuf *m, uint32_t seqnum,
 		    __func__);
 	}
 
-	ret = sbappendrecord(sb, m);
+	if (!unordered && (sb->sb_mbtail != NULL) &&
+		!(sb->sb_mbtail->m_flags & M_UNORDERED_DATA)) {
+		sb->sb_mbtail->m_flags &= ~M_EOR;
+		sbcompress(sb, m, sb->sb_mbtail);
+		ret = 1;
+	} else {
+		ret = sbappendrecord(sb, m);
+	}
+	VERIFY(sb->sb_mbtail->m_flags & M_EOR);
 	return (ret);
 }
 
@@ -1314,7 +1431,8 @@ sbappendmptcpstream_rcv(struct sockbuf *sb, struct mbuf *m)
 
 	SBLASTMBUFCHK(sb, __func__);
 
-	mptcp_adj_rmap(so, m);
+	if (mptcp_adj_rmap(so, m) != 0)
+		return (0);
 
 	/* No filter support (SB_RECV) on mptcp subflow sockets */
 
@@ -1719,7 +1837,8 @@ sbdrop(struct sockbuf *sb, int len)
 	    (!(sb->sb_flags & SB_RECV)) &&
 	    ((sb->sb_so->so_flags & SOF_MP_SUBFLOW) ||
 	    ((SOCK_CHECK_DOM(sb->sb_so, PF_MULTIPATH)) &&
-	    (SOCK_CHECK_PROTO(sb->sb_so, IPPROTO_TCP))))) {
+	    (SOCK_CHECK_PROTO(sb->sb_so, IPPROTO_TCP)))) &&
+	    (!(sb->sb_so->so_flags1 & SOF1_POST_FALLBACK_SYNC))) {
 		mptcp_preproc_sbdrop(m, (unsigned int)len);
 	}
 #endif /* MPTCP */
@@ -1803,6 +1922,10 @@ sbdrop(struct sockbuf *sb, int len)
 	} else if (m->m_nextpkt == NULL) {
 		sb->sb_lastrecord = m;
 	}
+
+#if CONTENT_FILTER
+	cfil_sock_buf_update(sb);
+#endif /* CONTENT_FILTER */
 
 	postevent(0, sb, EV_RWBYTES);
 
@@ -1939,10 +2062,10 @@ pru_connect2_notsupp(struct socket *so1, struct socket *so2)
 int
 pru_connectx_notsupp(struct socket *so, struct sockaddr_list **src_sl,
     struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
-    associd_t aid, connid_t *pcid, uint32_t flags, void *arg,
-    uint32_t arglen)
+    sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
+    uint32_t arglen, struct uio *uio, user_ssize_t *bytes_written)
 {
-#pragma unused(so, src_sl, dst_sl, p, ifscope, aid, pcid, flags, arg, arglen)
+#pragma unused(so, src_sl, dst_sl, p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written)
 	return (EOPNOTSUPP);
 }
 
@@ -1969,7 +2092,7 @@ pru_disconnect_notsupp(struct socket *so)
 }
 
 int
-pru_disconnectx_notsupp(struct socket *so, associd_t aid, connid_t cid)
+pru_disconnectx_notsupp(struct socket *so, sae_associd_t aid, sae_connid_t cid)
 {
 #pragma unused(so, aid, cid)
 	return (EOPNOTSUPP);
@@ -1983,7 +2106,7 @@ pru_listen_notsupp(struct socket *so, struct proc *p)
 }
 
 int
-pru_peeloff_notsupp(struct socket *so, associd_t aid, struct socket **psop)
+pru_peeloff_notsupp(struct socket *so, sae_associd_t aid, struct socket **psop)
 {
 #pragma unused(so, aid, psop)
 	return (EOPNOTSUPP);
@@ -2012,6 +2135,14 @@ pru_rcvoob_notsupp(struct socket *so, struct mbuf *m, int flags)
 
 int
 pru_send_notsupp(struct socket *so, int flags, struct mbuf *m,
+    struct sockaddr *addr, struct mbuf *control, struct proc *p)
+{
+#pragma unused(so, flags, m, addr, control, p)
+	return (EOPNOTSUPP);
+}
+
+int
+pru_send_list_notsupp(struct socket *so, int flags, struct mbuf *m,
     struct sockaddr *addr, struct mbuf *control, struct proc *p)
 {
 #pragma unused(so, flags, m, addr, control, p)
@@ -2050,10 +2181,26 @@ pru_sosend_notsupp(struct socket *so, struct sockaddr *addr, struct uio *uio,
 }
 
 int
+pru_sosend_list_notsupp(struct socket *so, struct uio **uio,
+    u_int uiocnt, int flags)
+{
+#pragma unused(so, uio, uiocnt, flags)
+	return (EOPNOTSUPP);
+}
+
+int
 pru_soreceive_notsupp(struct socket *so, struct sockaddr **paddr,
     struct uio *uio, struct mbuf **mp0, struct mbuf **controlp, int *flagsp)
 {
 #pragma unused(so, paddr, uio, mp0, controlp, flagsp)
+	return (EOPNOTSUPP);
+}
+
+int
+pru_soreceive_list_notsupp(struct socket *so, 
+    struct recv_msg_elem *recv_msg_array, u_int uiocnt, int *flagsp)
+{
+#pragma unused(so, recv_msg_array, uiocnt, flagsp)
 	return (EOPNOTSUPP);
 }
 
@@ -2088,6 +2235,13 @@ pru_socheckopt_null(struct socket *so, struct sockopt *sopt)
 	return (0);
 }
 
+static int
+pru_preconnect_null(struct socket *so)
+{
+#pragma unused(so)
+	return (0);
+}
+
 void
 pru_sanitize(struct pr_usrreqs *pru)
 {
@@ -2109,13 +2263,17 @@ pru_sanitize(struct pr_usrreqs *pru)
 	DEFAULT(pru->pru_rcvd, pru_rcvd_notsupp);
 	DEFAULT(pru->pru_rcvoob, pru_rcvoob_notsupp);
 	DEFAULT(pru->pru_send, pru_send_notsupp);
+	DEFAULT(pru->pru_send_list, pru_send_list_notsupp);
 	DEFAULT(pru->pru_sense, pru_sense_null);
 	DEFAULT(pru->pru_shutdown, pru_shutdown_notsupp);
 	DEFAULT(pru->pru_sockaddr, pru_sockaddr_notsupp);
 	DEFAULT(pru->pru_sopoll, pru_sopoll_notsupp);
 	DEFAULT(pru->pru_soreceive, pru_soreceive_notsupp);
+	DEFAULT(pru->pru_soreceive_list, pru_soreceive_list_notsupp);
 	DEFAULT(pru->pru_sosend, pru_sosend_notsupp);
+	DEFAULT(pru->pru_sosend_list, pru_sosend_list_notsupp);
 	DEFAULT(pru->pru_socheckopt, pru_socheckopt_null);
+	DEFAULT(pru->pru_preconnect, pru_preconnect_null);
 #undef DEFAULT
 }
 
@@ -2143,10 +2301,24 @@ sb_notify(struct sockbuf *sb)
 int
 sbspace(struct sockbuf *sb)
 {
+	int pending = 0;
 	int space = imin((int)(sb->sb_hiwat - sb->sb_cc),
 	    (int)(sb->sb_mbmax - sb->sb_mbcnt));
+
+	if (sb->sb_preconn_hiwat != 0)
+		space = imin((int)(sb->sb_preconn_hiwat - sb->sb_cc), space);
+
 	if (space < 0)
 		space = 0;
+
+	/* Compensate for data being processed by content filters */
+#if CONTENT_FILTER
+	pending = cfil_sock_data_space(sb);
+#endif /* CONTENT_FILTER */
+	if (pending > space)
+		space = 0;
+	else
+		space -= pending;
 
 	return (space);
 }
@@ -2160,11 +2332,15 @@ msgq_sbspace(struct socket *so, struct mbuf *control)
 {
 	int space = 0, error;
 	u_int32_t msgpri;
-	VERIFY(so->so_type == SOCK_STREAM && SOCK_PROTO(so) == IPPROTO_TCP &&
-	    control != NULL);
-	error = tcp_get_msg_priority(control, &msgpri);
-	if (error)
-		return (0);
+	VERIFY(so->so_type == SOCK_STREAM &&
+		SOCK_PROTO(so) == IPPROTO_TCP);
+	if (control != NULL) {
+		error = tcp_get_msg_priority(control, &msgpri);
+		if (error)
+			return (0);
+	} else {
+		msgpri = MSG_PRI_0;
+	}
 	space = (so->so_snd.sb_idealsize / MSG_PRI_COUNT) -
 	    so->so_msg_state->msg_priq[msgpri].msgq_bytes;
 	if (space < 0)
@@ -2184,7 +2360,11 @@ int
 soreadable(struct socket *so)
 {
 	return (so->so_rcv.sb_cc >= so->so_rcv.sb_lowat ||
-	    (so->so_state & SS_CANTRCVMORE) ||
+	    ((so->so_state & SS_CANTRCVMORE)
+#if CONTENT_FILTER
+	    && cfil_sock_data_pending(&so->so_rcv) == 0
+#endif /* CONTENT_FILTER */
+	    ) ||
 	    so->so_comp.tqh_first || so->so_error);
 }
 
@@ -2193,12 +2373,35 @@ soreadable(struct socket *so)
 int
 sowriteable(struct socket *so)
 {
-	return ((!so_wait_for_if_feedback(so) &&
-	    sbspace(&(so)->so_snd) >= (so)->so_snd.sb_lowat &&
-	    ((so->so_state & SS_ISCONNECTED) ||
-	    (so->so_proto->pr_flags & PR_CONNREQUIRED) == 0)) ||
-	    (so->so_state & SS_CANTSENDMORE) ||
-	    so->so_error);
+	if ((so->so_state & SS_CANTSENDMORE) ||
+	    so->so_error > 0)
+		return (1);
+	if (so_wait_for_if_feedback(so) || !socanwrite(so))
+		return (0);
+	if (so->so_flags1 & SOF1_PRECONNECT_DATA)
+		return(1);
+
+	if (sbspace(&(so)->so_snd) >= (so)->so_snd.sb_lowat) {
+		if (so->so_flags & SOF_NOTSENT_LOWAT) {
+			if ((SOCK_DOM(so) == PF_INET6 ||
+			    SOCK_DOM(so) == PF_INET) &&
+			    so->so_type == SOCK_STREAM) {
+				return (tcp_notsent_lowat_check(so));
+			}
+#if MPTCP
+			else if ((SOCK_DOM(so) == PF_MULTIPATH) &&
+			    (SOCK_PROTO(so) == IPPROTO_TCP)) {
+				return (mptcp_notsent_lowat_check(so));
+			}
+#endif
+			else {
+				return (1);
+			}
+		} else {
+			return (1);
+		}
+	}
+	return (0);
 }
 
 /* adjust counters in sb reflecting allocation of m */
@@ -2219,6 +2422,15 @@ sballoc(struct sockbuf *sb, struct mbuf *m)
 	}
 	OSAddAtomic(cnt, &total_sbmb_cnt);
 	VERIFY(total_sbmb_cnt > 0);
+	if (total_sbmb_cnt > total_sbmb_cnt_peak)
+		total_sbmb_cnt_peak = total_sbmb_cnt;
+
+	/*
+	 * If data is being appended to the send socket buffer,
+	 * update the send byte count
+	 */
+	if (!(sb->sb_flags & SB_RECV))
+		OSAddAtomic(cnt, &total_snd_byte_count);
 }
 
 /* adjust counters in sb reflecting freeing of m */
@@ -2238,6 +2450,14 @@ sbfree(struct sockbuf *sb, struct mbuf *m)
 	}
 	OSAddAtomic(cnt, &total_sbmb_cnt);
 	VERIFY(total_sbmb_cnt >= 0);
+
+	/*
+	 * If data is being removed from the send socket buffer,
+	 * update the send byte count
+	 */
+	if (!(sb->sb_flags & SB_RECV)) {
+		OSAddAtomic(cnt, &total_snd_byte_count);
+	}
 }
 
 /*
@@ -2253,6 +2473,7 @@ sblock(struct sockbuf *sb, uint32_t flags)
 	struct socket *so = sb->sb_so;
 	void * wchan;
 	int error = 0;
+	thread_t tp = current_thread();
 
 	VERIFY((flags & SBL_VALID) == flags);
 
@@ -2268,9 +2489,24 @@ sblock(struct sockbuf *sb, uint32_t flags)
 		/* NOTREACHED */
 	}
 
+	/*
+	 * The content filter thread must hold the sockbuf lock
+	 */
+	if ((so->so_flags & SOF_CONTENT_FILTER) && sb->sb_cfil_thread == tp) {
+		/*
+		 * Don't panic if we are defunct because SB_LOCK has
+		 * been cleared by sodefunct()
+		 */
+		if (!(so->so_flags & SOF_DEFUNCT) && !(sb->sb_flags & SB_LOCK))
+			panic("%s: SB_LOCK not held for %p\n",
+			    __func__, sb);
+
+		/* Keep the sockbuf locked */
+		return (0);
+	}
+
 	if ((sb->sb_flags & SB_LOCK) && !(flags & SBL_WAIT))
 		return (EWOULDBLOCK);
-
 	/*
 	 * We may get here from sorflush(), in which case "sb" may not
 	 * point to the real socket buffer.  Use the actual socket buffer
@@ -2279,7 +2515,13 @@ sblock(struct sockbuf *sb, uint32_t flags)
 	wchan = (sb->sb_flags & SB_RECV) ?
 	    &so->so_rcv.sb_flags : &so->so_snd.sb_flags;
 
-	while (sb->sb_flags & SB_LOCK) {
+	/*
+	 * A content filter thread has exclusive access to the sockbuf
+	 * until it clears the
+	 */
+	while ((sb->sb_flags & SB_LOCK) ||
+		((so->so_flags & SOF_CONTENT_FILTER) &&
+		sb->sb_cfil_thread != NULL)) {
 		lck_mtx_t *mutex_held;
 
 		/*
@@ -2329,6 +2571,7 @@ sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 {
 	void *lr_saved = __builtin_return_address(0);
 	struct socket *so = sb->sb_so;
+	thread_t tp = current_thread();
 
 	/* so_usecount may be 0 if we get here from sofreelastref() */
 	if (so == NULL) {
@@ -2342,17 +2585,38 @@ sbunlock(struct sockbuf *sb, boolean_t keeplocked)
 		/* NOTREACHED */
 	}
 
-	VERIFY(sb->sb_flags & SB_LOCK);
-	sb->sb_flags &= ~SB_LOCK;
-
-	if (sb->sb_wantlock > 0) {
+	/*
+	 * The content filter thread must hold the sockbuf lock
+	 */
+	if ((so->so_flags & SOF_CONTENT_FILTER) && sb->sb_cfil_thread == tp) {
 		/*
-		 * We may get here from sorflush(), in which case "sb" may not
-		 * point to the real socket buffer.  Use the actual socket
-		 * buffer address from the socket instead.
+		 * Don't panic if we are defunct because SB_LOCK has
+		 * been cleared by sodefunct()
 		 */
-		wakeup((sb->sb_flags & SB_RECV) ? &so->so_rcv.sb_flags :
-		    &so->so_snd.sb_flags);
+		if (!(so->so_flags & SOF_DEFUNCT) &&
+		    !(sb->sb_flags & SB_LOCK) &&
+		    !(so->so_state & SS_DEFUNCT) &&
+		    !(so->so_flags1 & SOF1_DEFUNCTINPROG)) {
+			panic("%s: SB_LOCK not held for %p\n",
+			    __func__, sb);
+		}
+		/* Keep the sockbuf locked and proceed */
+	} else {
+		VERIFY((sb->sb_flags & SB_LOCK) ||
+		    (so->so_state & SS_DEFUNCT) ||
+		    (so->so_flags1 & SOF1_DEFUNCTINPROG));
+
+		sb->sb_flags &= ~SB_LOCK;
+
+		if (sb->sb_wantlock > 0) {
+			/*
+			 * We may get here from sorflush(), in which case "sb"
+			 * may not point to the real socket buffer.  Use the
+			 * actual socket buffer address from the socket instead.
+			 */
+			wakeup((sb->sb_flags & SB_RECV) ? &so->so_rcv.sb_flags :
+			    &so->so_snd.sb_flags);
+		}
 	}
 
 	if (!keeplocked) {	/* unlock on exit */
@@ -2395,24 +2659,33 @@ soevent(struct socket *so, long hint)
 
 	soevupcall(so, hint);
 
-	/* Don't post an event if this a subflow socket */
-	if ((hint & SO_FILT_HINT_IFDENIED) && !(so->so_flags & SOF_MP_SUBFLOW))
+	/*
+	 * Don't post an event if this a subflow socket or
+	 * the app has opted out of using cellular interface
+	 */
+	if ((hint & SO_FILT_HINT_IFDENIED) &&
+	    !(so->so_flags & SOF_MP_SUBFLOW) &&
+	    !(so->so_restrictions & SO_RESTRICT_DENY_CELLULAR) &&
+	    !(so->so_restrictions & SO_RESTRICT_DENY_EXPENSIVE))
 		soevent_ifdenied(so);
 }
 
 void
 soevupcall(struct socket *so, u_int32_t hint)
 {
-	void (*so_event)(struct socket *, void *, uint32_t);
-
-	if ((so_event = so->so_event) != NULL) {
+	if (so->so_event != NULL) {
 		caddr_t so_eventarg = so->so_eventarg;
+		int locked = hint & SO_FILT_HINT_LOCKED;
 
 		hint &= so->so_eventmask;
 		if (hint != 0) {
-			socket_unlock(so, 0);
+			if (locked)
+				socket_unlock(so, 0);
+
 			so->so_event(so, so_eventarg, hint);
-			socket_lock(so, 0);
+
+			if (locked)
+				socket_lock(so, 0);
 		}
 	}
 }
@@ -2582,7 +2855,7 @@ sbtoxsockbuf(struct sockbuf *sb, struct xsockbuf *xsb)
  * Based on the policy set by an all knowing decison maker, throttle sockets
  * that either have been marked as belonging to "background" process.
  */
-int
+inline int
 soisthrottled(struct socket *so)
 {
 	/*
@@ -2593,17 +2866,38 @@ soisthrottled(struct socket *so)
 		(so->so_traffic_mgt_flags & TRAFFIC_MGT_SO_BACKGROUND));
 }
 
-int
+inline int
 soisprivilegedtraffic(struct socket *so)
 {
 	return ((so->so_flags & SOF_PRIVILEGED_TRAFFIC_CLASS) ? 1 : 0);
 }
 
-int
+inline int
 soissrcbackground(struct socket *so)
 {
 	return ((so->so_traffic_mgt_flags & TRAFFIC_MGT_SO_BACKGROUND) ||
 		IS_SO_TC_BACKGROUND(so->so_traffic_class));
+}
+
+inline int
+soissrcrealtime(struct socket *so)
+{
+	return (so->so_traffic_class >= SO_TC_AV &&
+	    so->so_traffic_class <= SO_TC_VO);
+}
+
+inline int
+soissrcbesteffort(struct socket *so)
+{
+	return (so->so_traffic_class == SO_TC_BE ||
+	    so->so_traffic_class == SO_TC_RD ||
+	    so->so_traffic_class == SO_TC_OAM);
+}
+
+void
+sonullevent(struct socket *so, void *arg, uint32_t hint)
+{
+#pragma unused(so, arg, hint)
 }
 
 /*
@@ -2657,10 +2951,6 @@ sysctl_io_policy_throttled SYSCTL_HANDLER_ARGS
 SYSCTL_PROC(_kern_ipc, KIPC_MAXSOCKBUF, maxsockbuf,
 	CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
 	&sb_max, 0, &sysctl_sb_max, "IU", "Maximum socket buffer size");
-
-SYSCTL_INT(_kern_ipc, OID_AUTO, maxsockets,
-	CTLFLAG_RD | CTLFLAG_LOCKED, &maxsockets, 0,
-	"Maximum number of sockets avaliable");
 
 SYSCTL_INT(_kern_ipc, KIPC_SOCKBUF_WASTE, sockbuf_waste_factor,
 	CTLFLAG_RW | CTLFLAG_LOCKED, &sb_efficiency, 0, "");

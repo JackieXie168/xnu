@@ -56,9 +56,6 @@
 #include <security/mac_framework.h>
 #endif
 
-#if !CONFIG_APPLEDOUBLE
-#define	PANIC_ON_NOAPPLEDOUBLE	1
-#endif
 
 #if NAMEDSTREAMS
 
@@ -601,7 +598,7 @@ vnode_flushnamedstream(vnode_t vp, vnode_t svp, vfs_context_t context)
 	}
 
 	iosize = bufsize = MIN(datasize, NS_IOBUFSIZE);
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize)) {
+	if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize, VM_KERN_MEMORY_FILE)) {
 		return (ENOMEM);
 	}
 	auio = uio_create(1, 0, UIO_SYSSPACE, UIO_READ);
@@ -944,7 +941,7 @@ retry:
         	size_t  iosize;
 
 		iosize = bufsize = MIN(datasize, NS_IOBUFSIZE);
-		if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize)) {
+		if (kmem_alloc(kernel_map, (vm_offset_t *)&bufptr, bufsize, VM_KERN_MEMORY_FILE)) {
 			error = ENOMEM;
 			goto out;
 		}
@@ -3218,7 +3215,7 @@ shift_data_down(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t
 	}
 	orig_chunk = chunk;
 
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk)) {
+	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk, VM_KERN_MEMORY_FILE)) {
 		return ENOMEM;
 	}
 
@@ -3273,7 +3270,7 @@ shift_data_up(vnode_t xvp, off_t start, size_t len, off_t delta, vfs_context_t c
 	orig_chunk = chunk;
 	end = start + len;
 
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk)) {
+	if (kmem_alloc(kernel_map, (vm_offset_t *)&buff, chunk, VM_KERN_MEMORY_FILE)) {
 		return ENOMEM;
 	}
 
@@ -3337,48 +3334,34 @@ unlock_xattrfile(vnode_t xvp, vfs_context_t context)
 
 #else /* CONFIG_APPLEDOUBLE */
 
-#undef panic
-#define	panic	printf
 
 static int
-default_getxattr(vnode_t vp, const char *name,
+default_getxattr(__unused vnode_t vp, __unused const char *name,
     __unused uio_t uio, __unused size_t *size, __unused int options,
     __unused vfs_context_t context)
 {
-#if PANIC_ON_NOAPPLEDOUBLE
-	panic("%s: no AppleDouble support, vp %p name %s", __func__, vp, name);
-#endif
 	return (ENOTSUP);
 }
 
 static int
-default_setxattr(vnode_t vp, const char *name,
+default_setxattr(__unused vnode_t vp, __unused const char *name,
     __unused uio_t uio, __unused int options, __unused vfs_context_t context)
 {
-#if PANIC_ON_NOAPPLEDOUBLE
-	panic("%s: no AppleDouble support, vp %p name %s", __func__, vp, name);
-#endif
 	return (ENOTSUP);
 }
 
 static int
-default_listxattr(vnode_t vp,
+default_listxattr(__unused vnode_t vp,
     __unused uio_t uio, __unused size_t *size, __unused int options,
     __unused vfs_context_t context)
 {
-#if PANIC_ON_NOAPPLEDOUBLE
-	panic("%s: no AppleDouble support, vp %p name %s", __func__, vp, ".");
-#endif
 	return (ENOTSUP);
 }
 
 static int
-default_removexattr(vnode_t vp, const char *name,
+default_removexattr(__unused vnode_t vp, __unused const char *name,
    __unused int options, __unused vfs_context_t context)
 {
-#if PANIC_ON_NOAPPLEDOUBLE
-	panic("%s: no AppleDouble support, vp %p name %s", __func__, vp, name);
-#endif
 	return (ENOTSUP);
 }
 

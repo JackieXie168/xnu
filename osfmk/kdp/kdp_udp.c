@@ -47,6 +47,7 @@
 #include <kdp/kdp_en_debugger.h>
 #include <kdp/kdp_callout.h>
 #include <kdp/kdp_udp.h>
+#include <kdp/kdp_core.h>
 #if CONFIG_SERIAL_KDP
 #include <kdp/kdp_serial.h>
 #endif
@@ -71,6 +72,12 @@
 #include <IOKit/IOPlatformExpert.h>
 #include <libkern/version.h>
 
+extern unsigned int not_in_kdp;
+extern int kdp_snapshot;
+extern void do_stackshot(void);
+
+#ifdef CONFIG_KDP_INTERACTIVE_DEBUGGING
+
 extern int      inet_aton(const char *, struct kdp_in_addr *); /* in libkern */
 extern char    *inet_ntoa_r(struct kdp_in_addr ina, char *buf,
     size_t buflen); /* in libkern */
@@ -81,12 +88,6 @@ extern char    *inet_ntoa_r(struct kdp_in_addr ina, char *buf,
 
 extern int kdp_getc(void);
 extern int reattach_wait;
-
-/* only used by IONetworkingFamily */
-typedef uint32_t (*kdp_link_t)(void);
-typedef boolean_t (*kdp_mode_t)(boolean_t);
-void 	kdp_register_link(kdp_link_t link, kdp_mode_t mode);
-void 	kdp_unregister_link(kdp_link_t link, kdp_mode_t mode);
 
 static u_short ip_id;                          /* ip packet ctr, for ids */
 
@@ -247,7 +248,7 @@ static const char
 
 volatile int kdp_flag = 0;
 
-static kdp_send_t    kdp_en_send_pkt;
+kdp_send_t    kdp_en_send_pkt;
 static kdp_receive_t kdp_en_recv_pkt;
 static kdp_link_t    kdp_en_linkstatus;
 static kdp_mode_t    kdp_en_setmode;
@@ -305,13 +306,11 @@ static unsigned int panic_block = 0;
 volatile unsigned int kdp_trigger_core_dump = 0;
 __private_extern__ volatile unsigned int flag_kdp_trigger_reboot = 0;
 
-extern unsigned int not_in_kdp;
 
 extern unsigned int disableConsoleOutput;
 
 extern void 		kdp_call(void);
 extern boolean_t 	kdp_call_kdb(void);
-extern int 		kern_dump(void);
 
 void *	kdp_get_interface(void);
 void    kdp_set_gateway_mac(void *gatewaymac);
@@ -333,42 +332,12 @@ char kdp_kernelversion_string[256];
 static boolean_t	gKDPDebug = FALSE;
 #define KDP_DEBUG(...) if (gKDPDebug) printf(__VA_ARGS__);
 
-int kdp_snapshot = 0;
-static int stack_snapshot_ret = 0;
-static unsigned stack_snapshot_bytes_traced = 0;
-
-static void *stack_snapshot_buf;
-static uint32_t stack_snapshot_bufsize;
-static int stack_snapshot_pid;
-static uint32_t stack_snapshot_flags;
-static uint32_t stack_snapshot_dispatch_offset;
-
-static unsigned int old_debugger;
-
 #define SBLOCKSZ (2048)
 uint64_t kdp_dump_start_time = 0;
 uint64_t kdp_min_superblock_dump_time = ~1ULL;
 uint64_t kdp_max_superblock_dump_time = 0;
 uint64_t kdp_superblock_dump_time = 0;
 uint64_t kdp_superblock_dump_start_time = 0;
-
-void
-kdp_snapshot_preflight(int pid, void * tracebuf, uint32_t tracebuf_size,
-    uint32_t flags, uint32_t dispatch_offset);
-
-void
-kdp_snapshot_postflight(void);
-
-extern int
-kdp_stackshot(int pid, void *tracebuf, uint32_t tracebuf_size,
-    uint32_t flags, uint32_t dispatch_offset, uint32_t *pbytesTraced);
-
-int
-kdp_stack_snapshot_geterror(void);
-
-int
-kdp_stack_snapshot_bytes_traced(void);
-
 static thread_call_t
 kdp_timer_call;
 
@@ -479,6 +448,7 @@ kdp_register_send_receive(
 		corename_specified = TRUE;
 
 	kdp_flag |= KDP_READY;
+
 	if (current_debugger == NO_CUR_DB)
 		current_debugger = KDP_CUR_DB;
 	if ((kdp_current_ip_address != 0) && halt_in_debugger) {
@@ -497,46 +467,6 @@ kdp_unregister_send_receive(
 	kdp_flag &= ~KDP_READY;
 	kdp_en_send_pkt   = NULL;
 	kdp_en_recv_pkt   = NULL;
-}
-
-/* Cache stack snapshot parameters in preparation for a trace */
-void
-kdp_snapshot_preflight(int pid, void * tracebuf, uint32_t tracebuf_size, uint32_t flags, uint32_t dispatch_offset)
-{
-	stack_snapshot_pid = pid;
-	stack_snapshot_buf = tracebuf;
-	stack_snapshot_bufsize = tracebuf_size;
-	stack_snapshot_flags = flags;
-	stack_snapshot_dispatch_offset = dispatch_offset;
-	kdp_snapshot++;
-	/* Mark this debugger as active, since the polled mode driver that 
-	 * ordinarily does this may not be enabled (yet), or since KDB may be
-	 * the primary debugger.
-	 */
-	old_debugger = current_debugger;
-	if (old_debugger != KDP_CUR_DB) {
-		current_debugger = KDP_CUR_DB;
-	}
-}
-
-void
-kdp_snapshot_postflight(void)
-{
-	kdp_snapshot--;
-	if ((kdp_en_send_pkt == NULL) || (old_debugger == KDB_CUR_DB))
-		current_debugger = old_debugger;
-}
-
-int
-kdp_stack_snapshot_geterror(void)
-{
-	return stack_snapshot_ret;
-}
-
-int
-kdp_stack_snapshot_bytes_traced(void)
-{
-	return stack_snapshot_bytes_traced;
 }
 
 static void
@@ -1371,29 +1301,14 @@ kdp_send_exception(
     }
 }
 
-void
-kdp_raise_exception(
+static void 
+kdp_debugger_loop(
     unsigned int		exception,
     unsigned int		code,
     unsigned int		subcode,
-    void			*saved_state
-)
+    void			*saved_state)
 {
     int			index;
-    unsigned int	initial_not_in_kdp = not_in_kdp;
-
-    not_in_kdp = 0;
-    /* Was a system trace requested ? */
-    if (kdp_snapshot && (!panic_active()) && (panic_caller == 0)) {
-	    stack_snapshot_ret = kdp_stackshot(stack_snapshot_pid,
-	    stack_snapshot_buf, stack_snapshot_bufsize,
-	    stack_snapshot_flags, stack_snapshot_dispatch_offset, 
-		&stack_snapshot_bytes_traced);
-	    not_in_kdp = initial_not_in_kdp;
-	    return;
-    }
-
-    disable_preemption();
 
     if (saved_state == 0) 
 	printf("kdp_raise_exception with NULL state\n");
@@ -1423,7 +1338,7 @@ kdp_raise_exception(
     if (pkt.input)
 	kdp_panic("kdp_raise_exception");
 
-    if (((kdp_flag & KDP_PANIC_DUMP_ENABLED) || (kdp_flag & PANIC_LOG_DUMP))
+    if (((kdp_flag & KDP_PANIC_DUMP_ENABLED) || (kdp_flag & PANIC_LOG_DUMP) || kdp_has_polled_corefile())
 	&& (panicstr != (char *) 0)) {
 	    kdp_panic_dump();
 	    if (kdp_flag & REBOOT_POST_CORE)
@@ -1437,7 +1352,7 @@ kdp_raise_exception(
 	kdp_panic_dump();
 
 	if (!(kdp_flag & DBG_POST_CORE))
-	  goto exit_raise_exception;
+	  goto exit_debugger_loop;
       }
 
  again:
@@ -1496,13 +1411,9 @@ kdp_raise_exception(
     if (reattach_wait == 1)
       goto again;
 
-exit_raise_exception:
+exit_debugger_loop:
     if (kdp_en_setmode)  
         (*kdp_en_setmode)(FALSE); /* link cleanup */
-
-    not_in_kdp = initial_not_in_kdp;
-
-    enable_preemption();
 }
 
 void
@@ -1627,15 +1538,15 @@ static int kdp_send_crashdump_seek(char *corename, uint64_t seek_off)
 		return panic_error;
 	}
 
-	return 0;
+	return KERN_SUCCESS;
 }
 
 int kdp_send_crashdump_data(unsigned int request, char *corename,
-    int64_t length, caddr_t txstart)
+    			    uint64_t length, void * txstart)
 {
 	int panic_error = 0;
 
-	while (length > 0) {
+	while ((length > 0) || !txstart) {
 		uint64_t chunk = MIN(kdp_crashdump_pkt_size, length);
 
 		panic_error = kdp_send_crashdump_pkt(request, corename, chunk,
@@ -1644,11 +1555,11 @@ int kdp_send_crashdump_data(unsigned int request, char *corename,
 			printf ("kdp_send_crashdump_pkt failed with error %d\n", panic_error);
 			return panic_error;
 		}
-
-		txstart += chunk;
+		if (!txstart) break;
+		txstart = (void *)(((uintptr_t) txstart) + chunk);
 		length  -= chunk;
 	}
-	return 0;
+	return KERN_SUCCESS;
 }
 
 uint32_t kdp_crashdump_short_pkt;
@@ -1798,7 +1709,7 @@ RECEIVE_RETRY:
 		printf("Minimum superblock transfer abstime: 0x%llx\n", kdp_min_superblock_dump_time);
 		printf("Maximum superblock transfer abstime: 0x%llx\n", kdp_max_superblock_dump_time);
 	}
-	return 1;
+	return KERN_SUCCESS;
 }
 
 static int 
@@ -1964,6 +1875,7 @@ void
 kdp_panic_dump(void)
 {
 	char coreprefix[10];
+	char coresuffix[4];
 	int panic_error;
 
 	uint64_t        abstime;
@@ -1976,13 +1888,26 @@ kdp_panic_dump(void)
 		
 	printf("Entering system dump routine\n");
 
+	/* try a local disk dump */
+	if (kdp_has_polled_corefile()) {
+	    flag_panic_dump_in_progress = TRUE;
+	    kern_dump(TRUE);
+	    abort_panic_transfer();
+	}
+
+	if (!strcmp("local", panicd_ip_str)) return;	/* disk only request */
+
 	if (!kdp_en_recv_pkt || !kdp_en_send_pkt) {
-			kdb_printf("Error: No transport device registered for kernel crashdump\n");
-			return;
+		if (!kdp_has_polled_corefile()) {
+		    kdb_printf("Error: No transport device registered for kernel crashdump\n");
+		}
+		return;
 	}
 
 	if (!panicd_specified) {
-		kdb_printf("A dump server was not specified in the boot-args, terminating kernel core dump.\n");
+		if (!kdp_has_polled_corefile()) {
+		    kdb_printf("A dump server was not specified in the boot-args, terminating kernel core dump.\n");
+                }
 		goto panic_dump_exit;
 	}
 
@@ -1994,23 +1919,27 @@ kdp_panic_dump(void)
 	kdp_get_xnu_version((char *) &pkt.data[0]);
 
         if (!corename_specified) {
+            coresuffix[0] = 0;
             /* Panic log bit takes precedence over core dump bit */
             if ((panicstr != (char *) 0) && (kdp_flag & PANIC_LOG_DUMP))
 		strlcpy(coreprefix, "paniclog", sizeof(coreprefix));
             else if (kdp_flag & SYSTEM_LOG_DUMP) 
 		strlcpy(coreprefix, "systemlog", sizeof(coreprefix));
-	    else
+	    else {
 		strlcpy(coreprefix, "core", sizeof(coreprefix));
+		strlcpy(coresuffix, ".gz", sizeof(coresuffix));
+	    }
   
             abstime = mach_absolute_time();
 	    pkt.data[20] = '\0';
-	    snprintf (corename_str, sizeof(corename_str), "%s-%s-%d.%d.%d.%d-%x", 
+	    snprintf (corename_str, sizeof(corename_str), "%s-%s-%d.%d.%d.%d-%x%s", 
 		      coreprefix, &pkt.data[0],
 		      (current_ip & 0xff000000) >> 24,
 		      (current_ip & 0xff0000) >> 16,
 		      (current_ip & 0xff00) >> 8,
 		      (current_ip & 0xff),
-		      (unsigned int) (abstime & 0xffffffff));
+		      (unsigned int) (abstime & 0xffffffff),
+		      coresuffix);
         }
 
 	if (0 == inet_aton(panicd_ip_str, (struct kdp_in_addr *) &panic_server_ip)) {
@@ -2062,8 +1991,8 @@ kdp_panic_dump(void)
 	if ((panicstr != (char *) 0) && (kdp_flag & PANIC_LOG_DUMP)) {
 		kdb_printf_unbuffered("Transmitting panic log, please wait: ");
 		kdp_send_crashdump_data(KDP_DATA, corename_str, 
-					debug_buf_ptr - debug_buf,
-					debug_buf);
+					debug_buf_ptr - debug_buf_addr,
+					debug_buf_addr);
 		kdp_send_crashdump_pkt (KDP_EOF, NULL, 0, ((void *) 0));
 		printf("Please file a bug report on this panic, if possible.\n");
 		goto panic_dump_exit;
@@ -2095,7 +2024,7 @@ kdp_panic_dump(void)
         }
 
 	/* We want a core dump if we're here */
-	kern_dump();
+	kern_dump(FALSE);
 
 panic_dump_exit:
 	abort_panic_transfer();
@@ -2163,7 +2092,8 @@ kdp_serial_setmode(boolean_t active)
 }
 
 
-static void kdp_serial_callout(__unused void *arg, kdp_event_t event)
+static void 
+kdp_serial_callout(__unused void *arg, kdp_event_t event)
 {
     /* When we stop KDP, set the bit to re-initialize the console serial port
      * the next time we send/receive a KDP packet.  We don't do it on
@@ -2205,7 +2135,7 @@ kdp_init(void)
 
 	debug_log_init();
 
-#if defined(__x86_64__) || defined(__arm__)
+#if defined(__x86_64__) || defined(__arm__) || defined(__arm64__)
 	if (vm_kernel_slide) {
 		char	KASLR_stext[19];
 		strlcat(kdp_kernelversion_string, "; stext=", sizeof(kdp_kernelversion_string));
@@ -2222,6 +2152,7 @@ kdp_init(void)
 
 	kdp_timer_callout_init();
 	kdp_crashdump_feature_mask = htonl(kdp_crashdump_feature_mask);
+	kdp_core_init();
 
 #if CONFIG_SERIAL_KDP
 	char kdpname[80];
@@ -2251,3 +2182,87 @@ kdp_init(void)
         
 #endif /* CONFIG_SERIAL_KDP */
 }
+
+#else /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
+void
+kdp_init(void) 
+{
+}
+#endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
+
+#if defined(__arm64__) || !CONFIG_KDP_INTERACTIVE_DEBUGGING
+static void
+panic_spin_forever() 
+{
+	kdb_printf("\nPlease go to https://panic.apple.com to report this panic\n");
+	for (;;) { }
+}
+#endif
+
+void
+kdp_raise_exception(
+    unsigned int		exception,
+    unsigned int		code,
+    unsigned int		subcode,
+    void			*saved_state
+)
+{
+    unsigned int	initial_not_in_kdp = not_in_kdp;
+
+    not_in_kdp = 0;
+    /* Was a system trace requested ? */
+    if (kdp_snapshot && (!panic_active()) && (panic_caller == 0)) {
+	    do_stackshot();
+	    not_in_kdp = initial_not_in_kdp;
+	    return;
+    }
+
+
+#if CONFIG_KDP_INTERACTIVE_DEBUGGING
+
+    disable_preemption();
+    /*
+     * On ARM64, KDP debugging is disabled by default.
+     * It is compiled into the kernel for DEVELOPMENT and DEBUG,
+     * but still hidden behind a boot arg (thus PE_i_can_has_kdp()).
+     * For RELEASE, it is not compiled.
+     */
+    if (
+	(current_debugger != KDP_CUR_DB)
+    )
+    {
+	    /* try a local disk dump */
+	    if (kdp_has_polled_corefile()) {
+		flag_panic_dump_in_progress = TRUE;
+		kern_dump(TRUE);
+		abort_panic_transfer();
+	    }
+    }
+
+    if (current_debugger != KDP_CUR_DB) {
+        kdb_printf("\nDebugger not configured. Hanging.\n");
+        for (;;) { }
+    }
+
+    kdp_debugger_loop(exception, code, subcode, saved_state);
+    not_in_kdp = initial_not_in_kdp;
+    enable_preemption();
+#else /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
+    assert(current_debugger != KDP_CUR_DB);
+
+    /* 
+     * If kernel debugging is enabled via boot-args, but KDP debugging
+     * is not compiled into the kernel, spin here waiting for debugging
+     * via another method.  Why here?  Because we want to have watchdog
+     * disabled (via KDP callout) while sitting waiting to be debugged.
+     */
+    panic_spin_forever();
+
+    (void)exception;
+    (void)code;
+    (void)subcode;
+    (void)saved_state;
+#endif /* CONFIG_KDP_INTERACTIVE_DEBUGGING */
+}
+
+

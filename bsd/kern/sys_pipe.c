@@ -17,7 +17,7 @@
  *    are met.
  */
 /*
- * Copyright (c) 2003-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -317,7 +317,7 @@ pipe_touch(struct pipe *tpipe, int touch)
 	}
 }
 
-static const unsigned int pipesize_blocks[] = {128,256,1024,2048,PAGE_SIZE, PAGE_SIZE * 2, PIPE_SIZE , PIPE_SIZE * 4 };
+static const unsigned int pipesize_blocks[] = {512,1024,2048,4096, 4096 * 2, PIPE_SIZE , PIPE_SIZE * 4 };
 
 /* 
  * finds the right size from possible sizes in pipesize_blocks 
@@ -328,6 +328,12 @@ choose_pipespace(unsigned long current, unsigned long expected)
 {
 	int i = sizeof(pipesize_blocks)/sizeof(unsigned int) -1;
 	unsigned long target;
+
+	/*
+	 * assert that we always get an atomic transaction sized pipe buffer,
+	 * even if the system pipe buffer high-water mark has been crossed.
+	 */
+	assert(PIPE_BUF == pipesize_blocks[0]);
 
 	if (expected > current) 
 		target = expected;
@@ -1216,7 +1222,7 @@ pipe_select(struct fileproc *fp, int which, void *wql, vfs_context_t ctx)
 			wpipe->pipe_state |= PIPE_WSELECT;
 		if (wpipe == NULL || (wpipe->pipe_state & (PIPE_DRAIN | PIPE_EOF)) ||
 		    (((wpipe->pipe_state & PIPE_DIRECTW) == 0) &&
-		     (MAX_PIPESIZE(wpipe) - wpipe->pipe_buffer.cnt) > 0)) {
+		     (MAX_PIPESIZE(wpipe) - wpipe->pipe_buffer.cnt) >= PIPE_BUF)) {
 
 		        retnum = 1;
 		} else {

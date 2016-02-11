@@ -87,7 +87,6 @@
 #define	LCK_MTX_LCK_WAIT_CODE		2
 #define	LCK_MTX_UNLCK_WAKEUP_CODE	3
 
-
 static queue_head_t	lck_grp_queue;
 static unsigned int	lck_grp_cnt;
 
@@ -196,7 +195,7 @@ lck_grp_attr_free(
 
 
 /*
- * Routine: 	lck_grp_alloc_init
+ * Routine: lck_grp_alloc_init
  */
 
 lck_grp_t *
@@ -212,27 +211,23 @@ lck_grp_alloc_init(
 	return(grp);
 }
 
-
 /*
- * Routine: 	lck_grp_init
+ * Routine: lck_grp_init
  */
 
 void
-lck_grp_init(
-	lck_grp_t		*grp,               
-	const char*		grp_name,           
-	lck_grp_attr_t	*attr)             
+lck_grp_init(lck_grp_t * grp, const char * grp_name, lck_grp_attr_t * attr)
 {
 	bzero((void *)grp, sizeof(lck_grp_t));
 
-	(void) strncpy(grp->lck_grp_name, grp_name, LCK_GRP_MAX_NAME);
+	(void)strlcpy(grp->lck_grp_name, grp_name, LCK_GRP_MAX_NAME);
 
 	if (attr != LCK_GRP_ATTR_NULL)
 		grp->lck_grp_attr = attr->grp_attr_val;
 	else if (LcksOpts & enaLkStat)
-                grp->lck_grp_attr = LCK_GRP_ATTR_STAT;
-        else
-                grp->lck_grp_attr = LCK_ATTR_NONE;
+		grp->lck_grp_attr = LCK_GRP_ATTR_STAT;
+	else
+		grp->lck_grp_attr = LCK_ATTR_NONE;
 
 	grp->lck_grp_refcnt = 1;
 
@@ -240,9 +235,7 @@ lck_grp_init(
 	enqueue_tail(&lck_grp_queue, (queue_entry_t)grp);
 	lck_grp_cnt++;
 	lck_mtx_unlock(&lck_grp_lock);
-
 }
-
 
 /*
  * Routine: 	lck_grp_free
@@ -485,6 +478,39 @@ lck_spin_sleep_deadline(
 
 
 /*
+ * Routine:	lck_mtx_clear_promoted
+ *
+ * Handle clearing of TH_SFLAG_PROMOTED,
+ * adjusting thread priority as needed.
+ *
+ * Called with thread lock held
+ */
+static void
+lck_mtx_clear_promoted (
+	thread_t 			thread,
+	__kdebug_only uintptr_t		trace_lck)
+{
+	thread->sched_flags &= ~TH_SFLAG_PROMOTED;
+
+	if (thread->sched_flags & TH_SFLAG_RW_PROMOTED) {
+		/* Thread still has a RW lock promotion */
+	} else if (thread->sched_flags & TH_SFLAG_DEPRESSED_MASK) {
+		KERNEL_DEBUG_CONSTANT(
+			MACHDBG_CODE(DBG_MACH_SCHED,MACH_DEMOTE) | DBG_FUNC_NONE,
+				thread->sched_pri, DEPRESSPRI, 0, trace_lck, 0);
+		set_sched_pri(thread, DEPRESSPRI);
+	} else {
+		if (thread->base_pri < thread->sched_pri) {
+			KERNEL_DEBUG_CONSTANT(
+				MACHDBG_CODE(DBG_MACH_SCHED,MACH_DEMOTE) | DBG_FUNC_NONE,
+					thread->sched_pri, thread->base_pri, 0, trace_lck, 0);
+		}
+		thread_recompute_sched_pri(thread, FALSE);
+	}
+}
+
+
+/*
  * Routine:	lck_mtx_sleep
  */
 wait_result_t
@@ -495,12 +521,23 @@ lck_mtx_sleep(
 	wait_interrupt_t	interruptible)
 {
 	wait_result_t	res;
+	thread_t		thread = current_thread();
  
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_SLEEP_CODE) | DBG_FUNC_START,
-		     (int)lck, (int)lck_sleep_action, (int)event, (int)interruptible, 0);
+		     VM_KERNEL_UNSLIDE_OR_PERM(lck), (int)lck_sleep_action, VM_KERNEL_UNSLIDE_OR_PERM(event), (int)interruptible, 0);
 
 	if ((lck_sleep_action & ~LCK_SLEEP_MASK) != 0)
 		panic("Invalid lock sleep action %x\n", lck_sleep_action);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		/*
+		 * We overload the RW lock promotion to give us a priority ceiling
+		 * during the time that this thread is asleep, so that when it
+		 * is re-awakened (and not yet contending on the mutex), it is
+		 * runnable at a reasonably high priority.
+		 */
+		thread->rwlock_count++;
+	}
 
 	res = assert_wait(event, interruptible);
 	if (res == THREAD_WAITING) {
@@ -516,6 +553,13 @@ lck_mtx_sleep(
 	else
 	if (lck_sleep_action & LCK_SLEEP_UNLOCK)
 		lck_mtx_unlock(lck);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		if ((thread->rwlock_count-- == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
+			/* sched_flags checked without lock, but will be rechecked while clearing */
+			lck_rw_clear_promotion(thread);
+		}
+	}
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_SLEEP_CODE) | DBG_FUNC_END, (int)res, 0, 0, 0, 0);
 
@@ -535,12 +579,20 @@ lck_mtx_sleep_deadline(
 	uint64_t		deadline)
 {
 	wait_result_t   res;
+	thread_t		thread = current_thread();
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_SLEEP_DEADLINE_CODE) | DBG_FUNC_START,
-		     (int)lck, (int)lck_sleep_action, (int)event, (int)interruptible, 0);
+		     VM_KERNEL_UNSLIDE_OR_PERM(lck), (int)lck_sleep_action, VM_KERNEL_UNSLIDE_OR_PERM(event), (int)interruptible, 0);
 
 	if ((lck_sleep_action & ~LCK_SLEEP_MASK) != 0)
 		panic("Invalid lock sleep action %x\n", lck_sleep_action);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		/*
+		 * See lck_mtx_sleep().
+		 */
+		thread->rwlock_count++;
+	}
 
 	res = assert_wait_deadline(event, interruptible, deadline);
 	if (res == THREAD_WAITING) {
@@ -556,6 +608,13 @@ lck_mtx_sleep_deadline(
 	else
 	if (lck_sleep_action & LCK_SLEEP_UNLOCK)
 		lck_mtx_unlock(lck);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		if ((thread->rwlock_count-- == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
+			/* sched_flags checked without lock, but will be rechecked while clearing */
+			lck_rw_clear_promotion(thread);
+		}
+	}
 
 	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_SLEEP_DEADLINE_CODE) | DBG_FUNC_END, (int)res, 0, 0, 0, 0);
 
@@ -577,6 +636,8 @@ lck_mtx_lock_wait (
 {
 	thread_t		self = current_thread();
 	lck_mtx_t		*mutex;
+	__kdebug_only uintptr_t	trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lck);
+	__kdebug_only uintptr_t	trace_holder = VM_KERNEL_UNSLIDE_OR_PERM(holder);
 	integer_t		priority;
 	spl_t			s = splsched();
 #if	CONFIG_DTRACE
@@ -592,27 +653,25 @@ lck_mtx_lock_wait (
 	else
 		mutex = &lck->lck_mtx_ptr->lck_mtx;
 
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_WAIT_CODE) | DBG_FUNC_START, (int)lck, (int)holder, 0, 0, 0);
+	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_LCK_WAIT_CODE) | DBG_FUNC_START, trace_lck, trace_holder, 0, 0, 0);
 
 	priority = self->sched_pri;
-	if (priority < self->priority)
-		priority = self->priority;
+	if (priority < self->base_pri)
+		priority = self->base_pri;
 	if (priority < BASEPRI_DEFAULT)
 		priority = BASEPRI_DEFAULT;
+
+	/* Do not promote past promotion ceiling */
+	priority = MIN(priority, MAXPRI_PROMOTE);
 
 	thread_lock(holder);
 	if (mutex->lck_mtx_pri == 0)
 		holder->promotions++;
 	holder->sched_flags |= TH_SFLAG_PROMOTED;
-	if (		mutex->lck_mtx_pri < priority	&&
-				holder->sched_pri < priority		) {
+	if (mutex->lck_mtx_pri < priority && holder->sched_pri < priority) {
 		KERNEL_DEBUG_CONSTANT(
 			MACHDBG_CODE(DBG_MACH_SCHED,MACH_PROMOTE) | DBG_FUNC_NONE,
-					holder->sched_pri, priority, holder, lck, 0);
-		/* This can potentially elevate the holder into the realtime
-		 * priority band; the implementation in locks_i386.c enforces a
-		 * MAXPRI_KERNEL ceiling.
-		 */
+					holder->sched_pri, priority, trace_holder, trace_lck, 0);
 		set_sched_pri(holder, priority);
 	}
 	thread_unlock(holder);
@@ -630,7 +689,7 @@ lck_mtx_lock_wait (
 		mutex->lck_mtx_waiters++;
 	}
 
-	assert_wait((event_t)(((unsigned int*)lck)+((sizeof(lck_mtx_t)-1)/sizeof(unsigned int))), THREAD_UNINT);
+	assert_wait(LCK_MTX_EVENT(mutex), THREAD_UNINT);
 	lck_mtx_ilk_unlock(mutex);
 
 	thread_block(THREAD_CONTINUE_NULL);
@@ -669,6 +728,9 @@ lck_mtx_lock_acquire(
 {
 	thread_t		thread = current_thread();
 	lck_mtx_t		*mutex;
+	integer_t		priority;
+	spl_t			s;
+	__kdebug_only uintptr_t	trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lck);
 
 	if (lck->lck_mtx_tag != LCK_MTX_TAG_INDIRECT)
 		mutex = lck;
@@ -682,25 +744,38 @@ lck_mtx_lock_acquire(
 		mutex->lck_mtx_waiters--;
 	}
 
-	if (mutex->lck_mtx_waiters > 0) {
-		integer_t		priority = mutex->lck_mtx_pri;
-		spl_t			s = splsched();
+	if (mutex->lck_mtx_waiters)
+		priority = mutex->lck_mtx_pri;
+	else {
+		mutex->lck_mtx_pri = 0;
+		priority = 0;
+	}
 
+	if (priority || thread->was_promoted_on_wakeup) {
+		s = splsched();
 		thread_lock(thread);
-		thread->promotions++;
-		thread->sched_flags |= TH_SFLAG_PROMOTED;
-		if (thread->sched_pri < priority) {
-			KERNEL_DEBUG_CONSTANT(
-				MACHDBG_CODE(DBG_MACH_SCHED,MACH_PROMOTE) | DBG_FUNC_NONE,
-						thread->sched_pri, priority, 0, lck, 0);
 
-			set_sched_pri(thread, priority);
+		if (priority) {
+			thread->promotions++;
+			thread->sched_flags |= TH_SFLAG_PROMOTED;
+			if (thread->sched_pri < priority) {
+				KERNEL_DEBUG_CONSTANT(
+					MACHDBG_CODE(DBG_MACH_SCHED,MACH_PROMOTE) | DBG_FUNC_NONE,
+							thread->sched_pri, priority, 0, trace_lck, 0);
+				/* Do not promote past promotion ceiling */
+				assert(priority <= MAXPRI_PROMOTE);
+				set_sched_pri(thread, priority);
+			}
 		}
+		if (thread->was_promoted_on_wakeup) {
+			thread->was_promoted_on_wakeup = 0;
+			if (thread->promotions == 0)
+				lck_mtx_clear_promoted(thread, trace_lck);
+		}
+
 		thread_unlock(thread);
 		splx(s);
 	}
-	else
-		mutex->lck_mtx_pri = 0;
 
 #if CONFIG_DTRACE
 	if (lockstat_probemap[LS_LCK_MTX_LOCK_ACQUIRE] || lockstat_probemap[LS_LCK_MTX_EXT_LOCK_ACQUIRE]) {
@@ -728,6 +803,7 @@ lck_mtx_unlock_wakeup (
 {
 	thread_t		thread = current_thread();
 	lck_mtx_t		*mutex;
+	__kdebug_only uintptr_t trace_lck = VM_KERNEL_UNSLIDE_OR_PERM(lck);
 
 	if (lck->lck_mtx_tag != LCK_MTX_TAG_INDIRECT)
 		mutex = lck;
@@ -737,37 +813,20 @@ lck_mtx_unlock_wakeup (
 	if (thread != holder)
 		panic("lck_mtx_unlock_wakeup: mutex %p holder %p\n", mutex, holder);
 
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_UNLCK_WAKEUP_CODE) | DBG_FUNC_START, (int)lck, (int)holder, 0, 0, 0);
+	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_UNLCK_WAKEUP_CODE) | DBG_FUNC_START, trace_lck, VM_KERNEL_UNSLIDE_OR_PERM(holder), 0, 0, 0);
 
 	assert(mutex->lck_mtx_waiters > 0);
-	thread_wakeup_one((event_t)(((unsigned int*)lck)+(sizeof(lck_mtx_t)-1)/sizeof(unsigned int)));
+	if (mutex->lck_mtx_waiters > 1)
+		thread_wakeup_one_with_pri(LCK_MTX_EVENT(lck), lck->lck_mtx_pri);
+	else
+		thread_wakeup_one(LCK_MTX_EVENT(lck));
 
 	if (thread->promotions > 0) {
 		spl_t		s = splsched();
 
 		thread_lock(thread);
-		if (	--thread->promotions == 0				&&
-				(thread->sched_flags & TH_SFLAG_PROMOTED)		) {
-			thread->sched_flags &= ~TH_SFLAG_PROMOTED;
-			if (thread->sched_flags & TH_SFLAG_DEPRESSED_MASK) {
-				KERNEL_DEBUG_CONSTANT(
-					MACHDBG_CODE(DBG_MACH_SCHED,MACH_DEMOTE) | DBG_FUNC_NONE,
-						  thread->sched_pri, DEPRESSPRI, 0, lck, 0);
-
-				set_sched_pri(thread, DEPRESSPRI);
-			}
-			else {
-				if (thread->priority < thread->sched_pri) {
-					KERNEL_DEBUG_CONSTANT(
-						MACHDBG_CODE(DBG_MACH_SCHED,MACH_DEMOTE) |
-															DBG_FUNC_NONE,
-							thread->sched_pri, thread->priority,
-									0, lck, 0);
-				}
-
-				SCHED(compute_priority)(thread, FALSE);
-			}
-		}
+		if (--thread->promotions == 0 && (thread->sched_flags & TH_SFLAG_PROMOTED))
+			lck_mtx_clear_promoted(thread, trace_lck);
 		thread_unlock(thread);
 		splx(s);
 	}
@@ -780,9 +839,9 @@ lck_mtx_unlockspin_wakeup (
 	lck_mtx_t			*lck)
 {
 	assert(lck->lck_mtx_waiters > 0);
-	thread_wakeup_one((event_t)(((unsigned int*)lck)+(sizeof(lck_mtx_t)-1)/sizeof(unsigned int)));
+	thread_wakeup_one(LCK_MTX_EVENT(lck));
 
-	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_UNLCK_WAKEUP_CODE) | DBG_FUNC_NONE, (int)lck, 0, 0, 1, 0);
+	KERNEL_DEBUG(MACHDBG_CODE(DBG_MACH_LOCKS, LCK_MTX_UNLCK_WAKEUP_CODE) | DBG_FUNC_NONE, VM_KERNEL_UNSLIDE_OR_PERM(lck), 0, 0, 1, 0);
 #if CONFIG_DTRACE
 	/*
 	 * When there are waiters, we skip the hot-patch spot in the
@@ -871,9 +930,22 @@ lck_rw_sleep(
 {
 	wait_result_t	res;
 	lck_rw_type_t	lck_rw_type;
- 
+	thread_t		thread = current_thread();
+
 	if ((lck_sleep_action & ~LCK_SLEEP_MASK) != 0)
 		panic("Invalid lock sleep action %x\n", lck_sleep_action);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		/*
+		 * Although we are dropping the RW lock, the intent in most cases
+		 * is that this thread remains as an observer, since it may hold
+		 * some secondary resource, but must yield to avoid deadlock. In
+		 * this situation, make sure that the thread is boosted to the
+		 * RW lock ceiling while blocked, so that it can re-acquire the
+		 * RW lock at that priority.
+		 */
+		thread->rwlock_count++;
+	}
 
 	res = assert_wait(event, interruptible);
 	if (res == THREAD_WAITING) {
@@ -892,6 +964,17 @@ lck_rw_sleep(
 	if (lck_sleep_action & LCK_SLEEP_UNLOCK)
 		(void)lck_rw_done(lck);
 
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		if ((thread->rwlock_count-- == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
+			/* sched_flags checked without lock, but will be rechecked while clearing */
+
+			/* Only if the caller wanted the lck_rw_t returned unlocked should we drop to 0 */
+			assert(lck_sleep_action & LCK_SLEEP_UNLOCK);
+
+			lck_rw_clear_promotion(thread);
+		}
+	}
+
 	return res;
 }
 
@@ -909,9 +992,14 @@ lck_rw_sleep_deadline(
 {
 	wait_result_t   res;
 	lck_rw_type_t	lck_rw_type;
+	thread_t		thread = current_thread();
 
 	if ((lck_sleep_action & ~LCK_SLEEP_MASK) != 0)
 		panic("Invalid lock sleep action %x\n", lck_sleep_action);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		thread->rwlock_count++;
+	}
 
 	res = assert_wait_deadline(event, interruptible, deadline);
 	if (res == THREAD_WAITING) {
@@ -929,6 +1017,17 @@ lck_rw_sleep_deadline(
 	else
 	if (lck_sleep_action & LCK_SLEEP_UNLOCK)
 		(void)lck_rw_done(lck);
+
+	if (lck_sleep_action & LCK_SLEEP_PROMOTED_PRI) {
+		if ((thread->rwlock_count-- == 1 /* field now 0 */) && (thread->sched_flags & TH_SFLAG_RW_PROMOTED)) {
+			/* sched_flags checked without lock, but will be rechecked while clearing */
+
+			/* Only if the caller wanted the lck_rw_t returned unlocked should we drop to 0 */
+			assert(lck_sleep_action & LCK_SLEEP_UNLOCK);
+
+			lck_rw_clear_promotion(thread);
+		}
+	}
 
 	return res;
 }
@@ -1009,9 +1108,9 @@ void lck_rw_clear_promotion(thread_t thread)
 			set_sched_pri(thread, DEPRESSPRI);
 		} else {
 			KERNEL_DEBUG_CONSTANT(MACHDBG_CODE(DBG_MACH_SCHED, MACH_RW_DEMOTE) | DBG_FUNC_NONE,
-								  thread->sched_pri, thread->priority, 0, 0, 0);
+								  thread->sched_pri, thread->base_pri, 0, 0, 0);
 			
-			SCHED(compute_priority)(thread, FALSE);
+			thread_recompute_sched_pri(thread, FALSE);
 		}
 	}
 
@@ -1029,9 +1128,9 @@ host_lockgroup_info(
 	lockgroup_info_t	*lockgroup_info;
 	vm_offset_t			lockgroup_info_addr;
 	vm_size_t			lockgroup_info_size;
+	vm_size_t			lockgroup_info_vmsize;
 	lck_grp_t			*lck_grp;
 	unsigned int		i;
-	vm_size_t			used;
 	vm_map_copy_t		copy;
 	kern_return_t		kr;
 
@@ -1040,9 +1139,10 @@ host_lockgroup_info(
 
 	lck_mtx_lock(&lck_grp_lock);
 
-	lockgroup_info_size = round_page(lck_grp_cnt * sizeof *lockgroup_info);
+	lockgroup_info_size = lck_grp_cnt * sizeof(*lockgroup_info);
+	lockgroup_info_vmsize = round_page(lockgroup_info_size);
 	kr = kmem_alloc_pageable(ipc_kernel_map,
-						 &lockgroup_info_addr, lockgroup_info_size);
+						 &lockgroup_info_addr, lockgroup_info_vmsize, VM_KERN_MEMORY_IPC);
 	if (kr != KERN_SUCCESS) {
 		lck_mtx_unlock(&lck_grp_lock);
 		return(kr);
@@ -1090,10 +1190,8 @@ host_lockgroup_info(
 	*lockgroup_infoCntp = lck_grp_cnt;
 	lck_mtx_unlock(&lck_grp_lock);
 
-	used = (*lockgroup_infoCntp) * sizeof *lockgroup_info;
-
-	if (used != lockgroup_info_size)
-		bzero((char *) lockgroup_info, lockgroup_info_size - used);
+	if (lockgroup_info_size != lockgroup_info_vmsize)
+		bzero((char *)lockgroup_info, lockgroup_info_vmsize - lockgroup_info_size);
 
 	kr = vm_map_copyin(ipc_kernel_map, (vm_map_address_t)lockgroup_info_addr,
 			   (vm_map_size_t)lockgroup_info_size, TRUE, &copy);
@@ -1104,178 +1202,3 @@ host_lockgroup_info(
 	return(KERN_SUCCESS);
 }
 
-/*
- * Compatibility module 
- */
-
-extern lck_rw_t		*lock_alloc_EXT( boolean_t can_sleep, unsigned short  tag0, unsigned short  tag1);
-extern void		lock_done_EXT(lck_rw_t *lock);
-extern void		lock_free_EXT(lck_rw_t *lock);
-extern void		lock_init_EXT(lck_rw_t *lock, boolean_t can_sleep, unsigned short tag0, unsigned short tag1);
-extern void		lock_read_EXT(lck_rw_t *lock);
-extern boolean_t	lock_read_to_write_EXT(lck_rw_t *lock);
-extern void		lock_write_EXT(lck_rw_t *lock);
-extern void		lock_write_to_read_EXT(lck_rw_t	*lock);
-extern wait_result_t	thread_sleep_lock_write_EXT( 
-				event_t event, lck_rw_t *lock, wait_interrupt_t interruptible);
-
-extern void		usimple_lock_EXT(lck_spin_t *lock);
-extern void		usimple_lock_init_EXT(lck_spin_t *lock, unsigned short tag);
-extern unsigned int	usimple_lock_try_EXT(lck_spin_t *lock);
-extern void		usimple_unlock_EXT(lck_spin_t *lock);
-extern wait_result_t	thread_sleep_usimple_lock_EXT(event_t event, lck_spin_t *lock, wait_interrupt_t interruptible);
-
-
-lck_mtx_t*		mutex_alloc_EXT(__unused unsigned short tag);
-void 			mutex_free_EXT(lck_mtx_t *mutex);
-void 			mutex_init_EXT(lck_mtx_t *mutex, __unused unsigned short tag);
-wait_result_t		thread_sleep_mutex_EXT(event_t event, lck_mtx_t *mutex, wait_interrupt_t interruptible);
-wait_result_t		thread_sleep_mutex_deadline_EXT(event_t event, lck_mtx_t *mutex, uint64_t deadline, wait_interrupt_t interruptible);
-
-lck_rw_t * 
-lock_alloc_EXT(
-	__unused boolean_t       can_sleep,
-	__unused unsigned short  tag0,
-	__unused unsigned short  tag1)
-{
-	return( lck_rw_alloc_init( &LockCompatGroup, LCK_ATTR_NULL));
-}
-
-void
-lock_done_EXT(
-	lck_rw_t	*lock)
-{
-	(void) lck_rw_done(lock);
-}
-
-void
-lock_free_EXT(
-	lck_rw_t	*lock)
-{
-	lck_rw_free(lock, &LockCompatGroup);
-}
-
-void
-lock_init_EXT(
-	lck_rw_t	*lock,
-	__unused boolean_t	can_sleep,
-	__unused unsigned short	tag0,
-	__unused unsigned short	tag1)
-{
-	lck_rw_init(lock, &LockCompatGroup, LCK_ATTR_NULL);	
-}
-
-void
-lock_read_EXT(
-	lck_rw_t	*lock)
-{
-	lck_rw_lock_shared( lock);
-}
-
-boolean_t
-lock_read_to_write_EXT(
-	lck_rw_t	*lock)
-{
-	return( lck_rw_lock_shared_to_exclusive(lock));
-}
-
-void
-lock_write_EXT(
-	lck_rw_t	*lock)
-{
-	lck_rw_lock_exclusive(lock);
-}
-
-void
-lock_write_to_read_EXT(
-	lck_rw_t	*lock)
-{
-	lck_rw_lock_exclusive_to_shared(lock);
-}
-
-wait_result_t
-thread_sleep_lock_write_EXT(
-	event_t			event,
-	lck_rw_t		*lock,
-	wait_interrupt_t	interruptible)
-{
-	return( lck_rw_sleep(lock, LCK_SLEEP_EXCLUSIVE, event, interruptible));
-}
-
-void
-usimple_lock_EXT(
-	lck_spin_t		*lock)
-{
-	lck_spin_lock(lock);
-}
-
-void
-usimple_lock_init_EXT(
-	lck_spin_t		*lock,
-	__unused unsigned short	tag)
-{
-	lck_spin_init(lock, &LockCompatGroup, LCK_ATTR_NULL);
-}
-
-unsigned int
-usimple_lock_try_EXT(
-	lck_spin_t		*lock)
-{
-	return(lck_spin_try_lock(lock));
-}
-
-void
-usimple_unlock_EXT(
-	lck_spin_t		*lock)
-{
-	lck_spin_unlock(lock);
-}
-
-wait_result_t
-thread_sleep_usimple_lock_EXT(
-	event_t			event,
-	lck_spin_t		*lock,
-	wait_interrupt_t	interruptible)
-{
-	return( lck_spin_sleep(lock, LCK_SLEEP_DEFAULT, event, interruptible));
-}
-lck_mtx_t *
-mutex_alloc_EXT(
-        __unused unsigned short         tag) 
-{
-        return(lck_mtx_alloc_init(&LockCompatGroup, LCK_ATTR_NULL));
-}
-
-void
-mutex_free_EXT(
-        lck_mtx_t               *mutex)
-{
-        lck_mtx_free(mutex, &LockCompatGroup);  
-}
-
-void
-mutex_init_EXT(
-        lck_mtx_t               *mutex,
-        __unused unsigned short tag) 
-{
-        lck_mtx_init(mutex, &LockCompatGroup, LCK_ATTR_NULL);   
-}
-
-wait_result_t
-thread_sleep_mutex_EXT(
-	event_t                 event,
-	lck_mtx_t               *mutex,
-	wait_interrupt_t        interruptible)
-{
-	return( lck_mtx_sleep(mutex, LCK_SLEEP_DEFAULT, event, interruptible));
-}
-
-wait_result_t
-thread_sleep_mutex_deadline_EXT(
-	event_t                 event,
-	lck_mtx_t               *mutex,
-	uint64_t                deadline,
-	wait_interrupt_t        interruptible)
-{
-	return( lck_mtx_sleep_deadline(mutex, LCK_SLEEP_DEFAULT, event, interruptible, deadline));
-}

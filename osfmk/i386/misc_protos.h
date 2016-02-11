@@ -83,6 +83,11 @@ extern void		blkclr(
 			       const char	*from,
 			       int		nbytes);
 
+extern void		memset_word(
+			       int		*dst,
+			       int		pattern,
+			       int		nwords);
+	
 
 /* Move arbitrarily-aligned data from one physical address to another */
 extern void bcopy_phys(addr64_t from, addr64_t to, vm_size_t nbytes);
@@ -152,6 +157,8 @@ extern void act_machine_switch_pcb(thread_t old, thread_t new);
 #define FULL_SLAVE_INIT	(NULL)
 #define FAST_SLAVE_INIT	((void *)(uintptr_t)1)
 
-uint64_t ml_early_random(void);
 void cpu_pmc_control(void *);
+
+extern void pstate_trace(void);
+
 #endif /* _I386_MISC_PROTOS_H_ */

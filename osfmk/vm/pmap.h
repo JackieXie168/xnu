@@ -110,7 +110,11 @@ extern kern_return_t 	copypv(
 #define cppvKmap       64	/* Use the kernel's vm_map */
 #define cppvKmapb      25
 
+extern boolean_t pmap_has_managed_page(ppnum_t first, ppnum_t last);
+
 #ifdef	MACH_KERNEL_PRIVATE
+
+#include <mach_assert.h>
 
 #include <machine/pmap.h>
 
@@ -189,12 +193,24 @@ extern void		pmap_virtual_space(
 extern pmap_t		pmap_create(	/* Create a pmap_t. */
 				ledger_t	ledger,
 				vm_map_size_t	size,
-				__unused boolean_t	is_64bit);
+				boolean_t	is_64bit);
+#if __x86_64__
+extern pmap_t		pmap_create_options(
+				ledger_t	ledger,
+				vm_map_size_t	size,
+				int		flags);
+#endif
+
 extern pmap_t		(pmap_kernel)(void);	/* Return the kernel's pmap */
 extern void		pmap_reference(pmap_t pmap);	/* Gain a reference. */
 extern void		pmap_destroy(pmap_t pmap); /* Release a reference. */
 extern void		pmap_switch(pmap_t);
 
+#if MACH_ASSERT
+extern void pmap_set_process(pmap_t pmap, 
+			     int pid,
+			     char *procname);
+#endif /* MACH_ASSERT */
 
 extern void		pmap_enter(	/* Enter a mapping */
 				pmap_t		pmap,
@@ -219,6 +235,12 @@ extern kern_return_t	pmap_enter_options(
 extern void		pmap_remove_some_phys(
 				pmap_t		pmap,
 				ppnum_t		pn);
+
+extern void		pmap_lock_phys_page(
+	                        ppnum_t		pn);
+
+extern void		pmap_unlock_phys_page(
+	                        ppnum_t		pn);
 
 
 /*
@@ -303,6 +325,7 @@ extern boolean_t	pmap_verify_free(ppnum_t pn);
 /*
  *	Statistics routines
  */
+extern int		(pmap_compressed)(pmap_t pmap);
 extern int		(pmap_resident_count)(pmap_t pmap);
 extern int		(pmap_resident_max)(pmap_t pmap);
 
@@ -544,6 +567,13 @@ extern kern_return_t pmap_nest(pmap_t,
 extern kern_return_t pmap_unnest(pmap_t,
 				 addr64_t,
 				 uint64_t);
+
+#define	PMAP_UNNEST_CLEAN	1
+
+extern kern_return_t pmap_unnest_options(pmap_t,
+				 addr64_t,
+				 uint64_t,
+				 unsigned int);
 extern boolean_t pmap_adjust_unnest_parameters(pmap_t, vm_map_offset_t *, vm_map_offset_t *);
 #endif	/* MACH_KERNEL_PRIVATE */
 
@@ -573,6 +603,12 @@ extern pmap_t	kernel_pmap;			/* The kernel's map */
 #define VM_MEM_SUPERPAGE	0x100		/* map a superpage instead of a base page */
 #define VM_MEM_STACK		0x200
 
+#if __x86_64__
+#define PMAP_CREATE_64BIT	0x1
+#define PMAP_CREATE_EPT		0x2
+#define PMAP_CREATE_KNOWN_FLAGS (PMAP_CREATE_64BIT | PMAP_CREATE_EPT)
+#endif
+
 #define PMAP_OPTIONS_NOWAIT	0x1		/* don't block, return 
 						 * KERN_RESOURCE_SHORTAGE 
 						 * instead */
@@ -585,7 +621,12 @@ extern pmap_t	kernel_pmap;			/* The kernel's map */
 #define PMAP_OPTIONS_REUSABLE	0x10		/* page is "reusable" */
 #define PMAP_OPTIONS_NOFLUSH	0x20		/* delay flushing of pmap */
 #define PMAP_OPTIONS_NOREFMOD	0x40		/* don't need ref/mod on disconnect */
+#define	PMAP_OPTIONS_ALT_ACCT	0x80		/* use alternate accounting scheme for page */
 #define PMAP_OPTIONS_REMOVE	0x100		/* removing a mapping */
+#define PMAP_OPTIONS_SET_REUSABLE   0x200	/* page is now "reusable" */
+#define PMAP_OPTIONS_CLEAR_REUSABLE 0x400	/* page no longer "reusable" */
+#define PMAP_OPTIONS_COMPRESSOR_IFF_MODIFIED 0x800 /* credit the compressor
+						    * iff page was modified */
 
 #if	!defined(__LP64__)
 extern vm_offset_t	pmap_extract(pmap_t pmap,
@@ -608,12 +649,6 @@ extern void		pmap_remove_options(	/* Remove mappings. */
 				vm_map_offset_t	e,
 				int		options);
 
-extern void		pmap_reusable(
-				pmap_t		map,
-				vm_map_offset_t	s,
-				vm_map_offset_t	e,
-				boolean_t	reusable);
-
 extern void		fillPage(ppnum_t pa, unsigned int fill);
 
 extern void pmap_map_sharedpage(task_t task, pmap_t pmap);
@@ -623,9 +658,16 @@ extern void pmap_unmap_sharedpage(pmap_t pmap);
 void pmap_pre_expand(pmap_t pmap, vm_map_offset_t vaddr);
 #endif
 
-unsigned int pmap_query_resident(pmap_t pmap,
-				 vm_map_offset_t s,
-				 vm_map_offset_t e);
+mach_vm_size_t pmap_query_resident(pmap_t pmap,
+				   vm_map_offset_t s,
+				   vm_map_offset_t e,
+				   mach_vm_size_t *compressed_bytes_p);
+
+#if CONFIG_PGTRACE
+int pmap_pgtrace_add_page(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
+int pmap_pgtrace_delete_page(pmap_t pmap, vm_map_offset_t start, vm_map_offset_t end);
+kern_return_t pmap_pgtrace_fault(pmap_t pmap, vm_map_offset_t va, arm_saved_state_t *ss);
+#endif
 
 #endif  /* KERNEL_PRIVATE */
 

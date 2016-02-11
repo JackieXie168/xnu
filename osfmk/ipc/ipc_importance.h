@@ -224,6 +224,8 @@ extern kern_return_t ipc_importance_task_drop_file_lock_assertion(ipc_importance
 extern kern_return_t ipc_importance_task_hold_legacy_external_assertion(ipc_importance_task_t task_imp, uint32_t count);
 extern kern_return_t ipc_importance_task_drop_legacy_external_assertion(ipc_importance_task_t task_imp, uint32_t count);
 
+extern boolean_t ipc_importance_check_circularity(ipc_port_t port, ipc_port_t dest);
+
 /* prepare importance attributes for sending */
 extern boolean_t ipc_importance_send(
 	ipc_kmsg_t		kmsg,
@@ -257,7 +259,7 @@ extern void task_importance_update_owner_info(task_t task);
 
 #if XNU_KERNEL_PRIVATE 
 #define TASK_IMP_LIST_DONATING_PIDS  0x1
-extern int task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int max_count);
+extern int task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int max_count);
 #endif
 
 __END_DECLS

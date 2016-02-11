@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2005 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -275,7 +275,7 @@ void	buf_seterror(buf_t, errno_t);
 /*!
  @function buf_setflags
  @abstract Set flags on a buffer.
- @discussion: buffer_flags |= flags
+ @discussion buffer_flags |= flags
  @param bp Buffer whose flags to set.
  @param flags Flags to add to buffer's mask. B_LOCKED/B_NOCACHE/B_ASYNC/B_READ/B_WRITE/B_PAGEIO/B_FUA
  @return void.
@@ -285,7 +285,7 @@ void	buf_setflags(buf_t, int32_t);
 /*!
  @function buf_clearflags
  @abstract Clear flags on a buffer.
- @discussion: buffer_flags &= ~flags
+ @discussion buffer_flags &= ~flags
  @param bp Buffer whose flags to clear.
  @param flags Flags to remove from buffer's mask. B_LOCKED/B_NOCACHE/B_ASYNC/B_READ/B_WRITE/B_PAGEIO/B_FUA
  @return void.
@@ -1002,7 +1002,7 @@ buf_t	buf_geteblk(int);
 /*!
  @function buf_clear_redundancy_flags
  @abstract Clear flags on a buffer.
- @discussion: buffer_redundancy_flags &= ~flags
+ @discussion buffer_redundancy_flags &= ~flags
  @param bp Buffer whose flags to clear.
  @param flags Flags to remove from buffer's mask
  @return void.
@@ -1020,7 +1020,7 @@ uint32_t	buf_redundancy_flags(buf_t);
 /*!
  @function buf_setredundancyflags
  @abstract Set redundancy flags on a buffer.
- @discussion: buffer_redundancy_flags |= flags
+ @discussion buffer_redundancy_flags |= flags
  @param bp Buffer whose flags to set.
  @param flags Flags to add to buffer's redundancy flags
  @return void.
@@ -1054,17 +1054,26 @@ int	buf_static(buf_t);
 #ifdef KERNEL_PRIVATE
 void	buf_setfilter(buf_t, void (*)(buf_t, void *), void *, void (**)(buf_t, void *), void **);
 
+/* bufattr allocation/duplication/deallocation functions */
 bufattr_t bufattr_alloc(void);
-
+bufattr_t bufattr_dup (bufattr_t bap);
 void bufattr_free(bufattr_t bap);
 
 /*!
- @function bufattr_cpaddr
- @abstract Get the address of cp_entry on a buffer.
- @param bap Buffer Attribute whose cp_entry to get.
- @return int.
+ @function bufattr_cpx
+ @abstract Returns a pointer to a cpx_t structure.
+ @param bap Buffer Attribute whose cpx_t structure you wish to get.
+ @return Returns a cpx_t structure, or NULL if not valid
  */
-void *bufattr_cpaddr(bufattr_t);
+struct cpx *bufattr_cpx(bufattr_t);
+
+/*!
+ @function bufattr_setcpx
+ @abstract Set the cp_ctx on a buffer attribute.
+ @param bap Buffer Attribute that you wish to change
+ @return void
+ */
+void bufattr_setcpx(bufattr_t, struct cpx *cpx);
 
 /*!
  @function bufattr_cpoff
@@ -1073,15 +1082,6 @@ void *bufattr_cpaddr(bufattr_t);
  @return void.
  */
 uint64_t bufattr_cpoff(bufattr_t);
-
-
-/*!
- @function bufattr_setcpaddr
- @abstract Set the address of cp_entry on a buffer attribute.
- @param bap Buffer Attribute whose cp entry value has to be set
- @return void.
- */
-void bufattr_setcpaddr(bufattr_t, void *);
 
 /*!
  @function bufattr_setcpoff
@@ -1104,7 +1104,7 @@ int bufattr_rawencrypted(bufattr_t bap);
  @function bufattr_markgreedymode
  @abstract Mark a buffer to use the greedy mode for writing.
  @param bap Buffer attributes to mark.
- @discussion Greedy Mode: request improved write performance from the underlying device at the expense of storage effeciency
+ @discussion Greedy Mode: request improved write performance from the underlying device at the expense of storage efficiency
  @return void.
  */
  void bufattr_markgreedymode(bufattr_t bap);
@@ -1113,10 +1113,29 @@ int bufattr_rawencrypted(bufattr_t bap);
  @function bufattr_greedymode
  @abstract Check if a buffer is written using the Greedy Mode
  @param bap Buffer attributes to test.
- @discussion Greedy Mode: request improved write performance from the underlying device at the expense of storage effeciency
+ @discussion Greedy Mode: request improved write performance from the underlying device at the expense of storage efficiency
  @return Nonzero if buffer uses greedy mode, 0 otherwise.
  */
 int	bufattr_greedymode(bufattr_t bap);
+
+/*!
+ @function bufattr_markisochronous
+ @abstract Mark a buffer to use the isochronous throughput mode for writing.
+ @param bap Buffer attributes to mark.
+ @discussion isochronous mode: request improved write performance from the underlying device at the expense of storage efficiency
+ @return void.
+ */
+ void bufattr_markisochronous(bufattr_t bap);
+
+ /*!
+ @function bufattr_isochronous
+ @abstract Check if a buffer is written using the isochronous
+ @param bap Buffer attributes to test.
+ @discussion isochronous mode: request improved write performance from the underlying device at the expense of storage efficiency
+ @return Nonzero if buffer uses isochronous mode, 0 otherwise.
+ */
+int	bufattr_isochronous(bufattr_t bap);
+
 
 /*!
  @function bufattr_throttled
@@ -1125,6 +1144,14 @@ int	bufattr_greedymode(bufattr_t bap);
  @return Nonzero if the buffer is throttled, 0 otherwise.
  */
 int bufattr_throttled(bufattr_t bap);
+
+/*!
+ @function bufattr_passive
+ @abstract Check if a buffer is marked passive.
+ @param bap Buffer attribute to test.
+ @return Nonzero if the buffer is marked passive, 0 otherwise.
+ */
+int bufattr_passive(bufattr_t bap);
 
 /*!
  @function bufattr_nocache
@@ -1136,12 +1163,21 @@ int bufattr_nocache(bufattr_t bap);
 
 /*!
  @function bufattr_meta
- @abstract Check if a buffer has meta attribute.
+ @abstract Check if a buffer has the bufattr meta attribute.
  @param bap Buffer attribute to test.
  @return Nonzero if the buffer has meta attribute, 0 otherwise.
  */
 
 int bufattr_meta(bufattr_t bap);
+
+/*!
+ @function bufattr_markmeta
+ @abstract Set the bufattr meta attribute.
+ @param bap Buffer attribute to manipulate.
+ @return void
+ */
+void bufattr_markmeta(bufattr_t bap);
+
 
 /*!
  @function bufattr_delayidlesleep

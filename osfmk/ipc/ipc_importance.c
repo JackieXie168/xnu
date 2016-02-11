@@ -519,7 +519,7 @@ ipc_importance_task_check_transition(
 		return FALSE;
 
 #if IMPORTANCE_DEBUG
-	int target_pid = (TASK_NULL != target_task) ? audit_token_pid_from_task(target_task) : -1;
+	int target_pid = task_pid(target_task);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_ASSERTION, (((boost) ? IMP_HOLD : IMP_DROP) | TASK_POLICY_INTERNAL))) | DBG_FUNC_START,
 					  proc_selfpid(), target_pid, task_imp->iit_assertcnt, IIT_EXTERN(task_imp), 0);
@@ -542,7 +542,7 @@ ipc_importance_task_check_transition(
 			if (target_task != TASK_NULL) {
 				printf("Over-release of kernel-internal importance assertions for pid %d (%s), "
 				       "dropping %d assertion(s) but task only has %d remaining (%d external).\n",
-				       audit_token_pid_from_task(target_task),
+				       task_pid(target_task),
 				       (target_task->bsd_info == NULL) ? "" : proc_name_address(target_task->bsd_info),
 				       delta,
 				       task_imp->iit_assertcnt,
@@ -653,7 +653,7 @@ ipc_importance_task_propagate_helper(
 		assert(IP_VALID(port));
 		ip_lock(port);
 		temp_task_imp = IIT_NULL;
-		if (!ipc_port_importance_delta_internal(port, &delta, &temp_task_imp)) {
+		if (!ipc_port_importance_delta_internal(port, IPID_OPTION_NORMAL, &delta, &temp_task_imp)) {
 			ip_unlock(port);
 		}
 
@@ -1039,19 +1039,31 @@ ipc_importance_task_propagate_assertion_locked(
 		temp_task_imp->iit_updatepolicy = 0;
 		if (need_update && TASK_NULL != temp_task_imp->iit_task) {
 			if (NULL == temp_task_imp->iit_updateq) {
-				temp_task_imp->iit_updatetime = 0;
-				temp_task_imp->iit_updateq = &updates;
-				ipc_importance_task_reference_internal(temp_task_imp);
-				if (boost) {
-					queue_enter(&updates, temp_task_imp,
-						    ipc_importance_task_t, iit_updates);
+
+				/*
+				 * If a downstream task that needs an update is subjects to AppNap,
+				 * drop boosts according to the delay hysteresis.  Otherwise,
+				 * immediate update it.
+				 */
+				if (!boost && temp_task_imp != task_imp &&
+				    ipc_importance_delayed_drop_call != NULL &&
+				    ipc_importance_task_is_marked_denap_receiver(temp_task_imp)) {
+					ipc_importance_task_delayed_drop(temp_task_imp);
 				} else {
-					queue_enter_first(&updates, temp_task_imp,
-							  ipc_importance_task_t, iit_updates);
+					temp_task_imp->iit_updatetime = 0;
+					temp_task_imp->iit_updateq = &updates;
+					ipc_importance_task_reference_internal(temp_task_imp);
+					if (boost) {
+						queue_enter(&updates, temp_task_imp,
+							    ipc_importance_task_t, iit_updates);
+					} else {
+						queue_enter_first(&updates, temp_task_imp,
+								  ipc_importance_task_t, iit_updates);
+					}
 				}
 			} else {
 				/* Must already be on the AppNap hysteresis queue */
-				assert(&ipc_importance_delayed_drop_queue);
+				assert(ipc_importance_delayed_drop_call != NULL);
 				assert(ipc_importance_task_is_marked_denap_receiver(temp_task_imp));
 			}	
 		}
@@ -1242,7 +1254,7 @@ ipc_importance_task_hold_legacy_external_assertion(ipc_importance_task_t task_im
 	target_task = task_imp->iit_task;
 
 #if IMPORTANCE_DEBUG
-	int target_pid = (TASK_NULL != target_task) ? audit_token_pid_from_task(target_task) : -1;
+	int target_pid = task_pid(target_task);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_ASSERTION, (IMP_HOLD | TASK_POLICY_EXTERNAL))) | DBG_FUNC_START,
 		proc_selfpid(), target_pid, task_imp->iit_assertcnt, IIT_LEGACY_EXTERN(task_imp), 0);
@@ -1278,7 +1290,7 @@ ipc_importance_task_hold_legacy_external_assertion(ipc_importance_task_t task_im
 		printf("BUG in process %s[%d]: "
 		       "attempt to acquire an additional legacy external boost assertion without holding an existing legacy external assertion. "
 		       "(%d total, %d external, %d legacy-external)\n",
-		       proc_name_address(target_task->bsd_info), audit_token_pid_from_task(target_task),
+		       proc_name_address(target_task->bsd_info), task_pid(target_task),
 		       target_assertcnt, target_externcnt, target_legacycnt);
 	}
 
@@ -1316,7 +1328,7 @@ ipc_importance_task_drop_legacy_external_assertion(ipc_importance_task_t task_im
 	target_task = task_imp->iit_task;
 
 #if IMPORTANCE_DEBUG
-	int target_pid = (TASK_NULL != target_task) ? audit_token_pid_from_task(target_task) : -1;
+	int target_pid = task_pid(target_task);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_ASSERTION, (IMP_DROP | TASK_POLICY_EXTERNAL))) | DBG_FUNC_START,
 		proc_selfpid(), target_pid, task_imp->iit_assertcnt, IIT_LEGACY_EXTERN(task_imp), 0);
@@ -1370,7 +1382,7 @@ ipc_importance_task_drop_legacy_external_assertion(ipc_importance_task_t task_im
 	/* delayed printf for user-supplied data failures */
 	if (KERN_FAILURE == ret && TASK_NULL != target_task) {
 		printf("BUG in process %s[%d]: over-released legacy external boost assertions (%d total, %d external, %d legacy-external)\n",
-		       proc_name_address(target_task->bsd_info), audit_token_pid_from_task(target_task),
+		       proc_name_address(target_task->bsd_info), task_pid(target_task),
 		       target_assertcnt, target_externcnt, target_legacycnt);
 	}
 
@@ -1394,7 +1406,7 @@ ipc_importance_task_externalize_legacy_assertion(ipc_importance_task_t task_imp,
 	}
 
 #if IMPORTANCE_DEBUG
-	int target_pid = audit_token_pid_from_task(target_task);
+	int target_pid = task_pid(target_task);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_ASSERTION, IMP_EXTERN)) | DBG_FUNC_START,
 	        proc_selfpid(), target_pid, task_imp->iit_assertcnt, IIT_EXTERN(task_imp), 0);
@@ -1458,7 +1470,7 @@ ipc_importance_task_update_live_donor(ipc_importance_task_t task_imp)
 	task_live_donor = target_task->effective_policy.t_live_donor;
 
 #if IMPORTANCE_DEBUG
-	int target_pid = audit_token_pid_from_task(target_task);
+	int target_pid = task_pid(target_task);
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 	                          (IMPORTANCE_CODE(IMP_DONOR_CHANGE, IMP_DONOR_UPDATE_LIVE_DONOR_STATE)) | DBG_FUNC_START,
@@ -1520,7 +1532,7 @@ ipc_importance_task_mark_donor(ipc_importance_task_t task_imp, boolean_t donatin
 
 	KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE,
 	                          (IMPORTANCE_CODE(IMP_DONOR_CHANGE, IMP_DONOR_INIT_DONOR_STATE)) | DBG_FUNC_NONE,
-	                          audit_token_pid_from_task(task_imp->iit_task), donating,
+	                          task_pid(task_imp->iit_task), donating,
 	                          old_donor, task_imp->iit_donor, 0);
 	
 	ipc_importance_unlock();
@@ -1901,7 +1913,7 @@ void task_importance_update_owner_info(task_t task) {
 	if (task != TASK_NULL && task->task_imp_base != IIT_NULL) {
 		ipc_importance_task_t task_elem = task->task_imp_base;
 
-		task_elem->iit_bsd_pid = audit_token_pid_from_task(task);
+		task_elem->iit_bsd_pid = task_pid(task);
 		if (task->bsd_info) {
 			strncpy(&task_elem->iit_procname[0], proc_name_address(task->bsd_info), 16);
 			task_elem->iit_procname[16] = '\0';
@@ -2034,6 +2046,276 @@ ipc_importance_disconnect_task(task_t task)
 }
 
 /*
+ *	Routine:	ipc_importance_check_circularity
+ *	Purpose:
+ *		Check if queueing "port" in a message for "dest"
+ *		would create a circular group of ports and messages.
+ *
+ *		If no circularity (FALSE returned), then "port"
+ *		is changed from "in limbo" to "in transit".
+ *
+ *		That is, we want to set port->ip_destination == dest,
+ *		but guaranteeing that this doesn't create a circle
+ *		port->ip_destination->ip_destination->... == port
+ *
+ *		Additionally, if port was successfully changed to "in transit",
+ *		propagate boost assertions from the "in limbo" port to all
+ *		the ports in the chain, and, if the destination task accepts
+ *		boosts, to the destination task.
+ *
+ *	Conditions:
+ *		No ports locked.  References held for "port" and "dest".
+ */
+
+boolean_t
+ipc_importance_check_circularity(
+	ipc_port_t	port,
+	ipc_port_t	dest)
+{
+	ipc_importance_task_t imp_task = IIT_NULL;
+	ipc_importance_task_t release_imp_task = IIT_NULL;
+	boolean_t imp_lock_held = FALSE;
+	int assertcnt = 0;
+	ipc_port_t base;
+
+	assert(port != IP_NULL);
+	assert(dest != IP_NULL);
+
+	if (port == dest)
+		return TRUE;
+	base = dest;
+
+	/* port is in limbo, so donation status is safe to latch */
+	if (port->ip_impdonation != 0) {
+		imp_lock_held = TRUE;
+		ipc_importance_lock();
+	}
+
+	/*
+	 *	First try a quick check that can run in parallel.
+	 *	No circularity if dest is not in transit.
+	 */
+	ip_lock(port);
+
+	/* 
+	 * Even if port is just carrying assertions for others,
+	 * we need the importance lock.
+	 */
+	if (port->ip_impcount > 0 && !imp_lock_held) {
+		if (!ipc_importance_lock_try()) {
+			ip_unlock(port);
+			ipc_importance_lock();
+			ip_lock(port);
+		}
+		imp_lock_held = TRUE;
+	}
+
+	if (ip_lock_try(dest)) {
+		if (!ip_active(dest) ||
+		    (dest->ip_receiver_name != MACH_PORT_NULL) ||
+		    (dest->ip_destination == IP_NULL))
+			goto not_circular;
+
+		/* dest is in transit; further checking necessary */
+
+		ip_unlock(dest);
+	}
+	ip_unlock(port);
+
+	/* 
+	 * We're about to pay the cost to serialize,
+	 * just go ahead and grab importance lock.
+	 */
+	if (!imp_lock_held) {
+		ipc_importance_lock();
+		imp_lock_held = TRUE;
+	}
+
+	ipc_port_multiple_lock(); /* massive serialization */
+
+	/*
+	 *	Search for the end of the chain (a port not in transit),
+	 *	acquiring locks along the way.
+	 */
+
+	for (;;) {
+		ip_lock(base);
+
+		if (!ip_active(base) ||
+		    (base->ip_receiver_name != MACH_PORT_NULL) ||
+		    (base->ip_destination == IP_NULL))
+			break;
+
+		base = base->ip_destination;
+	}
+
+	/* all ports in chain from dest to base, inclusive, are locked */
+
+	if (port == base) {
+		/* circularity detected! */
+
+		ipc_port_multiple_unlock();
+
+		/* port (== base) is in limbo */
+
+		assert(ip_active(port));
+		assert(port->ip_receiver_name == MACH_PORT_NULL);
+		assert(port->ip_destination == IP_NULL);
+
+		while (dest != IP_NULL) {
+			ipc_port_t next;
+
+			/* dest is in transit or in limbo */
+
+			assert(ip_active(dest));
+			assert(dest->ip_receiver_name == MACH_PORT_NULL);
+
+			next = dest->ip_destination;
+			ip_unlock(dest);
+			dest = next;
+		}
+
+		if (imp_lock_held)
+			ipc_importance_unlock();
+
+		return TRUE;
+	}
+
+	/*
+	 *	The guarantee:  lock port while the entire chain is locked.
+	 *	Once port is locked, we can take a reference to dest,
+	 *	add port to the chain, and unlock everything.
+	 */
+
+	ip_lock(port);
+	ipc_port_multiple_unlock();
+
+    not_circular:
+
+	/* port is in limbo */
+
+	assert(ip_active(port));
+	assert(port->ip_receiver_name == MACH_PORT_NULL);
+	assert(port->ip_destination == IP_NULL);
+
+	ip_reference(dest);
+	port->ip_destination = dest;
+
+	/* must have been in limbo or still bound to a task */
+	assert(port->ip_tempowner != 0);
+
+	/*
+	 * We delayed dropping assertions from a specific task.
+	 * Cache that info now (we'll drop assertions and the
+	 * task reference below).
+	 */
+	release_imp_task = port->ip_imp_task;
+	if (IIT_NULL != release_imp_task) {
+		port->ip_imp_task = IIT_NULL;
+	}
+	assertcnt = port->ip_impcount;
+
+	/* take the port out of limbo w.r.t. assertions */
+	port->ip_tempowner = 0;
+
+	/* now unlock chain */
+
+	ip_unlock(port);
+
+	for (;;) {
+
+		/* every port along chain track assertions behind it */
+		ipc_port_impcount_delta(dest, assertcnt, base);
+
+		if (dest == base)
+			break;
+
+		/* port is in transit */
+
+		assert(ip_active(dest));
+		assert(dest->ip_receiver_name == MACH_PORT_NULL);
+		assert(dest->ip_destination != IP_NULL);
+		assert(dest->ip_tempowner == 0);
+
+		port = dest->ip_destination;
+		ip_unlock(dest);
+		dest = port;
+	}
+
+	/* base is not in transit */
+	assert(!ip_active(base) ||
+	       (base->ip_receiver_name != MACH_PORT_NULL) ||
+	       (base->ip_destination == IP_NULL));
+
+	/*
+	 * Find the task to boost (if any).
+	 * We will boost "through" ports that don't know
+	 * about inheritance to deliver receive rights that
+	 * do.
+	 */
+	if (ip_active(base) && (assertcnt > 0)) {
+		assert(imp_lock_held);
+		if (base->ip_tempowner != 0) {
+			if (IIT_NULL != base->ip_imp_task) {
+				/* specified tempowner task */
+				imp_task = base->ip_imp_task;
+				assert(ipc_importance_task_is_any_receiver_type(imp_task));
+			}
+			/* otherwise don't boost current task */
+
+		} else if (base->ip_receiver_name != MACH_PORT_NULL) {
+			ipc_space_t space = base->ip_receiver;
+
+			/* only spaces with boost-accepting tasks */
+			if (space->is_task != TASK_NULL &&
+			    ipc_importance_task_is_any_receiver_type(space->is_task->task_imp_base))
+				imp_task = space->is_task->task_imp_base;
+		}
+
+		/* take reference before unlocking base */
+		if (imp_task != IIT_NULL) {
+			ipc_importance_task_reference(imp_task);
+		}
+	}
+
+	ip_unlock(base);
+
+	/*
+	 * Transfer assertions now that the ports are unlocked.
+	 * Avoid extra overhead if transferring to/from the same task.
+	 *
+	 * NOTE: If a transfer is occurring, the new assertions will
+	 * be added to imp_task BEFORE the importance lock is unlocked.
+	 * This is critical - to avoid decrements coming from the kmsgs
+	 * beating the increment to the task.
+	 */
+	boolean_t transfer_assertions = (imp_task != release_imp_task);
+
+	if (imp_task != IIT_NULL) {
+		assert(imp_lock_held);
+		if (transfer_assertions)
+			ipc_importance_task_hold_internal_assertion_locked(imp_task, assertcnt);
+	}
+
+	if (release_imp_task != IIT_NULL) {
+		assert(imp_lock_held);
+		if (transfer_assertions)
+			ipc_importance_task_drop_internal_assertion_locked(release_imp_task, assertcnt);
+	}
+
+	if (imp_lock_held)
+		ipc_importance_unlock();
+
+	if (imp_task != IIT_NULL)
+		ipc_importance_task_release(imp_task);
+
+	if (release_imp_task != IIT_NULL)
+		ipc_importance_task_release(release_imp_task);
+
+	return FALSE;
+}
+
+/*
  *	Routine:	ipc_importance_send
  *	Purpose:
  *		Post the importance voucher attribute [if sent] or a static
@@ -2054,7 +2336,6 @@ ipc_importance_send(
 	task_t task;
 	ipc_importance_task_t task_imp;
 	kern_return_t kr;
-
 
 	assert(IP_VALID(port));
 
@@ -2157,13 +2438,12 @@ ipc_importance_send(
 	/*
 	 * If we need to relock the port, do it with the importance still locked.
 	 * This assures we get to add the importance boost through the port to
-	 * the task BEFORE anyone else can attempt to undo that operation because
+	 * the task BEFORE anyone else can attempt to undo that operation if
 	 * the sender lost donor status.
 	 */
 	if (TRUE == port_lock_dropped) {
 		ip_lock(port);
 	}
-	ipc_importance_unlock();
 
  portupdate:
 				
@@ -2174,15 +2454,40 @@ ipc_importance_send(
 		unsigned int sender_pid = dbgtrailer->msgh_audit.val[5];
 		mach_msg_id_t imp_msgh_id = kmsg->ikm_header->msgh_id;
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_SEND)) | DBG_FUNC_START,
-		                           audit_token_pid_from_task(task), sender_pid, imp_msgh_id, 0, 0);
+		                           task_pid(task), sender_pid, imp_msgh_id, 0, 0);
 	}
 #endif /* IMPORTANCE_DEBUG */
 
-	/* adjust port boost count (with port locked) */
-	if (TRUE == ipc_port_importance_delta(port, 1)) {
+	mach_port_delta_t delta = 1;
+	boolean_t need_port_lock;
+	task_imp = IIT_NULL;
+
+	/* adjust port boost count (with importance and port locked) */
+	need_port_lock = ipc_port_importance_delta_internal(port, IPID_OPTION_NORMAL, &delta, &task_imp);
+
+	/* if we need to adjust a task importance as a result, apply that here */
+	if (IIT_NULL != task_imp && delta != 0) {
+		assert(delta == 1);
+
+		/* if this results in a change of state, propagate the transistion */
+		if (ipc_importance_task_check_transition(task_imp, IIT_UPDATE_HOLD, delta)) {
+
+			/* can't hold the port lock during task transition(s) */
+			if (!need_port_lock) {
+				need_port_lock = TRUE;
+				ip_unlock(port);
+			}
+			ipc_importance_task_propagate_assertion_locked(task_imp, IIT_UPDATE_HOLD, TRUE);
+		}
+	}
+
+	ipc_importance_unlock();
+
+	if (need_port_lock) {
 		port_lock_dropped = TRUE;
 		ip_lock(port);
 	}
+
 	return port_lock_dropped;
 }
 	
@@ -2437,7 +2742,12 @@ ipc_importance_inherit_from(ipc_kmsg_t kmsg)
 		ipc_importance_unlock();
 	}
 
-	/* decrement port boost count */ 
+	/*
+	 * decrement port boost count
+	 * This is OK to do without the importance lock as we atomically
+	 * unlinked the kmsg and snapshot the donating state while holding
+	 * the importance lock
+	 */ 
 	if (donating) {
 		ip_lock(port);
 		if (III_NULL != inherit) {
@@ -2446,14 +2756,14 @@ ipc_importance_inherit_from(ipc_kmsg_t kmsg)
 			ip_unlock(port);
 		}  else	{
 			/* drop importance from port and destination task */
-			if (ipc_port_importance_delta(port, -1) == FALSE) {
+			if (ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
 				ip_unlock(port);
 			}
 		}
 	} else if (cleared_self_donation) {
 		ip_lock(port);
 		/* drop cleared donation from port and destination task */
-		if (ipc_port_importance_delta(port, -1) == FALSE) {
+		if (ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
 			ip_unlock(port);
 		}
 	}
@@ -2526,29 +2836,36 @@ ipc_importance_receive(
 
 		assert(IIE_NULL == kmsg->ikm_importance);
 
-		/* replace the importance attribute with the handle we created */
-		/*  our made reference on the inhert is donated to the voucher */
-		recipe = (ipc_voucher_attr_recipe_t)&recipes[recipe_size];
-		recipe->key = MACH_VOUCHER_ATTR_KEY_IMPORTANCE;
-		recipe->command = MACH_VOUCHER_ATTR_SET_VALUE_HANDLE;
-		recipe->previous_voucher = IPC_VOUCHER_NULL;
-		recipe->content_size = sizeof(mach_voucher_attr_value_handle_t);
-		*(mach_voucher_attr_value_handle_t *)(void *)recipe->content = handle;
-		recipe_size += sizeof(*recipe) + sizeof(mach_voucher_attr_value_handle_t);
+		/*
+		 * Only create a new voucher if we have an inherit object
+		 * (from the ikm_importance field of the incoming message), OR
+		 * we have a valid incoming voucher. If we have neither of
+		 * these things then there is no need to create a new voucher.
+		 */
+		if (IP_VALID(kmsg->ikm_voucher) || inherit != III_NULL) {
+			/* replace the importance attribute with the handle we created */
+			/*  our made reference on the inherit is donated to the voucher */
+			recipe = (ipc_voucher_attr_recipe_t)&recipes[recipe_size];
+			recipe->key = MACH_VOUCHER_ATTR_KEY_IMPORTANCE;
+			recipe->command = MACH_VOUCHER_ATTR_SET_VALUE_HANDLE;
+			recipe->previous_voucher = IPC_VOUCHER_NULL;
+			recipe->content_size = sizeof(mach_voucher_attr_value_handle_t);
+			*(mach_voucher_attr_value_handle_t *)(void *)recipe->content = handle;
+			recipe_size += sizeof(*recipe) + sizeof(mach_voucher_attr_value_handle_t);
 
-		kr = ipc_voucher_attr_control_create_mach_voucher(ipc_importance_control,
-								  recipes,
-								  recipe_size,
-								  &recv_voucher);
-		assert(KERN_SUCCESS == kr);
+			kr = ipc_voucher_attr_control_create_mach_voucher(ipc_importance_control,
+									  recipes,
+									  recipe_size,
+									  &recv_voucher);
+			assert(KERN_SUCCESS == kr);
 
-		/* swap the voucher port (and set voucher bits in case it didn't already exist) */
-		kmsg->ikm_header->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
-		ipc_port_release_send(kmsg->ikm_voucher);
-		kmsg->ikm_voucher = convert_voucher_to_port(recv_voucher);
-		if (III_NULL != inherit)
-			impresult = 2;
-
+			/* swap the voucher port (and set voucher bits in case it didn't already exist) */
+			kmsg->ikm_header->msgh_bits |= (MACH_MSG_TYPE_MOVE_SEND << 16);
+			ipc_port_release_send(kmsg->ikm_voucher);
+			kmsg->ikm_voucher = convert_voucher_to_port(recv_voucher);
+			if (III_NULL != inherit)
+				impresult = 2;
+		}
 	} else { /* Don't want a voucher */
 
 		/* got linked importance? have to drop */
@@ -2569,7 +2886,6 @@ ipc_importance_receive(
 			ipc_importance_task_t task_imp = task_self->task_imp_base;
 			ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
 
-			/* defensive deduction for release builds lacking the assert */
 			ip_lock(port);
 			ipc_port_impcount_delta(port, -1, IP_NULL);
 			ip_unlock(port);
@@ -2588,7 +2904,7 @@ ipc_importance_receive(
 #if IMPORTANCE_DEBUG
 	if (-1 < impresult)
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_DELV)) | DBG_FUNC_NONE,
-				sender_pid, audit_token_pid_from_task(task_self),
+				sender_pid, task_pid(task_self),
 				kmsg->ikm_header->msgh_id, impresult, 0);
 	if (impresult == 2){
 		/*
@@ -2596,7 +2912,7 @@ ipc_importance_receive(
 		 * will trigger the probe in ipc_importance_task_externalize_assertion() 
 		 * above and have impresult==1 here.
 		 */
-		DTRACE_BOOST5(receive_boost, task_t, task_self, int, audit_token_pid_from_task(task_self), int, sender_pid, int, 1, int, task_self->task_imp_base->iit_assertcnt);
+		DTRACE_BOOST5(receive_boost, task_t, task_self, int, task_pid(task_self), int, sender_pid, int, 1, int, task_self->task_imp_base->iit_assertcnt);
     }
 #endif /* IMPORTANCE_DEBUG */
 }
@@ -2669,7 +2985,7 @@ ipc_importance_clean(
 			ip_lock(port);
 			/* inactive ports already had their importance boosts dropped */
 			if (!ip_active(port) || 
-			    ipc_port_importance_delta(port, -1) == FALSE) {
+			    ipc_port_importance_delta(port, IPID_OPTION_NORMAL, -1) == FALSE) {
 				ip_unlock(port);
 			}
 		}
@@ -2939,22 +3255,22 @@ ipc_importance_extract_content(
 			ipc_importance_inherit_t inherit = III_NULL;
 			ipc_importance_task_t task_imp;
 			task_t task;
-			int task_pid;
+			int t_pid;
 
 			if (IIE_TYPE_TASK == IIE_TYPE(elem)) {
 				task_imp = (ipc_importance_task_t)elem;
 				task = task_imp->iit_task;
-				task_pid = (TASK_NULL != task) ?
-				           audit_token_pid_from_task(task) : -1;
-				snprintf((char *)out_content + size, *in_out_content_size - size, "%d", task_pid);
+				t_pid = (TASK_NULL != task) ?
+				           task_pid(task) : -1;
+				snprintf((char *)out_content + size, *in_out_content_size - size, "%d", t_pid);
 			} else {
 				inherit = (ipc_importance_inherit_t)elem;
 				task_imp = inherit->iii_to_task;
 				task = task_imp->iit_task;
-				task_pid = (TASK_NULL != task) ?
-				           audit_token_pid_from_task(task) : -1;
+				t_pid = (TASK_NULL != task) ?
+				           task_pid(task) : -1;
 				snprintf((char *)out_content + size, *in_out_content_size - size, 
-					 "%d (%d of %d boosts) %s from pid ", task_pid,
+					 "%d (%d of %d boosts) %s from pid ", t_pid,
 					 III_EXTERN(inherit), inherit->iii_externcnt, 
 					 (inherit->iii_donating) ? "donated" : "linked");
 			}
@@ -3037,14 +3353,20 @@ ipc_importance_command(
 		return KERN_SUCCESS;
 	}
 
+	to_task = inherit->iii_to_task;
+	assert(ipc_importance_task_is_any_receiver_type(to_task));
+
+	/* if not donating to a denap receiver, it was called incorrectly */
+	if (!ipc_importance_task_is_marked_denap_receiver(to_task)) {
+		ipc_importance_unlock();
+		return KERN_INVALID_ARGUMENT; /* keeps dispatch happy */
+	}
+
 	/* Enough external references left to drop? */
 	if (III_EXTERN(inherit) < refs) {
 		ipc_importance_unlock();
 		return KERN_FAILURE;
 	}
-
-	to_task = inherit->iii_to_task;
-	assert(ipc_importance_task_is_any_receiver_type(to_task));
 
 	/* re-base external and internal counters at the inherit and the to-task (if apropos) */
 	if (inherit->iii_donating) {
@@ -3185,9 +3507,9 @@ ipc_importance_thread_call_init(void)
  *             Will panic the system otherwise.
  */
 extern int
-task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int max_count)
+task_importance_list_pids(task_t task, int flags, char *pid_list, unsigned int max_count)
 {
-	if (lck_spin_is_acquired(&ipc_importance_lock_data) ||
+	if (kdp_lck_spin_is_acquired(&ipc_importance_lock_data) ||
 	      max_count < 1 ||
 	      task->task_imp_base == IIT_NULL ||
 	      pid_list == NULL ||
@@ -3200,12 +3522,13 @@ task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int ma
 	ipc_kmsg_t temp_kmsg;
 	ipc_importance_inherit_t temp_inherit;
 	ipc_importance_elem_t elem;
-	int target_pid;
+	int target_pid = 0, previous_pid;
 
 	queue_iterate(&task_imp->iit_inherits, temp_inherit, ipc_importance_inherit_t, iii_inheritance) {
 		/* check space in buffer */
 		if (pidcount >= max_count) 
 			break;
+		previous_pid = target_pid;
 		target_pid = -1;
 
 		if (temp_inherit->iii_donating) {
@@ -3215,20 +3538,24 @@ task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int ma
 #else
 			temp_task = temp_inherit->iii_to_task->iit_task;
 			if (temp_task != TASK_NULL) {
-				target_pid = audit_token_pid_from_task(temp_task);
+				target_pid = task_pid(temp_task);
 			}
 #endif
 		}
 
-		if (target_pid != -1) {
-			pid_list[pidcount++] = target_pid;
+		if (target_pid != -1 && previous_pid != target_pid) {
+			memcpy(pid_list, &target_pid, sizeof(target_pid));
+			pid_list += sizeof(target_pid);
+			pidcount++;
 		}
 
 	}
 
+	target_pid = 0;
 	queue_iterate(&task_imp->iit_kmsgs, temp_kmsg, ipc_kmsg_t, ikm_inheritance) {
 		if (pidcount >= max_count)
 			break;
+		previous_pid = target_pid;
 		target_pid = -1;
 		elem = temp_kmsg->ikm_importance;
 		temp_task = TASK_NULL;
@@ -3243,7 +3570,7 @@ task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int ma
 
 		if (IIE_TYPE_TASK == IIE_TYPE(elem) && 
 			(((ipc_importance_task_t)elem)->iit_task != TASK_NULL)) {
-			target_pid = audit_token_pid_from_task(((ipc_importance_task_t)elem)->iit_task);
+			target_pid = task_pid(((ipc_importance_task_t)elem)->iit_task);
 		} else {
 			temp_inherit = (ipc_importance_inherit_t)elem;
 #if DEVELOPMENT || DEBUG
@@ -3251,13 +3578,15 @@ task_importance_list_pids(task_t task, int flags, int *pid_list, unsigned int ma
 #else
 			temp_task = temp_inherit->iii_to_task->iit_task;
 			if (temp_task != TASK_NULL) {
-				target_pid = audit_token_pid_from_task(temp_task);
+				target_pid = task_pid(temp_task);
 			}
 #endif
 		}
 
-		if (target_pid != -1) {
-			pid_list[pidcount++] = target_pid;
+		if (target_pid != -1 && previous_pid != target_pid) {
+			memcpy(pid_list, &target_pid, sizeof(target_pid));
+			pid_list += sizeof(target_pid);
+			pidcount++;
 		}
 	}
 

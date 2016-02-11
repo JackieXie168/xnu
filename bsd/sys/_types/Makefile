@@ -16,7 +16,6 @@ EXPINC_SUBDIRS =
 #	  $(DSTROOT)/System/Library/Frameworks/System.framework/PrivateHeaders
 #	  $(DSTROOT)/usr/include/
 DATAFILES = \
-	___offsetof.h \
 	_blkcnt_t.h \
 	_blksize_t.h \
 	_clock_t.h \
@@ -33,6 +32,7 @@ DATAFILES = \
 	_filesec_t.h \
 	_fsblkcnt_t.h \
 	_fsfilcnt_t.h \
+	_fsid_t.h \
 	_gid_t.h \
 	_guid_t.h \
 	_id_t.h \
@@ -55,19 +55,10 @@ DATAFILES = \
 	_o_dsync.h \
 	_o_sync.h \
 	_off_t.h \
+	_offsetof.h \
 	_os_inline.h \
 	_pid_t.h \
 	_posix_vdisable.h \
-	_pthread_attr_t.h \
-	_pthread_cond_t.h \
-	_pthread_condattr_t.h \
-	_pthread_key_t.h \
-	_pthread_mutex_t.h \
-	_pthread_mutexattr_t.h \
-	_pthread_once_t.h \
-	_pthread_rwlock_t.h \
-	_pthread_rwlockattr_t.h \
-	_pthread_t.h \
 	_ptrdiff_t.h \
 	_rsize_t.h \
 	_rune_t.h \
@@ -84,6 +75,7 @@ DATAFILES = \
 	_timespec.h \
  	_timeval.h \
  	_timeval32.h \
+ 	_timeval64.h \
  	_ucontext.h \
  	_ucontext64.h \
 	_uid_t.h \
@@ -135,7 +127,7 @@ EXPORT_MI_GEN_LIST =
 EXPORT_MI_DIR = sys/_types
 
 # /System/Library/Frameworks/System.framework/PrivateHeaders
-INSTALL_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
+INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
 
 # /System/Library/Frameworks/Kernel.framework/PrivateHeaders
 INSTALL_KF_MI_LCL_LIST =  ${KERNELFILES} ${PRIVATE_KERNELFILES}

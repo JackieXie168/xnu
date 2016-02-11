@@ -7,6 +7,20 @@ import sys
 ######################################
 plane = None
 
+#####################################
+# Utility functions.
+#####################################
+def CastIOKitClass(obj, target_type):
+    """ Type cast an object to another IOKIT CPP class.
+        params:
+            obj - core.value  object representing some C construct in lldb
+            target_type - str : ex 'OSString *'
+                        - lldb.SBType :
+    """
+    v = Cast(obj, target_type)
+    v.GetSBValue().SetPreferDynamicValue(lldb.eNoDynamicValues)
+    return v
+
 ######################################
 # Type Summaries
 ######################################
@@ -52,17 +66,17 @@ def GetObjectSummary(obj):
     
     ztvAddr = kern.GetLoadAddressForSymbol('_ZTV7OSArray')
     if vt == ztvAddr:
-        out_string += "(" + GetArray(Cast(obj, 'OSArray *')) + ")"
+        out_string += "(" + GetArray(CastIOKitClass(obj, 'OSArray *')) + ")"
         return out_string
     
     ztvAddr = kern.GetLoadAddressForSymbol('_ZTV5OSSet')
     if vt == ztvAddr:
-        out_string += GetSet(Cast(obj, 'OSSet *'))
+        out_string += GetSet(CastIOKitClass(obj, 'OSSet *'))
         return out_string
     
     ztvAddr = kern.GetLoadAddressForSymbol('_ZTV12OSDictionary')
     if vt == ztvAddr:
-        out_string += GetDictionary(Cast(obj, 'OSDictionary *'))
+        out_string += GetDictionary(CastIOKitClass(obj, 'OSDictionary *'))
         return out_string
     
     return out_string
@@ -85,9 +99,9 @@ def GetRegistryEntrySummary(entry):
         name = LookupKeyInOSDict(propertyTable, kern.globals.gIOClassKey)
     
     if name is not None:
-        out_string += "+-o {0:s}  ".format(GetString(Cast(name, 'OSString *')))
-    elif Cast(entry, 'IOService *').pwrMgt and Cast(entry, 'IOService *').pwrMgt.Name:
-        out_string += "+-o {0:s}  ".format(Cast(entry, 'IOService *').pwrMgt.Name)
+        out_string += "+-o {0:s}  ".format(GetString(CastIOKitClass(name, 'OSString *')))
+    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
+        out_string += "+-o {0:s}  ".format(CastIOKitClass(entry, 'IOService *').pwrMgt.Name)
     else:
         out_string += "+-o ??  "
     
@@ -95,14 +109,15 @@ def GetRegistryEntrySummary(entry):
     vtableAddr = dereference(Cast(entry, 'uintptr_t *')) - 2 * sizeof('uintptr_t *')
     vtype = kern.SymbolicateFromAddress(vtableAddr)
     if vtype is None or len(vtype) < 1:
-        out_string += "<object 0x{0: <16x}, id 0x{1:x}, vtable 0x{2: <16x}".format(entry, entry.reserved.fRegistryEntryID, vtableAddr)
+        out_string += "<object 0x{0: <16x}, id 0x{1:x}, vtable 0x{2: <16x}".format(entry, CastIOKitClass(entry, 'IORegistryEntry *').reserved.fRegistryEntryID, vtableAddr)
     else:
-        out_string += "<object 0x{0: <16x}, id 0x{1:x}, vtable 0x{2: <16x} <{3:s}>".format(entry, entry.reserved.fRegistryEntryID, vtableAddr, vtype[0].GetName())
+        out_string += "<object 0x{0: <16x}, id 0x{1:x}, vtable 0x{2: <16x} <{3:s}>".format(entry, CastIOKitClass(entry, 'IORegistryEntry *').reserved.fRegistryEntryID,
+                                                                                           vtableAddr, vtype[0].GetName())
     
     ztvAddr = kern.GetLoadAddressForSymbol('_ZTV15IORegistryEntry')
     if vtableAddr != ztvAddr:
         out_string += ", "
-        state = Cast(entry, 'IOService *').__state[0]
+        state = CastIOKitClass(entry, 'IOService *').__state[0]
         # kIOServiceRegisteredState
         if 0 == state & 2:
             out_string += "!"
@@ -114,11 +129,9 @@ def GetRegistryEntrySummary(entry):
         #kIOServiceInactiveState
         if 0 != state & 1:
             out_string += "in"
-        busyCount = (Cast(entry, 'IOService *').__state[1] & 0xff)
-        retCount = (Cast(entry, 'IOService *').retainCount & 0xffff)
+        busyCount = (CastIOKitClass(entry, 'IOService *').__state[1] & 0xff)
+        retCount = (CastIOKitClass(entry, 'IOService *').retainCount & 0xffff)
         out_string += "active, busy {0}, retain count {1}>".format(busyCount, retCount)
-    #else:
-    #    out_string += "\n"
     return out_string
 
 ######################################
@@ -133,7 +146,7 @@ def ShowAllClasses(cmd_args=None):
     count = unsigned(kern.globals.sAllClassesDict.count)
     
     while idx < count:
-        meta = Cast(kern.globals.sAllClassesDict.dictionary[idx].value, 'OSMetaClass *')
+        meta = CastIOKitClass(kern.globals.sAllClassesDict.dictionary[idx].value, 'OSMetaClass *')
         idx += 1
         print GetMetaClass(meta)
 
@@ -262,7 +275,7 @@ def ReadIOPort8(cmd_args=None):
     ReadIOPortInt(portAddr, 1, lcpu)
 
 @lldb_command('readioport16')
-def ReadIOPort8(cmd_args=None):
+def ReadIOPort16(cmd_args=None):
     """ Read value stored in the specified IO port. The CPU can be optionally
         specified as well.
         Prints 0xBAD10AD in case of a bad read
@@ -282,7 +295,7 @@ def ReadIOPort8(cmd_args=None):
     ReadIOPortInt(portAddr, 2, lcpu)
 
 @lldb_command('readioport32')
-def ReadIOPort8(cmd_args=None):
+def ReadIOPort32(cmd_args=None):
     """ Read value stored in the specified IO port. The CPU can be optionally
         specified as well.
         Prints 0xBAD10AD in case of a bad read
@@ -324,7 +337,7 @@ def WriteIOPort8(cmd_args=None):
     WriteIOPortInt(portAddr, 1, value, lcpu)
 
 @lldb_command('writeioport16')
-def WriteIOPort8(cmd_args=None):
+def WriteIOPort16(cmd_args=None):
     """ Write the value to the specified IO port. The size of the value is
         determined by the name of the command. The CPU used can be optionally
         specified as well.
@@ -346,7 +359,7 @@ def WriteIOPort8(cmd_args=None):
     WriteIOPortInt(portAddr, 2, value, lcpu)
 
 @lldb_command('writeioport32')
-def WriteIOPort8(cmd_args=None):
+def WriteIOPort32(cmd_args=None):
     """ Write the value to the specified IO port. The size of the value is
         determined by the name of the command. The CPU used can be optionally
         specified as well.
@@ -462,13 +475,13 @@ def ShowRegistryEntryRecurse(entry, prefix, printProps):
     childArray = LookupKeyInOSDict(registryTable, childKey)
     if childArray is not None:
         idx = 0
-        ca = Cast(childArray, 'OSArray *')
+        ca = CastIOKitClass(childArray, 'OSArray *')
         count = unsigned(ca.count)
         while idx < count:
             if plen != 0 and plen != 1 and (plen & (plen - 1)) == 0:
-                ShowRegistryEntryRecurse(Cast(ca.array[idx], 'IORegistryEntry *'), prefix + "| ", printProps)
+                ShowRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), prefix + "| ", printProps)
             else:
-                ShowRegistryEntryRecurse(Cast(ca.array[idx], 'IORegistryEntry *'), prefix + "  ", printProps)
+                ShowRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), prefix + "  ", printProps)
             idx += 1
 
 def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
@@ -490,12 +503,12 @@ def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
         name = LookupKeyInOSDict(propertyTable, kern.globals.gIOClassKey)
     
     if name is not None:
-        if str(Cast(name, 'OSString *').string) == search_name:
+        if str(CastIOKitClass(name, 'OSString *').string) == search_name:
             print GetRegistryEntrySummary(entry)
             if stopAfterFirst is True:
                 return True
-    elif Cast(entry, 'IOService *').pwrMgt and Cast(entry, 'IOService *').pwrMgt.Name:
-        name = Cast(entry, 'IOService *').pwrMgt.Name
+    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
+        name = CastIOKitClass(entry, 'IOService *').pwrMgt.Name
         if str(name) == search_name:
             print GetRegistryEntrySummary(entry)
             if stopAfterFirst is True:
@@ -509,10 +522,10 @@ def FindRegistryEntryRecurse(entry, search_name, stopAfterFirst):
     childArray = LookupKeyInOSDict(registryTable, childKey)
     if childArray is not None:
         idx = 0
-        ca = Cast(childArray, 'OSArray *')
+        ca = CastIOKitClass(childArray, 'OSArray *')
         count = unsigned(ca.count)
         while idx < count:
-            if FindRegistryEntryRecurse(Cast(ca.array[idx], 'IORegistryEntry *'), search_name, stopAfterFirst) is True:
+            if FindRegistryEntryRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), search_name, stopAfterFirst) is True:
                 return True
             idx += 1
     return False
@@ -537,10 +550,10 @@ def FindRegistryObjectRecurse(entry, search_name):
         name = LookupKeyInOSDict(propertyTable, kern.globals.gIOClassKey)
     
     if name is not None:
-        if str(Cast(name, 'OSString *').string) == search_name:
+        if str(CastIOKitClass(name, 'OSString *').string) == search_name:
             return entry
-    elif Cast(entry, 'IOService *').pwrMgt and Cast(entry, 'IOService *').pwrMgt.Name:
-        name = Cast(entry, 'IOService *').pwrMgt.Name
+    elif CastIOKitClass(entry, 'IOService *').pwrMgt and CastIOKitClass(entry, 'IOService *').pwrMgt.Name:
+        name = CastIOKitClass(entry, 'IOService *').pwrMgt.Name
         if str(name) == search_name:
             return entry
     
@@ -551,9 +564,9 @@ def FindRegistryObjectRecurse(entry, search_name):
         childKey = plane.keys[1]
     childArray = LookupKeyInOSDict(registryTable, childKey)
     if childArray is not None:
-        ca = Cast(childArray, 'OSArray *')
+        ca = CastIOKitClass(childArray, 'OSArray *')
         for idx in range(ca.count):
-            registry_object = FindRegistryObjectRecurse(Cast(ca.array[idx], 'IORegistryEntry *'), search_name)
+            registry_object = FindRegistryObjectRecurse(CastIOKitClass(ca.array[idx], 'IORegistryEntry *'), search_name)
             if not registry_object or int(registry_object) == int(0):
                 continue
             else:
@@ -609,11 +622,11 @@ def GetRegDictionary(osdict, prefix):
 def GetString(string):
     """ Returns the python string representation of a given OSString
     """
-    out_string = "\"{0:s}\"".format(Cast(string, 'OSString *').string)
+    out_string = "\"{0:s}\"".format(CastIOKitClass(string, 'OSString *').string)
     return out_string
 
 def GetNumber(num):
-    out_string = "{0:d}".format(Cast(num, 'OSNumber *').value)
+    out_string = "{0:d}".format(CastIOKitClass(num, 'OSNumber *').value)
     return out_string
 
 def GetBoolean(b):
@@ -707,16 +720,14 @@ def ReadIOPortInt(addr, numbytes, lcpu):
         result_pkt = Cast(addressof(kern.globals.manual_pkt.data), 'kdp_readioport_reply_t *')
         
         if(result_pkt.error == 0):
-            print "This macro is incomplete till <rdar://problem/12868059> is fixed"
-            # FIXME: Uncomment me when <rdar://problem/12868059> is fixed
-            #if numbytes == 1:
-            #    result = dereference(Cast(result_pkt.data, 'uint8_t *'))
-            #elif numbytes == 2:
-            #    result = dereference(Cast(result_pkt.data, 'uint16_t *'))
-            #elif numbytes == 4:
-            #    result = dereference(cast(result_pkt.data, 'uint32_t *'))
-    
-    print "0x{0: <4x}: 0x{1: <1x}".format(addr, result)
+            if numbytes == 1:
+                result = dereference(Cast(addressof(result_pkt.data), 'uint8_t *'))
+            elif numbytes == 2:
+                result = dereference(Cast(addressof(result_pkt.data), 'uint16_t *'))
+            elif numbytes == 4:
+                result = dereference(Cast(addressof(result_pkt.data), 'uint32_t *'))
+
+    print "{0: <#6x}: {1:#0{2}x}".format(addr, result, (numbytes*2)+2)
 
 def WriteIOPortInt(addr, numbytes, value, lcpu):
     """ Writes 'value' into ioport specified by 'addr'. Prints errors if it encounters any
@@ -730,12 +741,12 @@ def WriteIOPortInt(addr, numbytes, value, lcpu):
     len_address = unsigned(addressof(kern.globals.manual_pkt.len))
     data_address = unsigned(addressof(kern.globals.manual_pkt.data))
     if not WriteInt32ToMemoryAddress(0, input_address):
-        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
+        print "error writing {0: #x} to port {1: <#6x}: failed to write 0 to input_address".format(value, addr)
         return
     
     kdp_pkt_size = GetType('kdp_writeioport_req_t').GetByteSize()
     if not WriteInt32ToMemoryAddress(kdp_pkt_size, len_address):
-        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
+        print "error writing {0: #x} to port {1: <#6x}: failed to write kdp_pkt_size".format(value, addr)
         return
     
     kgm_pkt = kern.GetValueFromAddress(data_address, 'kdp_writeioport_req_t *')
@@ -747,27 +758,124 @@ def WriteIOPortInt(addr, numbytes, value, lcpu):
         WriteInt32ToMemoryAddress(numbytes, int(addressof(kgm_pkt.nbytes))) and
         WriteInt16ToMemoryAddress(lcpu, int(addressof(kgm_pkt.lcpu)))
         ):
-        print "This macro is incomplete till <rdar://problem/12868059> is fixed"
-        # FIXME: Uncomment me when <rdar://problem/12868059> is fixed
-        #if numbytes == 1:
-        #    if not WriteInt8ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-        #        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
-        #elif numbytes == 2:
-        #    if not WriteInt16ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-        #        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
-        #elif numbytes == 4:
-        #    if not WriteInt32ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
-        #        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
-        
+        if numbytes == 1:
+            if not WriteInt8ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
+                print "error writing {0: #x} to port {1: <#6x}: failed to write 8 bit data".format(value, addr)
+                return
+        elif numbytes == 2:
+            if not WriteInt16ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
+                print "error writing {0: #x} to port {1: <#6x}: failed to write 16 bit data".format(value, addr)
+                return
+        elif numbytes == 4:
+            if not WriteInt32ToMemoryAddress(value, int(addressof(kgm_pkt.data))):
+                print "error writing {0: #x} to port {1: <#6x}: failed to write 32 bit data".format(value, addr)
+                return
         if not WriteInt32ToMemoryAddress(1, input_address):
-            print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
+            print "error writing {0: #x} to port {1: <#6x}: failed to write to input_address".format(value, addr)
             return
 
         result_pkt = Cast(addressof(kern.globals.manual_pkt.data), 'kdp_writeioport_reply_t *')
         
         # Done with the write
         if(result_pkt.error == 0):
-            print "Writing 0x {0: x} to port {1: <4x} was successful".format(value, addr)
+            print "Writing {0: #x} to port {1: <#6x} was successful".format(value, addr)
     else:
-        print "error writing 0x{0: x} to port 0x{1: <4x}".format(value, addr)
+        print "error writing {0: #x} to port {1: <#6x}".format(value, addr)
+
+@lldb_command('showinterruptcounts')
+def showinterruptcounts(cmd_args=None):
+    """ Shows event source based interrupt counts by nub name and interrupt index.
+        Does not cover interrupts that are not event source based.  Will report 0
+        if interrupt accounting is disabled.
+    """
+
+    header_format = "{0: <20s} {1: >5s} {2: >20s}"
+    content_format = "{0: <20s} {1: >5d} {2: >20d}"
+
+    print header_format.format("Name", "Index", "Count")
+    
+    for i in kern.interrupt_stats:
+        owner = CastIOKitClass(i.owner, 'IOInterruptEventSource *')
+        nub = CastIOKitClass(owner.provider, 'IORegistryEntry *') 
+        name = None
+
+        # To uniquely identify an interrupt, we need the nub name and the index.  The index
+        # is stored with the stats object, but we need to retrieve the name.
+
+        registryTable = nub.fRegistryTable
+        propertyTable = nub.fPropertyTable
+    
+        name = LookupKeyInOSDict(registryTable, kern.globals.gIOServicePlane.nameKey)
+        if name is None:
+            name = LookupKeyInOSDict(registryTable, kern.globals.gIONameKey)
+        if name is None:
+            name = LookupKeyInOSDict(propertyTable, kern.globals.gIOClassKey)
+
+        if name is None:
+            nub_name = "Unknown"
+        else:
+            nub_name = GetString(CastIOKitClass(name, 'OSString *'))
+
+        # We now have everything we need; spew the requested data.
+
+        interrupt_index = i.interruptIndex
+        first_level_count = i.interruptStatistics[0]
+
+        print content_format.format(nub_name, interrupt_index, first_level_count)
+    
+    return True
+
+@lldb_command('showinterruptstats')
+def showinterruptstats(cmd_args=None):
+    """ Shows event source based interrupt statistics by nub name and interrupt index.
+        Does not cover interrupts that are not event source based.  Will report 0
+        if interrupt accounting is disabled, or if specific statistics are disabled.
+        Time is reported in ticks of mach_absolute_time.  Statistics are:
+        
+        Interrupt Count: Number of times the interrupt context handler was run
+        Interrupt Time: Total time spent in the interrupt context handler (if any)
+        Workloop Count: Number of times the kernel context handler was run
+        Workloop CPU Time: Total CPU time spent running the kernel context handler
+        Workloop Time: Total time spent running the kernel context handler
+    """
+
+    header_format = "{0: <20s} {1: >5s} {2: >20s} {3: >20s} {4: >20s} {5: >20s} {6: >20s}"
+    content_format = "{0: <20s} {1: >5d} {2: >20d} {3: >20d} {4: >20d} {5: >20d} {6: >20d}"
+
+    print header_format.format("Name", "Index", "Interrupt Count", "Interrupt Time", "Workloop Count", "Workloop CPU Time", "Workloop Time")
+    
+    for i in kern.interrupt_stats:
+        owner = CastIOKitClass(i.owner, 'IOInterruptEventSource *')
+        nub = CastIOKitClass(owner.provider, 'IORegistryEntry *') 
+        name = None
+
+        # To uniquely identify an interrupt, we need the nub name and the index.  The index
+        # is stored with the stats object, but we need to retrieve the name.
+
+        registryTable = nub.fRegistryTable
+        propertyTable = nub.fPropertyTable
+    
+        name = LookupKeyInOSDict(registryTable, kern.globals.gIOServicePlane.nameKey)
+        if name is None:
+            name = LookupKeyInOSDict(registryTable, kern.globals.gIONameKey)
+        if name is None:
+            name = LookupKeyInOSDict(propertyTable, kern.globals.gIOClassKey)
+
+        if name is None:
+            nub_name = "Unknown"
+        else:
+            nub_name = GetString(CastIOKitClass(name, 'OSString *'))
+
+        # We now have everything we need; spew the requested data.
+
+        interrupt_index = i.interruptIndex
+        first_level_count = i.interruptStatistics[0]
+        second_level_count = i.interruptStatistics[1]
+        first_level_time = i.interruptStatistics[2]
+        second_level_cpu_time = i.interruptStatistics[3]
+        second_level_system_time = i.interruptStatistics[4]
+
+        print content_format.format(nub_name, interrupt_index, first_level_count, first_level_time, second_level_count, second_level_cpu_time, second_level_system_time)
+    
+    return True
 

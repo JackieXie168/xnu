@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -63,8 +63,8 @@
 
 #ifndef _NETINET_TCP_H_
 #define _NETINET_TCP_H_
+#include <sys/types.h>
 #include <sys/appleapiopts.h>
-#include <sys/_types.h>
 #include <machine/endian.h>
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -138,13 +138,23 @@ struct tcphdr {
 #define	TCPOPT_MULTIPATH  		30
 #endif
 
+#define	TCPOPT_FASTOPEN			34
+#define	TCPOLEN_FASTOPEN_REQ		2
+
 /* Option definitions */
 #define TCPOPT_SACK_PERMIT_HDR	\
 (TCPOPT_NOP<<24|TCPOPT_NOP<<16|TCPOPT_SACK_PERMITTED<<8|TCPOLEN_SACK_PERMITTED)
 #define	TCPOPT_SACK_HDR		(TCPOPT_NOP<<24|TCPOPT_NOP<<16|TCPOPT_SACK<<8)
 /* Miscellaneous constants */
 #define	MAX_SACK_BLKS	6	/* Max # SACK blocks stored at sender side */
-#define	TCP_MAX_SACK	3	/* MAX # SACKs sent in any segment */
+
+/*
+ * A SACK option that specifies n blocks will have a length of (8*n + 2)
+ * bytes, so the 40 bytes available for TCP options can specify a
+ * maximum of 4 blocks.
+ */
+
+#define	TCP_MAX_SACK	4	/* MAX # SACKs sent in any segment */
 
 
 /*
@@ -209,10 +219,19 @@ struct tcphdr {
 #define	TCP_KEEPINTVL		0x101	/* interval between keepalives */
 #define	TCP_KEEPCNT		0x102	/* number of keepalives before close */
 #define	TCP_SENDMOREACKS	0x103	/* always ack every other packet */
+#define	TCP_ENABLE_ECN		0x104	/* Enable ECN on a connection */
+#define	TCP_FASTOPEN		0x105	/* Enable/Disable TCP Fastopen on this socket */
+#define	TCP_CONNECTION_INFO	0x106	/* State of TCP connection */
+
 #ifdef PRIVATE
 #define	TCP_INFO		0x200	/* retrieve tcp_info structure */
-#define TCP_NOTSENT_LOWAT	0x201	/* Low water mark for TCP unsent data */
 #define TCP_MEASURE_SND_BW	0x202	/* Measure sender's bandwidth for this connection */
+#endif /* PRIVATE */
+
+
+#define	TCP_NOTSENT_LOWAT	0x201	/* Low water mark for TCP unsent data */
+
+#ifdef PRIVATE
 #define TCP_MEASURE_BW_BURST	0x203	/* Burst size to use for bandwidth measurement */
 #define TCP_PEER_PID		0x204	/* Lookup pid of the process we're connected to */
 #define TCP_ADAPTIVE_READ_TIMEOUT	0x205	/* Read timeout used as a multiple of RTT */	
@@ -220,8 +239,15 @@ struct tcphdr {
  * Enable message delivery on a socket, this feature is currently unsupported and
  * is subjected to change in future.
  */
-#define	TCP_ENABLE_MSGS 0x206
+#define	TCP_ENABLE_MSGS			0x206
 #define	TCP_ADAPTIVE_WRITE_TIMEOUT	0x207	/* Write timeout used as a multiple of RTT */
+#define	TCP_NOTIMEWAIT			0x208	/* Avoid going into time-wait */
+#define	TCP_DISABLE_BLACKHOLE_DETECTION	0x209	/* disable PMTU blackhole detection */
+#define	TCP_ECN_MODE			0x210	/* fine grain control for A/B testing */
+
+#define	ECN_MODE_DEFAULT	0x0	/* per interface or system wide default */
+#define	ECN_MODE_ENABLE		0x1	/* force enable ECN on connection */
+#define	ECN_MODE_DISABLE	0x2	/* force disable ECN on connection */
 
 /*
  * The TCP_INFO socket option is a private API and is subject to change
@@ -234,6 +260,13 @@ struct tcphdr {
 #define	TCPI_OPT_ECN		0x08
 
 #define TCPI_FLAG_LOSSRECOVERY	0x01	/* Currently in loss recovery */
+
+struct tcp_conn_status {
+	unsigned int	probe_activated : 1;
+	unsigned int	write_probe_failed : 1;
+	unsigned int	read_probe_failed : 1;
+	unsigned int	conn_probe_failed : 1;
+};
 
 /*
  * Add new fields to this structure at the end only. This will preserve
@@ -294,6 +327,43 @@ struct tcp_info {
 	u_int64_t	tcpi_wifi_rxbytes __attribute((aligned(8)));	/* bytes received over Wi-Fi */
 	u_int64_t	tcpi_wifi_txpackets __attribute((aligned(8)));	/* packets transmitted over Wi-Fi */
 	u_int64_t	tcpi_wifi_txbytes __attribute((aligned(8)));	/* bytes transmitted over Wi-Fi */
+	u_int64_t	tcpi_wired_rxpackets __attribute((aligned(8)));	/* packets received over Wired */
+	u_int64_t	tcpi_wired_rxbytes __attribute((aligned(8)));	/* bytes received over Wired */
+	u_int64_t	tcpi_wired_txpackets __attribute((aligned(8)));	/* packets transmitted over Wired */
+	u_int64_t	tcpi_wired_txbytes __attribute((aligned(8)));	/* bytes transmitted over Wired */
+	struct tcp_conn_status	tcpi_connstatus; /* status of connection probes */
+
+	u_int16_t	/* Client-side information */
+		tcpi_tfo_cookie_req:1, /* Cookie requested? */
+		tcpi_tfo_cookie_rcv:1, /* Cookie received? */
+		tcpi_tfo_syn_loss:1,   /* Fallback to reg. TCP after SYN-loss */
+		tcpi_tfo_syn_data_sent:1, /* SYN+data has been sent out */
+		tcpi_tfo_syn_data_acked:1, /* SYN+data has been fully acknowledged */
+		/* And the following are for server-side information (must be set on the listener socket) */
+		tcpi_tfo_syn_data_rcv:1, /* Server received SYN+data with a valid cookie */
+		tcpi_tfo_cookie_req_rcv:1, /* Server received cookie-request */
+		tcpi_tfo_cookie_sent:1, /* Server announced cookie */
+		tcpi_tfo_cookie_invalid:1; /* Server received an invalid cookie */
+
+	u_int16_t	tcpi_ecn_client_setup:1,	/* Attempted ECN setup from client side */
+			tcpi_ecn_server_setup:1,	/* Attempted ECN setup from server side */
+			tcpi_ecn_success:1,		/* peer negotiated ECN */
+			tcpi_ecn_lost_syn:1,		/* Lost SYN with ECN setup */
+			tcpi_ecn_lost_synack:1,		/* Lost SYN-ACK with ECN setup */
+			tcpi_local_peer:1,		/* Local to the host or the subnet */
+			tcpi_if_cell:1,			/* Interface is cellular */
+			tcpi_if_wifi:1;			/* Interface is WiFi */
+
+	u_int32_t	tcpi_ecn_recv_ce;	/* Packets received with CE */
+	u_int32_t	tcpi_ecn_recv_cwr;	/* Packets received with CWR */
+
+	u_int32_t	tcpi_rcvoopack;		/* out-of-order packets received */
+	u_int32_t	tcpi_pawsdrop;		/* segments dropped due to PAWS */
+	u_int32_t	tcpi_sack_recovery_episode; /* SACK recovery episodes */
+	u_int32_t	tcpi_reordered_pkts;	/* packets reorderd */
+	u_int32_t	tcpi_dsack_sent;	/* Sent DSACK notification */
+	u_int32_t	tcpi_dsack_recvd;	/* Received a valid DSACK option */
+	u_int32_t	tcpi_flowhash;		/* Unique id for the connection */
 };
 
 struct tcp_measure_bw_burst {
@@ -340,6 +410,50 @@ typedef struct conninfo_tcp {
 #pragma pack()
 
 #endif /* PRIVATE */
+
+struct tcp_connection_info {
+        u_int8_t	tcpi_state;     /* connection state */
+        u_int8_t	tcpi_snd_wscale; /* Window scale for send window */
+        u_int8_t	tcpi_rcv_wscale; /* Window scale for receive window */
+        u_int8_t	__pad1;
+        u_int32_t	tcpi_options;   /* TCP options supported */
+#define TCPCI_OPT_TIMESTAMPS	0x00000001 /* Timestamps enabled */
+#define TCPCI_OPT_SACK		0x00000002 /* SACK enabled */
+#define TCPCI_OPT_WSCALE	0x00000004 /* Window scaling enabled */
+#define TCPCI_OPT_ECN		0x00000008 /* ECN enabled */
+        u_int32_t	tcpi_flags;     /* flags */
+#define TCPCI_FLAG_LOSSRECOVERY 0x00000001
+#define TCPCI_FLAG_REORDERING_DETECTED  0x00000002
+        u_int32_t	tcpi_rto;       /* retransmit timeout in ms */
+        u_int32_t	tcpi_maxseg;    /* maximum segment size supported */
+        u_int32_t	tcpi_snd_ssthresh; /* slow start threshold in bytes */
+        u_int32_t	tcpi_snd_cwnd;  /* send congestion window in bytes */
+        u_int32_t	tcpi_snd_wnd;   /* send widnow in bytes */
+        u_int32_t	tcpi_snd_sbbytes; /* bytes in send socket buffer, including in-flight data */
+        u_int32_t	tcpi_rcv_wnd;   /* receive window in bytes*/
+        u_int32_t	tcpi_rttcur;    /* most recent RTT in ms */
+        u_int32_t	tcpi_srtt;      /* average RTT in ms */
+        u_int32_t	tcpi_rttvar;    /* RTT variance */
+	u_int32_t
+			/* Client-side information */
+			tcpi_tfo_cookie_req:1, /* Cookie requested? */
+			tcpi_tfo_cookie_rcv:1, /* Cookie received? */
+			tcpi_tfo_syn_loss:1,   /* Fallback to reg. TCP after SYN-loss */
+			tcpi_tfo_syn_data_sent:1, /* SYN+data has been sent out */
+			tcpi_tfo_syn_data_acked:1, /* SYN+data has been fully acknowledged */
+			/* And the following are for server-side information (must be set on the listener socket) */
+			tcpi_tfo_syn_data_rcv:1, /* Server received SYN+data with a valid cookie */
+			tcpi_tfo_cookie_req_rcv:1, /* Server received cookie-request */
+			tcpi_tfo_cookie_sent:1, /* Server announced cookie */
+			tcpi_tfo_cookie_invalid:1, /* Server received an invalid cookie */
+			__pad2:23;
+        u_int64_t	tcpi_txpackets __attribute__((aligned(8)));
+        u_int64_t	tcpi_txbytes __attribute__((aligned(8)));
+        u_int64_t	tcpi_txretransmitbytes __attribute__((aligned(8)));
+        u_int64_t	tcpi_rxpackets __attribute__((aligned(8)));
+        u_int64_t	tcpi_rxbytes __attribute__((aligned(8)));
+        u_int64_t	tcpi_rxoutoforderbytes __attribute__((aligned(8)));
+};
 #endif /* (_POSIX_C_SOURCE && !_DARWIN_C_SOURCE) */
 
 #endif

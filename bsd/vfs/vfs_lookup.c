@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2011 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -90,7 +90,7 @@
 #include <sys/kauth.h>
 #include <kern/kalloc.h>
 #include <security/audit/audit.h>
-
+#include <sys/dtrace.h>        /* to get the prototype for strstr() in sys/dtrace_glue.h */
 #if CONFIG_MACF
 #include <security/mac_framework.h>
 #endif
@@ -112,17 +112,18 @@ static int vfs_getrealpath(const char * path, char * realpath, size_t bufsize, v
 #define MAX_VOLFS_RESTARTS 5
 #endif
 
-boolean_t 	lookup_continue_ok(struct nameidata *ndp);
-int		lookup_traverse_mountpoints(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, int vbusyflags, vfs_context_t ctx);
-int 		lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, vfs_context_t ctx);
-int		lookup_authorize_search(vnode_t dp, struct componentname *cnp, int dp_authorized_in_cache, vfs_context_t ctx);
-void		lookup_consider_update_cache(vnode_t dvp, vnode_t vp, struct componentname *cnp, int nc_generation);
-int		lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *ndp, struct componentname *cnp, int wantparent, vfs_context_t ctx);
-int		lookup_handle_found_vnode(struct nameidata *ndp, struct componentname *cnp, int rdonly, 
+static int		lookup_traverse_mountpoints(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, int vbusyflags, vfs_context_t ctx);
+static int 		lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, vfs_context_t ctx);
+static int		lookup_authorize_search(vnode_t dp, struct componentname *cnp, int dp_authorized_in_cache, vfs_context_t ctx);
+static void		lookup_consider_update_cache(vnode_t dvp, vnode_t vp, struct componentname *cnp, int nc_generation);
+static int		lookup_handle_found_vnode(struct nameidata *ndp, struct componentname *cnp, int rdonly, 
 			int vbusyflags, int *keep_going, int nc_generation,
 			int wantparent, int atroot, vfs_context_t ctx);
-int 		lookup_handle_emptyname(struct nameidata *ndp, struct componentname *cnp, int wantparent);
+static int 		lookup_handle_emptyname(struct nameidata *ndp, struct componentname *cnp, int wantparent);
 
+#if NAMEDRSRCFORK
+static int		lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *ndp, struct componentname *cnp, int wantparent, vfs_context_t ctx);
+#endif
 
 
 
@@ -370,6 +371,7 @@ retry_copy:
 		if ( (error = lookup(ndp)) ) {
 			goto error_out;
 		}
+
 		/*
 		 * Check for symbolic link
 		 */
@@ -456,7 +458,7 @@ namei_compound_available(vnode_t dp, struct nameidata *ndp)
 
 	return 0;
 }
-int
+static int
 lookup_authorize_search(vnode_t dp, struct componentname *cnp, int dp_authorized_in_cache, vfs_context_t ctx)
 {
 #if !CONFIG_MACF
@@ -479,7 +481,7 @@ lookup_authorize_search(vnode_t dp, struct componentname *cnp, int dp_authorized
 	return 0;
 }
 
-void 
+static void 
 lookup_consider_update_cache(vnode_t dvp, vnode_t vp, struct componentname *cnp, int nc_generation) 
 {
 	int isdot_or_dotdot;
@@ -524,7 +526,7 @@ lookup_consider_update_cache(vnode_t dvp, vnode_t vp, struct componentname *cnp,
  * data fork if requested.  On failure, returns with iocount data fork (always) and its parent directory 
  * (if one was provided).
  */
-int
+static int
 lookup_handle_rsrc_fork(vnode_t dp, struct nameidata *ndp, struct componentname *cnp, int wantparent, vfs_context_t ctx)
 {
 	vnode_t svp = NULLVP;
@@ -612,7 +614,7 @@ out:
  *	--In the event of an error, may return with ni_dvp NULL'ed out (in which case, iocount
  *	was dropped).
  */
-int		
+static int		
 lookup_handle_found_vnode(struct nameidata *ndp, struct componentname *cnp, int rdonly, 
 		int vbusyflags, int *keep_going, int nc_generation,
 		int wantparent, int atroot, vfs_context_t ctx)
@@ -631,15 +633,6 @@ lookup_handle_found_vnode(struct nameidata *ndp, struct componentname *cnp, int 
 	if (atroot) {
 		goto nextname;
 	}
-
-#if CONFIG_TRIGGERS
-	if (dp->v_resolve) {
-		error = vnode_trigger_resolve(dp, ndp, ctx);
-		if (error) {
-			goto out;
-		}
-	}
-#endif /* CONFIG_TRIGGERS */
 
 	/*
 	 * Take into account any additional components consumed by
@@ -797,7 +790,7 @@ out:
 /*
  * Comes in iocount on ni_vp.  May overwrite ni_dvp, but doesn't interpret incoming value.
  */
-int 
+static int 
 lookup_handle_emptyname(struct nameidata *ndp, struct componentname *cnp, int wantparent)
 {
 	vnode_t dp;
@@ -924,9 +917,8 @@ lookup(struct nameidata *ndp)
 	/*
 	 * Setup: break out flag bits into variables.
 	 */
-	if (cnp->cn_flags & (NOCACHE | DOWHITEOUT)) {
-	        if ((cnp->cn_flags & NOCACHE) || (cnp->cn_nameiop == DELETE))
-		        docache = 0;
+	if (cnp->cn_flags & NOCACHE) {
+	        docache = 0;
 	}
 	wantparent = cnp->cn_flags & (LOCKPARENT | WANTPARENT);
 	rdonly = cnp->cn_flags & RDONLY;
@@ -1305,104 +1297,101 @@ lookup_validate_creation_path(struct nameidata *ndp)
 /*
  * Modifies only ni_vp.  Always returns with ni_vp still valid (iocount held).
  */
-int
+static int
 lookup_traverse_mountpoints(struct nameidata *ndp, struct componentname *cnp, vnode_t dp, 
 		int vbusyflags, vfs_context_t ctx)
 {
 	mount_t mp;
 	vnode_t tdp;
 	int error = 0;
-	uthread_t uth;
 	uint32_t depth = 0;
-	int dont_cache_mp = 0;
 	vnode_t	mounted_on_dp;
 	int current_mount_generation = 0;
+#if CONFIG_TRIGGERS
+	vnode_t triggered_dp = NULLVP;
+	int retry_cnt = 0;
+#define MAX_TRIGGER_RETRIES 1
+#endif
 	
+	if (dp->v_type != VDIR || cnp->cn_flags & NOCROSSMOUNT)
+		return 0;
+
 	mounted_on_dp = dp;
+#if CONFIG_TRIGGERS
+restart:
+#endif
 	current_mount_generation = mount_generation;
 
-	while ((dp->v_type == VDIR) && dp->v_mountedhere &&
-			((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
-
-		if (dp->v_mountedhere->mnt_lflag & MNT_LFORCE) {
-			break;	// don't traverse into a forced unmount
-		}
-#if CONFIG_TRIGGERS
-		/*
-		 * For a trigger vnode, call its resolver when crossing its mount (if requested)
-		 */
-		if (dp->v_resolve) {
-			(void) vnode_trigger_resolve(dp, ndp, ctx);
-		}
-#endif
-		vnode_lock(dp);
-
-		if ((dp->v_type == VDIR) && (mp = dp->v_mountedhere)) {
-
+	while (dp->v_mountedhere) {
+		vnode_lock_spin(dp);
+		if ((mp = dp->v_mountedhere)) {
 			mp->mnt_crossref++;
 			vnode_unlock(dp);
-
-
-			if (vfs_busy(mp, vbusyflags)) {
-				mount_dropcrossref(mp, dp, 0);
-				if (vbusyflags == LK_NOWAIT) {
-					error = ENOENT;
-					goto out;
-				}
-
-				continue;
-			}
-
-
-			/*
-			 * XXX - if this is the last component of the
-			 * pathname, and it's either not a lookup operation
-			 * or the NOTRIGGER flag is set for the operation,
-			 * set a uthread flag to let VFS_ROOT() for autofs
-			 * know it shouldn't trigger a mount.
-			 */
-			uth = (struct uthread *)get_bsdthread_info(current_thread());
-			if ((cnp->cn_flags & ISLASTCN) &&
-					(cnp->cn_nameiop != LOOKUP ||
-					 (cnp->cn_flags & NOTRIGGER))) {
-				uth->uu_notrigger = 1;
-				dont_cache_mp = 1;
-			}
-
-			error = VFS_ROOT(mp, &tdp, ctx);
-			/* XXX - clear the uthread flag */
-			uth->uu_notrigger = 0;
-
-			mount_dropcrossref(mp, dp, 0);
-			vfs_unbusy(mp);
-
-			if (error) {
-				goto out;
-			}
-
-			vnode_put(dp);
-			ndp->ni_vp = dp = tdp;
-			depth++;
-
-#if CONFIG_TRIGGERS
-			/*
-			 * Check if root dir is a trigger vnode
-			 */
-			if (dp->v_resolve) {
-				error = vnode_trigger_resolve(dp, ndp, ctx);
-				if (error) {
-					goto out;
-				}
-			}
-#endif			
-
-		} else { 
+		} else {
 			vnode_unlock(dp);
 			break;
 		}
+
+		if (ISSET(mp->mnt_lflag, MNT_LFORCE)) {
+			mount_dropcrossref(mp, dp, 0);
+			break;	// don't traverse into a forced unmount
+		}
+
+
+		if (vfs_busy(mp, vbusyflags)) {
+			mount_dropcrossref(mp, dp, 0);
+			if (vbusyflags == LK_NOWAIT) {
+				error = ENOENT;
+				goto out;
+			}
+
+			continue;
+		}
+
+		error = VFS_ROOT(mp, &tdp, ctx);
+
+		mount_dropcrossref(mp, dp, 0);
+		vfs_unbusy(mp);
+
+		if (error) {
+			goto out;
+		}
+
+		vnode_put(dp);
+		ndp->ni_vp = dp = tdp;
+		if (dp->v_type != VDIR) {
+#if DEVELOPMENT || DEBUG
+			panic("%s : Root of filesystem not a directory\n",
+			    __FUNCTION__);
+#else
+			break;
+#endif
+		}
+		depth++;
 	}
 
-	if (depth && !dont_cache_mp) {
+#if CONFIG_TRIGGERS
+	/*
+	 * The triggered_dp check here is required but is susceptible to a
+	 * (unlikely) race in which trigger mount is done from here and is
+	 * unmounted before we get past vfs_busy above. We retry to deal with
+	 * that case but it has the side effect of unwanted retries for
+	 * "special" processes which don't want to trigger mounts.
+	 */
+	if (dp->v_resolve && retry_cnt < MAX_TRIGGER_RETRIES) {
+		error = vnode_trigger_resolve(dp, ndp, ctx);
+		if (error)
+			goto out;
+		if (dp == triggered_dp)
+			retry_cnt += 1;
+		else
+			retry_cnt = 0;
+		triggered_dp = dp;
+		goto restart;
+	}
+#endif /* CONFIG_TRIGGERS */
+
+	if (depth) {
 	        mp = mounted_on_dp->v_mountedhere;
 
 		if (mp) {
@@ -1424,7 +1413,7 @@ out:
  * Takes ni_vp and ni_dvp non-NULL.  Returns with *new_dp set to the location
  * at which to start a lookup with a resolved path, and all other iocounts dropped.
  */
-int 
+static int 
 lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, vfs_context_t ctx)
 {
 	int error;
@@ -1699,9 +1688,9 @@ kdebug_lookup_gen_events(long *dbg_parms, int dbg_namelen, void *dp, boolean_t l
 	 * entries, we must mark the start of the path's string and the end.
 	 */
 	if (lookup == TRUE)
-		code = (FSDBG_CODE(DBG_FSRW,36)) | DBG_FUNC_START;
+		code = VFS_LOOKUP | DBG_FUNC_START;
 	else
-		code = (FSDBG_CODE(DBG_FSRW,39)) | DBG_FUNC_START;
+		code = VFS_LOOKUP_DONE | DBG_FUNC_START;
 
 	if (dbg_namelen <= (int)(3 * sizeof(long)))
 		code |= DBG_FUNC_END;

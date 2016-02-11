@@ -7,12 +7,16 @@ include $(MakeInc_cmd)
 include $(MakeInc_def)
 
 INSTINC_SUBDIRS = machine
-INSTINC_SUBDIRS_ARM = arm
 INSTINC_SUBDIRS_X86_64 = i386
+INSTINC_SUBDIRS_X86_64H = i386
+INSTINC_SUBDIRS_ARM = arm arm64
+INSTINC_SUBDIRS_ARM64 = arm arm64
 
 EXPINC_SUBDIRS = machine
 EXPINC_SUBDIRS_X86_64 = i386
-EXPINC_SUBDIRS_ARM = arm
+EXPINC_SUBDIRS_X86_64H = i386
+EXPINC_SUBDIRS_ARM = arm arm64
+EXPINC_SUBDIRS_ARM64 = arm arm64
 
 MIG_TYPES = \
 	clock_types.defs \
@@ -33,10 +37,11 @@ MIG_DEFS =	\
 	mach_host.defs \
 	mach_port.defs \
 	mach_vm.defs \
+	mach_voucher.defs \
+	mach_voucher_attr_control.defs \
 	notify.defs \
 	processor.defs \
 	processor_set.defs \
-	security.defs \
 	task.defs \
 	task_access.defs \
 	telemetry_notification.defs \
@@ -45,11 +50,12 @@ MIG_DEFS =	\
 
 
 MACH_PRIVATE_DEFS = \
+	coalition_notification.defs \
 	mach_notify.defs \
 	memory_object.defs \
 	memory_object_control.defs \
 	memory_object_default.defs \
-	memory_object_name.defs \
+	sysdiagnose_notification.defs \
 	upl.defs \
 	vm32_map.defs
 
@@ -60,13 +66,15 @@ MACH_PRIVATE_DEFS = \
 MIG_USHDRS = \
 	audit_triggers_server.h \
 	clock_reply_server.h \
+	coalition_notification_server.h \
 	exc_server.h \
 	mach_exc_server.h \
 	memory_object_server.h \
 	memory_object_default_server.h \
 	notify_server.h \
 	task_access_server.h \
-	telemetry_notification_server.h
+	telemetry_notification_server.h \
+	sysdiagnose_notification_server.h
 
 MIG_UUHDRS = \
 	clock.h \
@@ -77,11 +85,11 @@ MIG_UUHDRS = \
 	mach_host.h \
 	mach_port.h \
 	mach_vm.h \
+	mach_voucher.h \
+	mach_voucher_attr_control.h \
 	memory_object_control.h \
-	memory_object_name.h \
 	processor.h \
 	processor_set.h \
-	security.h \
 	task.h \
 	task_access.h \
 	thread_act.h \
@@ -106,12 +114,14 @@ DATAFILES = \
 	mach_time.h \
 	mach_traps.h \
         mach_types.h \
+	mach_voucher_types.h \
 	machine.h \
         mach_syscalls.h \
         memory_object_types.h \
         message.h \
 	mig.h \
 	mig_errors.h \
+	mig_voucher_support.h \
 	ndr.h \
         notify.h \
 	policy.h \
@@ -151,11 +161,34 @@ INSTALL_MI_LIST	= \
 	bootstrap.h \
 	${DATAFILES}
 
+PRIVATE_DATAFILES = \
+	bootstrap.h \
+	coalition.h \
+	coalition_notification.defs \
+	host_info.h \
+	mach_host.defs \
+	mach_traps.h \
+	memory_object_types.h \
+	mig.h \
+	processor_info.h \
+	semaphore.h \
+	sfi_class.h \
+	syscall_sw.h \
+	sysdiagnose_notification.defs \
+	task_info.h \
+	task_policy.h \
+	thread_policy.h \
+	thread_switch.h \
+	vm_prot.h
+
+INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+
 INSTALL_KF_MI_LIST = \
 	mach_interface.h \
 	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES})
 
 INSTALL_KF_MI_LCL_LIST = \
+	coalition.h \
 	mach_interface.h \
 	$(filter-out mach_traps.h mach_syscalls.h thread_switch.h, ${DATAFILES})
 
@@ -165,7 +198,9 @@ INSTALL_MI_DIR = mach
 
 EXPORT_MI_LIST	= \
 	branch_predicates.h \
+	coalition.h \
 	mach_interface.h \
+	sfi_class.h \
 	${DATAFILES}
 
 EXPORT_MI_GEN_LIST = \
@@ -223,6 +258,7 @@ MIG_KUHDRS = \
 MIG_KUSRC = \
 	audit_triggers_user.c \
 	clock_reply_user.c \
+	coalition_notification_user.c \
 	exc_user.c \
 	host_notify_reply_user.c \
 	mach_exc_user.c \
@@ -233,7 +269,8 @@ MIG_KUSRC = \
 	task_access_user.c \
 	telemetry_notification_user.c \
 	upl_user.c \
-	vm_map_user.c
+	vm_map_user.c \
+	sysdiagnose_notification_user.c
 
 MIG_KSHDRS = \
 	clock_server.h \
@@ -247,13 +284,13 @@ MIG_KSHDRS = \
 	mach_notify_server.h \
 	mach_port_server.h \
 	mach_vm_server.h \
+	mach_voucher_server.h \
+	mach_voucher_attr_control_server.h \
 	memory_object_server.h \
 	memory_object_control_server.h \
 	memory_object_default_server.h \
-	memory_object_name_server.h \
 	processor_server.h \
 	processor_set_server.h \
-	security_server.h \
 	task_server.h \
 	thread_act_server.h \
 	upl_server.h \
@@ -272,13 +309,13 @@ MIG_KSSRC = \
 	mach_notify_server.c \
 	mach_port_server.c \
 	mach_vm_server.c \
+	mach_voucher_server.c \
+	mach_voucher_attr_control_server.c \
 	memory_object_server.c \
 	memory_object_control_server.c \
 	memory_object_default_server.c \
-	memory_object_name_server.c \
 	processor_server.c \
 	processor_set_server.c \
-	security_server.c \
 	task_server.c \
 	thread_act_server.c \
 	upl_server.c \

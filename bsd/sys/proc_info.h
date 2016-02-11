@@ -37,10 +37,16 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/kern_control.h>
+#include <sys/event.h>
 #include <net/if.h>
 #include <net/route.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <mach/machine.h>
+
+#ifdef PRIVATE
+#include <mach/coalition.h> /* COALITION_NUM_TYPES */
+#endif
 
 __BEGIN_DECLS
 
@@ -110,6 +116,27 @@ struct proc_bsdinfowithuniqid {
 	struct proc_bsdinfo             pbsd;
 	struct proc_uniqidentifierinfo  p_uniqidentifier;
 };
+
+struct proc_archinfo {
+	cpu_type_t		p_cputype;	
+	cpu_subtype_t		p_cpusubtype;
+};
+
+struct proc_pidcoalitioninfo {
+	uint64_t coalition_id[COALITION_NUM_TYPES];
+	uint64_t reserved1;
+	uint64_t reserved2;
+	uint64_t reserved3;
+};
+
+struct proc_originatorinfo {
+	uuid_t                  originator_uuid;        /* UUID of the originator process */
+	pid_t                   originator_pid;         /* pid of the originator process */
+	uint64_t                p_reserve2;
+	uint64_t                p_reserve3;
+	uint64_t                p_reserve4;
+};
+
 #endif
 
 
@@ -143,7 +170,8 @@ struct proc_bsdinfowithuniqid {
 #define PROC_FLAG_ADAPTIVE_IMPORTANT    0x200000         /* Process is adaptive, and is currently important */
 #define PROC_FLAG_IMPORTANCE_DONOR   0x400000 /* Process is marked as an importance donor */
 #define PROC_FLAG_SUPPRESSED         0x800000 /* Process is suppressed */
-#define PROC_FLAG_IOS_APPLICATION 0x1000000	/* Process is an application */
+#define PROC_FLAG_APPLICATION 0x1000000	/* Process is an application */
+#define PROC_FLAG_IOS_APPLICATION PROC_FLAG_APPLICATION	/* Process is an application */
 #endif
 
 
@@ -271,6 +299,7 @@ struct proc_fileinfo {
 #define PROC_FP_SHARED	1	/* shared by more than one fd */
 #define PROC_FP_CLEXEC	2	/* close on exec */
 #define PROC_FP_GUARDED	4	/* guarded fd */
+#define PROC_FP_CLFORK	8	/* close on fork */
 
 #define PROC_FI_GUARD_CLOSE		(1u << 0)
 #define PROC_FI_GUARD_DUP		(1u << 1)
@@ -590,8 +619,23 @@ struct kqueue_info {
 	uint32_t		kq_state;
 	uint32_t		rfu_1;	/* reserved */
 };
-#define PROC_KQUEUE_SELECT	1
-#define PROC_KQUEUE_SLEEP	2
+
+/* keep in sync with KQ_* in sys/eventvar.h */
+#define PROC_KQUEUE_SELECT	0x01
+#define PROC_KQUEUE_SLEEP	0x02
+#define PROC_KQUEUE_32		0x08
+#define PROC_KQUEUE_64		0x10
+#define PROC_KQUEUE_QOS		0x20
+
+#ifdef PRIVATE
+struct kevent_extinfo {
+	struct kevent_qos_s kqext_kev;
+	uint64_t kqext_sdata;
+	int kqext_status;
+	int kqext_sfflags;
+	uint64_t kqext_reserved[2];
+};
+#endif /* PRIVATE */
 
 struct kqueue_fdinfo {
 	struct proc_fileinfo	pfi;
@@ -688,6 +732,23 @@ struct proc_fileportinfo {
 #define PROC_PIDT_BSDINFOWITHUNIQID	18
 #define PROC_PIDT_BSDINFOWITHUNIQID_SIZE \
                                  	(sizeof(struct proc_bsdinfowithuniqid))
+
+#define PROC_PIDARCHINFO		19
+#define PROC_PIDARCHINFO_SIZE		\
+					(sizeof(struct proc_archinfo))
+
+#define PROC_PIDCOALITIONINFO		20
+#define PROC_PIDCOALITIONINFO_SIZE	(sizeof(struct proc_pidcoalitioninfo))
+
+#define PROC_PIDNOTEEXIT		21
+#define PROC_PIDNOTEEXIT_SIZE		(sizeof(uint32_t))
+
+#define PROC_PIDREGIONPATHINFO2		22
+#define PROC_PIDREGIONPATHINFO2_SIZE	(sizeof(struct proc_regionwithpathinfo))
+
+#define PROC_PIDREGIONPATHINFO3		23
+#define PROC_PIDREGIONPATHINFO3_SIZE	(sizeof(struct proc_regionwithpathinfo))
+
 #endif
 
 /* Flavors for proc_pidfdinfo */
@@ -715,6 +776,11 @@ struct proc_fileportinfo {
 
 #define PROC_PIDFDATALKINFO		8
 #define PROC_PIDFDATALKINFO_SIZE	(sizeof(struct appletalk_fdinfo))
+
+#ifdef PRIVATE
+#define PROC_PIDFDKQUEUE_EXTINFO	9
+#define PROC_PIDFDKQUEUE_EXTINFO_SIZE	(sizeof(struct kevent_extinfo))
+#endif /* PRIVATE */
 
 /* Flavors for proc_pidfileportinfo */
 
@@ -745,18 +811,51 @@ struct proc_fileportinfo {
 #define PROC_DIRTYCONTROL_TRACK         1
 #define PROC_DIRTYCONTROL_SET           2
 #define PROC_DIRTYCONTROL_GET           3
+#define PROC_DIRTYCONTROL_CLEAR         4
 
 /* proc_track_dirty() flags */
 #define PROC_DIRTY_TRACK                0x1
 #define PROC_DIRTY_ALLOW_IDLE_EXIT      0x2
 #define PROC_DIRTY_DEFER                0x4
+#define PROC_DIRTY_LAUNCH_IN_PROGRESS   0x8
 
 /* proc_get_dirty() flags */
 #define PROC_DIRTY_TRACKED              0x1
 #define PROC_DIRTY_ALLOWS_IDLE_EXIT     0x2
 #define PROC_DIRTY_IS_DIRTY             0x4
+#define PROC_DIRTY_LAUNCH_IS_IN_PROGRESS   0x8
 
 #ifdef PRIVATE
+
+/* Flavors for proc_pidoriginatorinfo */
+#define PROC_PIDORIGINATOR_UUID		0x1
+#define PROC_PIDORIGINATOR_UUID_SIZE	(sizeof(uuid_t))
+
+#define PROC_PIDORIGINATOR_BGSTATE	0x2
+#define PROC_PIDORIGINATOR_BGSTATE_SIZE (sizeof(uint32_t))
+
+#define PROC_PIDORIGINATOR_PID_UUID     0x3
+#define PROC_PIDORIGINATOR_PID_UUID_SIZE (sizeof(struct proc_originatorinfo))
+
+/* Flavors for proc_listcoalitions */
+#define LISTCOALITIONS_ALL_COALS	1
+#define LISTCOALITIONS_ALL_COALS_SIZE   (sizeof(struct procinfo_coalinfo))
+
+#define LISTCOALITIONS_SINGLE_TYPE	2
+#define LISTCOALITIONS_SINGLE_TYPE_SIZE (sizeof(struct procinfo_coalinfo))
+
+/* reasons for proc_can_use_foreground_hw */
+#define PROC_FGHW_OK                     0 /* pid may use foreground HW */
+#define PROC_FGHW_DAEMON_OK              1
+#define PROC_FGHW_DAEMON_LEADER         10 /* pid is in a daemon coalition */
+#define PROC_FGHW_LEADER_NONUI          11 /* coalition leader is in a non-focal state */
+#define PROC_FGHW_LEADER_BACKGROUND     12 /* coalition leader is in a background state */
+#define PROC_FGHW_DAEMON_NO_VOUCHER     13 /* pid is a daemon with no adopted voucher */
+#define PROC_FGHW_NO_VOUCHER_ATTR       14 /* pid has adopted a voucher with no bank/originator attribute */
+#define PROC_FGHW_NO_ORIGINATOR         15 /* pid has adopted a voucher for a process that's gone away */
+#define PROC_FGHW_ORIGINATOR_BACKGROUND 16 /* pid has adopted a voucher for an app that's in the background */
+#define PROC_FGHW_VOUCHER_ERROR         98 /* error in voucher / originator callout */
+#define PROC_FGHW_ERROR                 99 /* syscall parameter/permissions error */
 
 /* __proc_info() call numbers */
 #define PROC_INFO_CALL_LISTPIDS         0x1
@@ -768,6 +867,9 @@ struct proc_fileportinfo {
 #define PROC_INFO_CALL_TERMINATE        0x7
 #define PROC_INFO_CALL_DIRTYCONTROL     0x8
 #define PROC_INFO_CALL_PIDRUSAGE        0x9
+#define PROC_INFO_CALL_PIDORIGINATORINFO 0xa
+#define PROC_INFO_CALL_LISTCOALITIONS   0xb
+#define PROC_INFO_CALL_CANUSEFGHW       0xc
 
 #endif /* PRIVATE */
 
@@ -789,6 +891,7 @@ extern int fill_pshminfo(struct pshmnode * pshm, struct pshm_info * pinfo);
 extern int fill_pseminfo(struct psemnode * psem, struct psem_info * pinfo);
 extern int fill_pipeinfo(struct pipe * cpipe, struct pipe_info * pinfo);
 extern int fill_kqueueinfo(struct kqueue * kq, struct kqueue_info * kinfo);
+extern int pid_kqueue_extinfo(proc_t, struct kqueue * kq, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
 extern int fill_procworkqueue(proc_t, struct proc_workqueueinfo *);
 #endif /* XNU_KERNEL_PRIVATE */
 

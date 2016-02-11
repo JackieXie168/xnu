@@ -74,6 +74,7 @@ class OSString;
 class OSData : public OSObject
 {
     OSDeclareDefaultStructors(OSData)
+    friend class OSSerialize;
 
 protected:
     void         * data;
@@ -81,7 +82,22 @@ protected:
     unsigned int   capacity;
     unsigned int   capacityIncrement;
 
-    struct ExpansionData;
+#ifdef XNU_KERNEL_PRIVATE
+    /* Available within xnu source only */
+public:
+    typedef void (*DeallocFunction)(void * ptr, unsigned int length);
+protected:
+	struct ExpansionData
+	{
+		DeallocFunction deallocFunction;
+		bool            disableSerialization;
+	};
+#else
+private:
+    typedef void (*DeallocFunction)(void * ptr, unsigned int length);
+protected:
+	struct ExpansionData;
+#endif
     
    /* Reserved for future use. (Internal use only)  */
     ExpansionData * reserved;
@@ -372,7 +388,7 @@ public:
     * release@/link</code>
     * instead.
     */
-    virtual void free();
+    virtual void free() APPLE_KEXT_OVERRIDE;
 
 
    /*!
@@ -641,7 +657,7 @@ public:
     * if that object is derived from OSData
     * and contains the equivalent bytes of the same length.
     */
-    virtual bool isEqualTo(const OSMetaClassBase * anObject) const;
+    virtual bool isEqualTo(const OSMetaClassBase * anObject) const APPLE_KEXT_OVERRIDE;
 
 
    /*!
@@ -682,7 +698,7 @@ public:
     * @result
     * <code>true</code> if serialization succeeds, <code>false</code> if not.
     */
-    virtual bool serialize(OSSerialize * serializer) const;
+    virtual bool serialize(OSSerialize * serializer) const APPLE_KEXT_OVERRIDE;
 
 
    /*!
@@ -720,8 +736,6 @@ public:
 #else
 private:
 #endif
-    // xxx - DO NOT USE - This interface may change
-    typedef void (*DeallocFunction)(void * ptr, unsigned int length);
     virtual void setDeallocFunction(DeallocFunction func);
     OSMetaClassDeclareReservedUsed(OSData, 0);
 

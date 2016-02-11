@@ -73,7 +73,7 @@ aes_rval aes_encrypt_key(const unsigned char *key, int key_len, aes_encrypt_ctx 
 aes_rval aes_encrypt_key128(const unsigned char *key, aes_encrypt_ctx cx[1]);
 aes_rval aes_encrypt_key256(const unsigned char *key, aes_encrypt_ctx cx[1]);
 
-#if defined (__i386__) || defined (__x86_64__)
+#if defined (__i386__) || defined (__x86_64__) || defined (__arm64__)
 aes_rval aes_encrypt(const unsigned char *in, unsigned char *out, aes_encrypt_ctx cx[1]);
 #endif
 
@@ -85,12 +85,26 @@ aes_rval aes_decrypt_key(const unsigned char *key, int key_len, aes_decrypt_ctx 
 aes_rval aes_decrypt_key128(const unsigned char *key, aes_decrypt_ctx cx[1]);
 aes_rval aes_decrypt_key256(const unsigned char *key, aes_decrypt_ctx cx[1]);
 
-#if defined (__i386__) || defined (__x86_64__)
+#if defined (__i386__) || defined (__x86_64__) || defined (__arm64__)
 aes_rval aes_decrypt(const unsigned char *in, unsigned char *out, aes_decrypt_ctx cx[1]);
 #endif
 
 aes_rval aes_decrypt_cbc(const unsigned char *in_blk, const unsigned char *in_iv, unsigned int num_blk,
 					 unsigned char *out_blk, aes_decrypt_ctx cx[1]);
+
+aes_rval aes_encrypt_key_gcm(const unsigned char *key, int key_len, ccgcm_ctx *ctx);
+aes_rval aes_encrypt_set_iv_gcm(const unsigned char *in_iv, unsigned int len, ccgcm_ctx *ctx);
+aes_rval aes_encrypt_aad_gcm(const unsigned char *aad, unsigned int aad_bytes, ccgcm_ctx *ctx);
+aes_rval aes_encrypt_gcm(const unsigned char *in_blk, unsigned int num_bytes, unsigned char *out_blk, ccgcm_ctx *ctx);
+aes_rval aes_encrypt_finalize_gcm(unsigned char *tag, unsigned int tag_bytes, ccgcm_ctx *ctx);
+unsigned aes_encrypt_get_ctx_size_gcm(void);
+
+aes_rval aes_decrypt_key_gcm(const unsigned char *key, int key_len, ccgcm_ctx *ctx);
+aes_rval aes_decrypt_set_iv_gcm(const unsigned char *in_iv, unsigned int len, ccgcm_ctx *ctx);
+aes_rval aes_decrypt_aad_gcm(const unsigned char *aad, unsigned int aad_bytes, ccgcm_ctx *ctx);
+aes_rval aes_decrypt_gcm(const unsigned char *in_blk, unsigned int num_bytes, unsigned char *out_blk, ccgcm_ctx *ctx);
+aes_rval aes_decrypt_finalize_gcm(unsigned char *tag, unsigned int tag_bytes, ccgcm_ctx *ctx);
+unsigned aes_decrypt_get_ctx_size_gcm(void);
 
 #if defined(__cplusplus)
 }

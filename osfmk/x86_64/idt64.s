@@ -2,7 +2,7 @@
  * Copyright (c) 2010 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- *
+ * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- *
+ * 
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- *
+ * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,7 +22,7 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- *
+ * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 #include <i386/asm.h>
@@ -38,7 +38,7 @@
 #include <mach/exception_types.h>
 
 #if DEBUG
-#define	DEBUG_IDT64 		1
+#define	DEBUG_IDT64 		1	
 #endif
 
 /*
@@ -93,7 +93,7 @@
 #endif
 
 /* The wrapper for all non-special traps/interrupts */
-/* Everything up to PUSH_FUNCTION is just to output
+/* Everything up to PUSH_FUNCTION is just to output 
  * the interrupt number out to the postcode display
  */
 #if DEBUG_IDT64
@@ -218,7 +218,7 @@ L_64bit_entry_reject:
 	popq	%rax
 	movq	$(T_INVALID_OPCODE), ISF64_TRAPNO(%rsp)
 	jmp 	L_dispatch_U64
-
+	
 L_32bit_entry_check:
 	/*
 	 * Check we're not a confused 64-bit user.
@@ -257,7 +257,7 @@ L_dispatch_U32: /* 32-bit user task */
 	mov	%eax, R32_CR2(%r15)
 
 	/*
-	 * Copy registers already saved in the machine state
+	 * Copy registers already saved in the machine state 
 	 * (in the interrupt stack frame) into the compat save area.
 	 */
 	mov	R64_RIP(%r15), %eax
@@ -278,8 +278,11 @@ L_dispatch_U32_after_fault:
 	mov	R64_TRAPFN(%r15), %rdx		/* %rdx := trapfn for later */
 
 L_common_dispatch:
-	cld		 /* Ensure the direction flag is clear in the kernel */
-
+	cld		/* Ensure the direction flag is clear in the kernel */
+	cmpl    $0, EXT(pmap_smap_enabled)(%rip)
+	je	1f
+	clac		/* Clear EFLAGS.AC if SMAP is present/enabled */
+1:
 	/*
 	 * On entering the kernel, we don't need to switch cr3
 	 * because the kernel shares the user's address space.
@@ -293,43 +296,45 @@ L_common_dispatch:
 	mov	%gs:CPU_KERNEL_CR3, %rcx
 	mov	%rcx, %gs:CPU_ACTIVE_CR3
 	test	$3, %esi			/* user/kernel? */
-	jz	1f				/* skip cr3 reload from kernel */
+	jz	2f				/* skip cr3 reload from kernel */
 	xor	%rbp, %rbp
 	cmpl	$0, EXT(no_shared_cr3)(%rip)
-	je	1f
+	je	2f
 	mov	%rcx, %cr3			/* load kernel cr3 */
-	jmp	2f				/* and skip tlb flush test */
-1:
+	jmp	4f				/* and skip tlb flush test */
+2:
 	mov	%gs:CPU_ACTIVE_CR3+4, %rcx
 	shr	$32, %rcx
 	testl	%ecx, %ecx
-	jz	2f
-	movl	$0, %gs:CPU_TLB_INVALID
+	jz	4f
 	testl	$(1<<16), %ecx			/* Global? */
-	jz	11f
+	jz	3f
+	movl	$0, %gs:CPU_TLB_INVALID
 	mov	%cr4, %rcx	/* RMWW CR4, for lack of an alternative*/
 	and	$(~CR4_PGE), %rcx
 	mov	%rcx, %cr4
 	or	$(CR4_PGE), %rcx
 	mov	%rcx, %cr4
-	jmp	2f
-
-11:	mov	%cr3, %rcx
+	jmp	4f
+3:
+	movb	$0, %gs:CPU_TLB_INVALID_LOCAL
+	mov	%cr3, %rcx
 	mov	%rcx, %cr3
-2:
+4:
 	mov	%gs:CPU_ACTIVE_THREAD, %rcx	/* Get the active thread */
+	movl	$-1, TH_IOTIER_OVERRIDE(%rcx)	/* Reset IO tier override to -1 before handling trap */
 	cmpq	$0, TH_PCB_IDS(%rcx)	/* Is there a debug register state? */
-	je	3f
+	je	5f
 	xor	%ecx, %ecx		/* If so, reset DR7 (the control) */
 	mov	%rcx, %dr7
-3:
+5:
 	incl	%gs:hwIntCnt(,%ebx,4)		// Bump the trap/intr count
 	/* Dispatch the designated handler */
 	jmp	*%rdx
 
 /*
  * Control is passed here to return to user.
- */
+ */ 
 Entry(return_to_user)
 	TIME_TRAP_UEXIT
 
@@ -337,7 +342,7 @@ Entry(ret_to_user)
 // XXX 'Be nice to tidy up this debug register restore sequence...
 	mov	%gs:CPU_ACTIVE_THREAD, %rdx
 	movq	TH_PCB_IDS(%rdx),%rax	/* Obtain this thread's debug state */
-
+	
 	test	%rax, %rax		/* Is there a debug register context? */
 	je	2f 			/* branch if not */
 	cmpl	$(TASK_MAP_32BIT), %gs:CPU_TASK_MAP /* Are we a 32-bit task? */
@@ -393,7 +398,7 @@ L_32bit_return:
 	je	1f
 	cli
 	POSTCODE2(0x6432)
-	CCALL1(panic_idt64, %rsp)
+	CCALL1(panic_idt64, %r15)
 1:
 #endif /* DEBUG_IDT64 */
 
@@ -429,7 +434,7 @@ L_32bit_return:
 	 */
 	mov	%r15, %rsp		/* Set the PCB as the stack */
 	swapgs
-EXT(ret32_set_ds):
+EXT(ret32_set_ds):	
 	movl	R32_DS(%rsp), %ds
 EXT(ret32_set_es):
 	movl	R32_ES(%rsp), %es
@@ -438,7 +443,7 @@ EXT(ret32_set_fs):
 EXT(ret32_set_gs):
 	movl	R32_GS(%rsp), %gs
 
-	/* pop compat frame + trapno, trapfn and error */
+	/* pop compat frame + trapno, trapfn and error */	
 	add	$(ISS64_OFFSET)+8+8+8, %rsp
 	cmpl	$(SYSENTER_CS),ISF64_CS-8-8-8(%rsp)
 					/* test for fast entry/exit */
@@ -532,7 +537,7 @@ L_sysret:
  * is saved to the error code slot in the stack frame. We then branch to the
  * common state saving code.
  */
-
+		
 #ifndef UNIX_INT
 #error NO UNIX INT!!!
 #endif
@@ -543,7 +548,7 @@ Entry(idt64_unix_scall)
 	pushq	$(UNIX_INT)
 	jmp	L_32bit_entry_check
 
-
+	
 Entry(idt64_mach_scall)
 	swapgs				/* switch to kernel gs (cpu_data) */
 	pushq	%rax			/* save system call number */
@@ -551,7 +556,7 @@ Entry(idt64_mach_scall)
 	pushq	$(MACH_INT)
 	jmp	L_32bit_entry_check
 
-
+	
 Entry(idt64_mdep_scall)
 	swapgs				/* switch to kernel gs (cpu_data) */
 	pushq	%rax			/* save system call number */
@@ -559,6 +564,7 @@ Entry(idt64_mdep_scall)
 	pushq	$(MACHDEP_INT)
 	jmp	L_32bit_entry_check
 
+/* Programmed into MSR_IA32_LSTAR by mp_desc.c */
 Entry(hi64_syscall)
 Entry(idt64_syscall)
 L_syscall_continue:
@@ -570,7 +576,7 @@ L_syscall_continue:
 	 * Save values in the ISF frame in the PCB
 	 * to cons up the saved machine state.
 	 */
-	movl	$(USER_DS), ISF64_SS(%rsp)
+	movl	$(USER_DS), ISF64_SS(%rsp)	
 	movl	$(SYSCALL_CS), ISF64_CS(%rsp)	/* cs - a pseudo-segment */
 	mov	%r11, ISF64_RFLAGS(%rsp)	/* rflags */
 	mov	%rcx, ISF64_RIP(%rsp)		/* rip */
@@ -582,7 +588,7 @@ L_syscall_continue:
 	movq	%r11, ISF64_TRAPFN(%rsp)
 	mov	ISF64_RFLAGS(%rsp), %r11	/* Avoid leak, restore R11 */
 	jmp	L_dispatch_U64			/* this can only be 64-bit */
-
+	
 /*
  * sysenter entry point
  * Requires user code to set up:
@@ -609,7 +615,7 @@ Entry(idt64_sysenter)
 	 */
 	push	$0
 	popf
-	push	$(SYSENTER_CS)		/* cs */
+	push	$(SYSENTER_CS)		/* cs */ 
 L_sysenter_continue:
 	swapgs				/* switch to kernel gs (cpu_data) */
 	push	%rdx			/* eip */
@@ -657,7 +663,7 @@ Entry(idt64_debug)
 	/*
 	 * Interrupt stack frame has been pushed on the temporary stack.
 	 * We have to switch to pcb stack and patch up the saved state.
-	 */
+	 */ 
 	mov	%rcx, ISF64_ERR(%rsp)	/* save %rcx in error slot */
 	mov	ISF64_SS+8(%rsp), %rcx	/* top of temp stack -> pcb stack */
 	xchg	%rcx,%rsp		/* switch to pcb stack */
@@ -667,7 +673,7 @@ Entry(idt64_debug)
 	push	$(SYSENTER_TF_CS)	/* cs - not SYSENTER_CS for iret path */
 	mov	ISF64_ERR(%rcx),%rcx	/* restore %rcx */
 	jmp	L_sysenter_continue	/* continue sysenter entry */
-
+	
 
 Entry(idt64_double_fault)
 	PUSH_FUNCTION(HNDL_DOUBLE_FAULT)
@@ -681,7 +687,7 @@ Entry(idt64_double_fault)
 
 	mov	ISF64_RSP(%rsp), %rsp
 	jmp	L_syscall_continue
-
+	
 
 /*
  * For GP/NP/SS faults, we use the IST1 stack.
@@ -815,7 +821,7 @@ L_kernel_trap:
  *  16 ISF64_ERR:	segment number in error (error code)
  *  24 ISF64_RIP:	kernel RIP
  *  32 ISF64_CS:	kernel CS
- *  40 ISF64_RFLAGS:	kernel RFLAGS
+ *  40 ISF64_RFLAGS:	kernel RFLAGS 
  *  48 ISF64_RSP:	kernel RSP
  *  56 ISF64_SS:	kernel SS
  * On the PCB stack, pointed to by the kernel's RSP is:
@@ -858,13 +864,13 @@ L_fault_iret:
  *  16 ISF64_ERR:	segment number in error (error code)
  *  24 ISF64_RIP:	kernel RIP
  *  32 ISF64_CS:	kernel CS
- *  40 ISF64_RFLAGS:	kernel RFLAGS
+ *  40 ISF64_RFLAGS:	kernel RFLAGS 
  *  48 ISF64_RSP:	kernel RSP
  *  56 ISF64_SS:	kernel SS
  * On the PCB stack, pointed to by the kernel's RSP is:
  *  0  			user trap code
  *  8  			user trap function
- *  16			user err
+ *  16			user err 
  *  24			user RIP
  *  32			user CS
  *  40			user RFLAGS
@@ -894,18 +900,18 @@ L_32bit_fault_set_seg:
 Entry(idt64_db_task_dbl_fault)
 	PUSH_FUNCTION(HNDL_DOUBLE_FAULT)
 	pushq	$(T_DOUBLE_FAULT)
-	jmp	L_dispatch
+	jmp	L_dispatch	
 
 Entry(idt64_db_task_stk_fault)
 	PUSH_FUNCTION(HNDL_DOUBLE_FAULT)
 	pushq	$(T_STACK_FAULT)
-	jmp	L_dispatch
+	jmp	L_dispatch	
 
 Entry(idt64_mc)
 	push	$(0)			/* Error */
 	PUSH_FUNCTION(HNDL_MACHINE_CHECK)
 	pushq	$(T_MACHINE_CHECK)
-	jmp	L_dispatch
+	jmp	L_dispatch	
 
 /*
  * NMI
@@ -931,7 +937,7 @@ Entry(idt64_nmi)
 	/* From user-space: copy interrupt state to user PCB */
 	swapgs
 	mov	%gs:CPU_UBER_ISF, %rcx		/* PCB stack addr */
-	add	$(ISF64_SIZE), %rcx		/* adjust to base of ISF */
+	add	$(ISF64_SIZE), %rcx		/* adjust to base of ISF */	
 	swapgs					/* swap back for L_dispatch */
 	jmp	4f				/* Copy state to PCB */
 
@@ -999,8 +1005,8 @@ Entry(idt64_nmi)
  *	r15	x86_saved_state_t address
  *	rsp	kernel stack if user-space, otherwise interrupt or kernel stack
  *	esi	cs at trap
- *
- * The rest of the state is set up as:
+ * 
+ * The rest of the state is set up as:	
  *	both rsp and r15 are 16-byte aligned
  *	interrupts disabled
  *	direction flag cleared
@@ -1014,6 +1020,7 @@ Entry(hndl_alltraps)
 
 	/* Check for active vtimers in the current task */
 	mov	%gs:CPU_ACTIVE_THREAD, %rcx
+	movl	$-1, TH_IOTIER_OVERRIDE(%rcx)	/* Reset IO tier override to -1 before handling trap/exception */
 	mov	TH_TASK(%rcx), %rbx
 	TASK_VTIMER_CHECK(%rbx, %rcx)
 
@@ -1022,18 +1029,16 @@ Entry(hndl_alltraps)
 	cli					/* hold off intrs - critical section */
 	xorl	%ecx, %ecx			/* don't check if we're in the PFZ */
 
-#define CLI cli
-#define STI sti
 
 Entry(return_from_trap)
 	movq	%gs:CPU_ACTIVE_THREAD,%r15	/* Get current thread */
-	movl	$-1, TH_IOTIER_OVERRIDE(%r15)	/* Clear IO tier override before returning to userspace */
+	movl	$-1, TH_IOTIER_OVERRIDE(%r15)	/* Reset IO tier override to -1 before returning to userspace */
 	cmpl	$0, TH_RWLOCK_COUNT(%r15)	/* Check if current thread has pending RW locks held */
 	jz	1f
 	xorq	%rbp, %rbp		/* clear framepointer */
 	mov	%r15, %rdi		/* Set RDI to current thread */
 	CCALL(lck_rw_clear_promotions_x86)	/* Clear promotions if needed */
-1:
+1:	
 	movq	TH_PCB_ISS(%r15), %r15 		/* PCB stack */
 	movl	%gs:CPU_PENDING_AST,%eax
 	testl	%eax,%eax
@@ -1060,14 +1065,14 @@ L_return_from_trap_with_ast:
 	je	2f			/* not in the PFZ... go service AST */
 	movl	%eax, R64_RBX(%r15)	/* let the PFZ know we've pended an AST */
 	jmp	EXT(return_to_user)
-2:
-	STI				/* interrupts always enabled on return to user mode */
+2:	
+	sti				/* interrupts always enabled on return to user mode */
 
 	xor	%edi, %edi		/* zero %rdi */
 	xorq	%rbp, %rbp		/* clear framepointer */
 	CCALL(i386_astintr)		/* take the AST */
 
-	CLI
+	cli
 	mov	%rsp, %r15		/* AST changes stack, saved state */
 	xorl	%ecx, %ecx		/* don't check if we're in the PFZ */
 	jmp	EXT(return_from_trap)	/* and check again (rare) */
@@ -1076,7 +1081,7 @@ L_return_from_trap_with_ast:
  * Trap from kernel mode.  No need to switch stacks.
  * Interrupts must be off here - we will set them to state at time of trap
  * as soon as it's safe for us to do so and not recurse doing preemption
- *
+ * 
  */
 trap_from_kernel:
 	movq	%r15, %rdi		/* saved state addr */
@@ -1141,7 +1146,7 @@ Entry(hndl_allintrs)
 	pushq	%rcx			/* save pointer to old stack */
 	pushq	%gs:CPU_INT_STATE	/* save previous intr state */
 	movq	%r15,%gs:CPU_INT_STATE	/* set intr state */
-
+	
 	TIME_INT_ENTRY			/* do timing */
 
 	/* Check for active vtimers in the current task */
@@ -1153,8 +1158,6 @@ Entry(hndl_allintrs)
 	incl	%gs:CPU_INTERRUPT_LEVEL
 
 	CCALL1(interrupt, %r15)		/* call generic interrupt routine */
-
-	cli				/* just in case we returned with intrs enabled */
 
 	.globl	EXT(return_to_iret)
 LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
@@ -1183,7 +1186,7 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 2:
 	/* Load interrupted code segment into %eax */
 	movl	R32_CS(%r15),%eax	/* assume 32-bit state */
-	cmpl	$(SS_64),SS_FLAVOR(%r15)/* 64-bit? */
+	cmpl	$(SS_64),SS_FLAVOR(%r15)/* 64-bit? */	
 #if DEBUG_IDT64
 	jne	4f
 	movl	R64_CS(%r15),%eax	/* 64-bit user mode */
@@ -1206,7 +1209,7 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 	 * the interrupt fell in the kernel context
 	 * and preemption isn't disabled
 	 */
-	movl	%gs:CPU_PENDING_AST,%eax
+	movl	%gs:CPU_PENDING_AST,%eax	
 	testl	$(AST_URGENT),%eax		/* any urgent requests? */
 	je	ret_to_kernel			/* no, nothing to do */
 
@@ -1283,7 +1286,7 @@ Entry(hndl_sysenter)
 	testl	%eax,%eax
 	js	EXT(hndl_mach_scall)		/* < 0 => mach */
 						/* > 0 => unix */
-
+	
 Entry(hndl_unix_scall)
 
         TIME_TRAP_UENTRY
@@ -1352,6 +1355,7 @@ Entry(hndl_syscall)
 	TIME_TRAP_UENTRY
 
 	movq	%gs:CPU_ACTIVE_THREAD,%rcx	/* get current thread     */
+	movl	$-1, TH_IOTIER_OVERRIDE(%rcx)	/* Reset IO tier override to -1 before handling syscall */
 	movq	TH_TASK(%rcx),%rbx		/* point to current task  */
 
 	/* Check for active vtimers in the current task */
@@ -1410,7 +1414,6 @@ Entry(hndl_mdep_scall64)
 
 Entry(hndl_diag_scall64)
 	CCALL1(diagCall64, %r15)	// Call diagnostics
-	cli				// Disable interruptions just in case
 	test	%eax, %eax		// What kind of return is this?
 	je	1f			// - branch if bad (zero)
 	jmp	EXT(return_to_user)	// Normal return, do not check asts...

@@ -330,14 +330,13 @@ gif_clone_create(struct if_clone *ifc, uint32_t unit, __unused void *params)
 		goto done;
 	}
 
-	sc = _MALLOC(sizeof (struct gif_softc), M_DEVBUF, M_WAITOK);
+	sc = _MALLOC(sizeof (struct gif_softc), M_DEVBUF, M_WAITOK | M_ZERO);
 	if (sc == NULL) {
 		log(LOG_ERR, "gif_clone_create: failed to allocate gif%d\n",
 		    unit);
 		error = ENOBUFS;
 		goto done;
 	}
-	bzero(sc, sizeof (struct gif_softc));
 
 	/* use the interface name as the unique id for ifp recycle */
 	snprintf(sc->gif_ifname, sizeof (sc->gif_ifname), "%s%d",
@@ -684,7 +683,6 @@ gif_ioctl(
 	case SIOCSIFPHYADDR_IN6_32:
 	case SIOCSIFPHYADDR_IN6_64:
 #endif /* INET6 */
-	case SIOCSLIFPHYADDR:
 		switch (cmd) {
 #if INET
 		case SIOCSIFPHYADDR:
@@ -713,11 +711,6 @@ gif_ioctl(
 			break;
 		}
 #endif
-		case SIOCSLIFPHYADDR:
-			src = (struct sockaddr *)
-				&(((struct if_laddrreq *)data)->addr);
-			dst = (struct sockaddr *)
-				&(((struct if_laddrreq *)data)->dstaddr);
 		}
 
 		/* sa_family must be equal */
@@ -771,9 +764,6 @@ gif_ioctl(
 				break;
 			return (EAFNOSUPPORT);
 #endif /* INET6 */
-		case SIOCSLIFPHYADDR:
-			/* checks done in the above */
-			break;
 		}
 
 #define	GIF_ORDERED_LOCK(sc, sc2)	\
@@ -967,38 +957,6 @@ gif_ioctl(
 			GIF_UNLOCK(sc);
 			goto bad;
 		}
-		if (src->sa_len > size) {
-			GIF_UNLOCK(sc);
-			return (EINVAL);
-		}
-		bcopy((caddr_t)src, (caddr_t)dst, src->sa_len);
-		GIF_UNLOCK(sc);
-		break;
-
-	case SIOCGLIFPHYADDR:
-		GIF_LOCK(sc);
-		if (sc->gif_psrc == NULL || sc->gif_pdst == NULL) {
-			GIF_UNLOCK(sc);
-			error = EADDRNOTAVAIL;
-			goto bad;
-		}
-
-		/* copy src */
-		src = sc->gif_psrc;
-		dst = (struct sockaddr *)
-			&(((struct if_laddrreq *)data)->addr);
-		size = sizeof (((struct if_laddrreq *)data)->addr);
-		if (src->sa_len > size) {
-			GIF_UNLOCK(sc);
-			return (EINVAL);
-		}
-		bcopy((caddr_t)src, (caddr_t)dst, src->sa_len);
-
-		/* copy dst */
-		src = sc->gif_pdst;
-		dst = (struct sockaddr *)
-			&(((struct if_laddrreq *)data)->dstaddr);
-		size = sizeof (((struct if_laddrreq *)data)->dstaddr);
 		if (src->sa_len > size) {
 			GIF_UNLOCK(sc);
 			return (EINVAL);

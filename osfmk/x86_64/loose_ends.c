@@ -82,6 +82,11 @@
 #include <kdp/kdp_callout.h>
 #endif /* !MACH_KDP */
 
+#include <libkern/OSDebug.h>
+#if CONFIG_DTRACE
+#include <mach/sdt.h>
+#endif
+
 #if 0
 
 #undef KERNEL_DEBUG
@@ -246,18 +251,27 @@ ovbcopy(
  *  Read data from a physical address. Memory should not be cache inhibited.
  */
 
+uint64_t reportphyreaddelayabs;
+uint32_t reportphyreadosbt;
 
 static inline unsigned int
 ml_phys_read_data(pmap_paddr_t paddr, int size)
 {
 	unsigned int result = 0;
+	unsigned char s1;
+	unsigned short s2;
+	boolean_t istate;
+	uint64_t sabs, eabs;
 
-	if (!physmap_enclosed(paddr))
+	if (__improbable(!physmap_enclosed(paddr)))
 		panic("%s: 0x%llx out of bounds\n", __FUNCTION__, paddr);
 
+	if (__improbable(reportphyreaddelayabs != 0)) {
+		istate = ml_set_interrupts_enabled(FALSE);
+		sabs = mach_absolute_time();
+	}
+
         switch (size) {
-		unsigned char s1;
-		unsigned short s2;
         case 1:
 		s1 = *(volatile unsigned char *)PHYSMAP_PTOV(paddr);
 		result = s1;
@@ -273,6 +287,22 @@ ml_phys_read_data(pmap_paddr_t paddr, int size)
 		panic("Invalid size %d for ml_phys_read_data\n", size);
 		break;
         }
+
+	if (__improbable(reportphyreaddelayabs != 0)) {
+		eabs = mach_absolute_time();
+		(void)ml_set_interrupts_enabled(istate);
+
+		if ((eabs - sabs) > reportphyreaddelayabs) {
+			if (reportphyreadosbt) {
+				OSReportWithBacktrace("ml_phys_read_data took %lluus\n", (eabs - sabs) / 1000);
+			}
+#if CONFIG_DTRACE
+			DTRACE_PHYSLAT3(physread, uint64_t, (eabs - sabs),
+			    pmap_paddr_t, paddr, uint32_t, size);
+#endif
+		}
+	}
+
         return result;
 }
 
@@ -491,6 +521,13 @@ memcmp(const void *s1, const void *s2, size_t n)
 	return (0);
 }
 
+void *
+memmove(void *dst, const void *src, size_t ulen)
+{
+	bcopy(src, dst, ulen);
+	return dst;
+}
+
 /*
  * Abstract:
  * strlen returns the number of characters in "string" preceeding
@@ -645,20 +682,6 @@ kdp_register_callout(kdp_callout_fn_t fn, void *arg)
 #pragma unused(fn,arg)
 }
 #endif
-
-/*
- * Return a uniformly distributed 64-bit random number.
- *
- * This interface should have minimal dependencies on kernel
- * services, and thus be available very early in the life
- * of the kernel.  But as a result, it may not be very random
- * on all platforms.
- */
-uint64_t
-early_random(void)
-{
-	return (ml_early_random());
-}
 
 #if !CONFIG_VMX
 int host_vmxon(boolean_t exclusive __unused)

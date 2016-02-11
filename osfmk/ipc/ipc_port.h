@@ -83,6 +83,7 @@
 #include <mach/kern_return.h>
 #include <mach/port.h>
 
+#include <kern/assert.h>
 #include <kern/kern_types.h>
 
 #include <ipc/ipc_types.h>
@@ -119,6 +120,15 @@ struct ipc_port {
 	struct ipc_object ip_object;
 	struct ipc_mqueue ip_messages;
 
+	natural_t ip_sprequests:1,	/* send-possible requests outstanding */
+		  ip_spimportant:1,	/* ... at least one is importance donating */
+		  ip_impdonation:1,	/* port supports importance donation */
+		  ip_tempowner:1,	/* dont give donations to current receiver */
+		  ip_guarded:1,         /* port guarded (use context value as guard) */
+		  ip_strict_guard:1,	/* Strict guarding; Prevents user manipulation of context values directly */
+		  ip_reserved:2,
+		  ip_impcount:24;	/* number of importance donations in nested queue */
+
 	union {
 		struct ipc_space *receiver;
 		struct ipc_port *destination;
@@ -127,7 +137,7 @@ struct ipc_port {
 
 	union {
 		ipc_kobject_t kobject;
-		task_t imp_task;
+		ipc_importance_task_t imp_task;
 		uintptr_t alias;
 	} kdata;
 		
@@ -136,44 +146,29 @@ struct ipc_port {
 	struct ipc_port_request *ip_requests;
 	struct ipc_kmsg *ip_premsg;
 
+	mach_vm_address_t ip_context;
+
 	mach_port_mscount_t ip_mscount;
 	mach_port_rights_t ip_srights;
 	mach_port_rights_t ip_sorights;
 
-	natural_t ip_sprequests:1,	/* send-possible requests outstanding */
-		  ip_spimportant:1,	/* ... at least one is importance donating */
-		  ip_impdonation:1,	/* port supports importance donation */
-		  ip_tempowner:1,	/* dont give donations to current receiver */
-		  ip_taskptr:1,		/* ... instead give them to a specified task */
-		  ip_guarded:1,         /* port guarded (use context value as guard) */
-		  ip_strict_guard:1,	/* Strict guarding; Prevents user manipulation of context values directly */
-		  ip_reserved:1,
-		  ip_impcount:24;	/* number of importance donations in nested queue */
-
-	mach_vm_address_t ip_context;
-
-
 #if	MACH_ASSERT
 #define	IP_NSPARES		4
 #define	IP_CALLSTACK_MAX	16
-	queue_chain_t	ip_port_links;	/* all allocated ports */
+/*	queue_chain_t	ip_port_links;*//* all allocated ports */
 	thread_t	ip_thread;	/* who made me?  thread context */
 	unsigned long	ip_timetrack;	/* give an idea of "when" created */
 	uintptr_t	ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
 	unsigned long	ip_spares[IP_NSPARES]; /* for debugging */
 #endif	/* MACH_ASSERT */
-
-#if CONFIG_MACF_MACH
-        struct label    ip_label;
-#endif
-};
+} __attribute__((__packed__));
 
 
 #define ip_references		ip_object.io_references
 #define ip_bits			ip_object.io_bits
 
 #define ip_receiver_name	ip_messages.imq_receiver_name
-#define	ip_pset_count		ip_messages.imq_pset_count
+#define	ip_in_pset		ip_messages.imq_in_pset
 
 #define	ip_receiver		data.receiver
 #define	ip_destination		data.destination
@@ -264,20 +259,7 @@ extern lck_attr_t 	ipc_lck_attr;
  *	when it is taken.
  */
 
-#if 1
-decl_lck_mtx_data(extern,ipc_port_multiple_lock_data)
-extern lck_mtx_ext_t	ipc_port_multiple_lock_data_ext;
-
-#define	ipc_port_multiple_lock_init()					\
-		lck_mtx_init_ext(&ipc_port_multiple_lock_data, &ipc_port_multiple_lock_data_ext, &ipc_lck_grp, &ipc_lck_attr)
-
-#define	ipc_port_multiple_lock()					\
-		lck_mtx_lock(&ipc_port_multiple_lock_data)
-
-#define	ipc_port_multiple_unlock()					\
-		lck_mtx_unlock(&ipc_port_multiple_lock_data)
-#else
-lck_spin_t ipc_port_multiple_lock_data;
+extern lck_spin_t ipc_port_multiple_lock_data;
 
 #define	ipc_port_multiple_lock_init()					\
 		lck_spin_init(&ipc_port_multiple_lock_data, &ipc_lck_grp, &ipc_lck_attr)
@@ -287,7 +269,6 @@ lck_spin_t ipc_port_multiple_lock_data;
 
 #define	ipc_port_multiple_unlock()					\
 		lck_spin_unlock(&ipc_port_multiple_lock_data)
-#endif
 
 /*
  *	The port timestamp facility provides timestamps
@@ -411,8 +392,7 @@ MACRO_END
 
 /* Prepare a receive right for transmission/destruction */
 extern void ipc_port_clear_receiver(
-	ipc_port_t		port,
-	queue_t			links);
+	ipc_port_t		port);
 
 /* Initialize a newly-allocated port */
 extern void ipc_port_init(
@@ -452,10 +432,32 @@ ipc_port_check_circularity(
 	ipc_port_t	dest);
 
 #if IMPORTANCE_INHERITANCE
-/* Apply an importance delta to a port */
+
+enum {
+	IPID_OPTION_NORMAL       = 0, /* normal boost */
+	IPID_OPTION_SENDPOSSIBLE = 1, /* send-possible induced boost */
+};
+
+/* apply importance delta to port only */
+extern mach_port_delta_t
+ipc_port_impcount_delta(
+	ipc_port_t 		port,
+	mach_port_delta_t	delta,
+	ipc_port_t		base);
+
+/* apply importance delta to port, and return task importance for update */
+extern boolean_t
+ipc_port_importance_delta_internal(
+	ipc_port_t 		port,
+	natural_t		options,
+	mach_port_delta_t	*deltap,
+	ipc_importance_task_t	*imp_task);
+
+/* Apply an importance delta to a port and reflect change in receiver task */
 extern boolean_t
 ipc_port_importance_delta(
 	ipc_port_t 		port,
+	natural_t		options,
 	mach_port_delta_t	delta);
 #endif /* IMPORTANCE_INHERITANCE */
 

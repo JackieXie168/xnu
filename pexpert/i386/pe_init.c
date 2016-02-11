@@ -29,6 +29,7 @@
  * file: pe_init.c
  *    i386 platform expert initialization.
  */
+
 #include <sys/types.h>
 #include <mach/vm_param.h>
 #include <machine/machine_routines.h>
@@ -39,6 +40,10 @@
 #include <pexpert/pe_images.h>
 #include <kern/sched_prim.h>
 #include <kern/debug.h>
+
+#if CONFIG_CSR
+#include <sys/csr.h>
+#endif
 
 #include "boot_images.h"
 
@@ -100,12 +105,6 @@ void PE_init_iokit(void)
 {
     enum { kMaxBootVar = 128 };
         
-    typedef struct {
-        char            name[32];
-        unsigned long   length;
-        unsigned long   value[2];
-    } DriversPackageProp;
-
     boolean_t bootClutInitialized = FALSE;
     boolean_t noroot_rle_Initialized = FALSE;
 
@@ -171,10 +170,13 @@ void PE_init_iokit(void)
     /*
      * Initialize the spinning wheel (progress indicator).
      */
-    vc_progress_initialize( &default_progress, default_progress_data1x, default_progress_data2x,
-                            (unsigned char *) appleClut8 );
+    vc_progress_initialize(&default_progress, 
+			    default_progress_data1x,
+			    default_progress_data2x, 
+			    default_progress_data3x, 
+			    (unsigned char *) appleClut8);
 
-    (void) StartIOKit( PE_state.deviceTreeHead, PE_state.bootArgs, gPEEFIRuntimeServices, NULL);
+    StartIOKit( PE_state.deviceTreeHead, PE_state.bootArgs, gPEEFIRuntimeServices, NULL);
 }
 
 void PE_init_platform(boolean_t vm_initialized, void * _args)
@@ -193,7 +195,6 @@ void PE_init_platform(boolean_t vm_initialized, void * _args)
         PE_state.video.v_height	    = args->Video.v_height;
         PE_state.video.v_depth	    = args->Video.v_depth;
         PE_state.video.v_display    = args->Video.v_display;
-        PE_state.video.v_scale      = (kBootArgsFlagHiDPI & args->flags) ? 2 : 1;
         strlcpy(PE_state.video.v_pixelFormat, "PPPPPPPP",
 		sizeof(PE_state.video.v_pixelFormat));
 
@@ -322,4 +323,22 @@ PE_reboot_on_panic(void)
 		return TRUE;
 	else
 		return FALSE;
+}
+
+/* rdar://problem/21244753 */
+uint32_t
+PE_i_can_has_debugger(uint32_t *debug_flags)
+{
+#if CONFIG_CSR
+	if (csr_check(CSR_ALLOW_KERNEL_DEBUGGER) != 0 &&
+	    csr_check(CSR_ALLOW_APPLE_INTERNAL) != 0) {
+		if (debug_flags)
+			*debug_flags = 0;
+		return FALSE;
+	}
+#endif
+	if (debug_flags) {
+		*debug_flags = debug_boot_arg;
+	}
+	return TRUE;
 }

@@ -29,8 +29,15 @@ INSTINC_SUBDIRS_X86_64 = \
 	i386 \
 	crypto
 
+INSTINC_SUBDIRS_X86_64H = \
+	i386 \
+	crypto
+
 INSTINC_SUBDIRS_ARM = \
 	arm 
+
+INSTINC_SUBDIRS_ARM64 = \
+	arm
 
 EXPINC_SUBDIRS = \
 	bsm \
@@ -52,19 +59,22 @@ EXPINC_SUBDIRS = \
 EXPINC_SUBDIRS_X86_64 = \
 	i386 
 
+EXPINC_SUBDIRS_X86_64H = \
+	i386 
+
 EXPINC_SUBDIRS_ARM = \
 	arm 
+
+EXPINC_SUBDIRS_ARM64 = \
+	arm
 
 COMP_SUBDIRS = 	\
 	conf
 
-INST_SUBDIRS =	\
+INSTTEXTFILES_SUBDIRS =	\
 	dev \
-	kern
-
-INSTMAN_SUBDIRS = \
+	kern \
 	man
-
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

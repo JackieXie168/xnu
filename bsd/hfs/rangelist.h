@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 2001-2014 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -44,7 +44,7 @@ enum rl_overlaptype {
     RL_OVERLAPENDSAFTER		/* 5 */
 };
 
-#define RL_INFINITY ((off_t)-1)
+#define RL_INFINITY INT64_MAX
 
 TAILQ_HEAD(rl_head, rl_entry);
 
@@ -58,10 +58,27 @@ __BEGIN_DECLS
 void rl_init(struct rl_head *rangelist);
 void rl_add(off_t start, off_t end, struct rl_head *rangelist);
 void rl_remove(off_t start, off_t end, struct rl_head *rangelist);
+void rl_remove_all(struct rl_head *rangelist);
 enum rl_overlaptype rl_scan(struct rl_head *rangelist,
 							off_t start,
 							off_t end,
 							struct rl_entry **overlap);
+enum rl_overlaptype rl_overlap(const struct rl_entry *range, 
+							   off_t start, off_t end);
+
+static __attribute__((pure)) inline
+off_t rl_len(const struct rl_entry *range)
+{
+	return range->rl_end - range->rl_start + 1;
+}
+
+void rl_subtract(struct rl_entry *a, const struct rl_entry *b);
+
+static inline struct rl_entry rl_make(off_t start, off_t end)
+{
+	return (struct rl_entry){ .rl_start = start, .rl_end = end };
+}
+
 __END_DECLS
 
 #endif /* __APPLE_API_PRIVATE */

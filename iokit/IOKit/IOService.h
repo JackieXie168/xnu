@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2011 Apple Computer, Inc. All rights reserved.
+ * Copyright (c) 1998-2014 Apple Computer, Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -284,6 +284,9 @@ The class name that the service will attempt to allocate when a user client conn
 <br>
 Set some debug flags for logging the driver loading process. Flags are defined in <code>IOKit/IOKitDebug.h</code>, but <code>65535</code> works well.*/
 
+struct IOInterruptAccountingData;
+struct IOInterruptAccountingReporter;
+
 class IOService : public IORegistryEntry
 {
     OSDeclareDefaultStructors(IOService)
@@ -292,7 +295,19 @@ protected:
 /*! @struct ExpansionData
     @discussion This structure will be used to expand the capablilties of this class in the future.
     */    
-    struct ExpansionData { };
+    struct ExpansionData {
+        uint64_t authorizationID;
+        /*
+         * Variables associated with interrupt accounting.  Consists of an array
+         * (that pairs reporters with opaque "statistics" objects), the count for
+         * the array, and a lock to guard both of the former variables.  The lock
+         * is necessary as IOReporting will not update reports in a manner that is
+         * synchonized with the service (i.e, on a workloop).
+         */
+        IOLock * interruptStatisticsLock;
+        IOInterruptAccountingReporter * interruptStatisticsArray;
+        int interruptStatisticsArrayCount;
+    };
 
 /*! @var reserved
     Reserved for future use.  (Internal use only)  */
@@ -590,10 +605,19 @@ public:
     
     virtual bool finalize( IOOptionBits options );
 
+/*! @function init
+    @abstract Initializes generic IOService data structures (expansion data, etc). */
+    virtual bool init( OSDictionary * dictionary = 0 ) APPLE_KEXT_OVERRIDE;
+
+/*! @function init
+    @abstract Initializes generic IOService data structures (expansion data, etc). */
+    virtual bool init( IORegistryEntry * from,
+                       const IORegistryPlane * inPlane ) APPLE_KEXT_OVERRIDE;
+
 /*! @function free
     @abstract Frees data structures that were allocated when power management was initialized on this service. */
     
-    virtual void free( void );
+    virtual void free( void ) APPLE_KEXT_OVERRIDE;
 
 /*! @function lockForArbitration
     @abstract Locks an IOService object against changes in state or ownership.
@@ -1081,6 +1105,19 @@ public:
 
     virtual IOReturn unregisterInterrupt(int source);
 
+/*! @function addInterruptStatistics
+    @abstract Adds a statistics object to the IOService for the given interrupt.
+    @discussion This method associates a set of statistics and a reporter for those statistics with an interrupt for this IOService, so that we can interrogate the IOService for statistics pertaining to that interrupt.
+    @param statistics The IOInterruptAccountingData container we wish to associate the IOService with.
+    @param source The index of the interrupt source in the device. */
+    IOReturn addInterruptStatistics(IOInterruptAccountingData * statistics, int source);
+
+/*! @function removeInterruptStatistics
+    @abstract Removes any statistics from the IOService for the given interrupt.
+    @discussion This method disassociates any IOInterruptAccountingData container we may have for the given interrupt from the IOService; this indicates that the the interrupt target (at the moment, likely an IOInterruptEventSource) is being destroyed.
+    @param source The index of the interrupt source in the device. */
+    IOReturn removeInterruptStatistics(int source);
+
 /*! @function getInterruptType
     @abstract Returns the type of interrupt used for a device supplying hardware interrupts.
     @param source The index of the interrupt source in the device.
@@ -1221,7 +1258,7 @@ public:
     IOInterruptSource *_interruptSources;
 
     /* overrides */
-    virtual bool serializeProperties( OSSerialize * s ) const;
+    virtual bool serializeProperties( OSSerialize * s ) const APPLE_KEXT_OVERRIDE;
 
 #ifdef KERNEL_PRIVATE
     /* Apple only SPI to control CPU low power modes */
@@ -1246,6 +1283,9 @@ public:
     static void updateConsoleUsers(OSArray * consoleUsers, IOMessage systemMessage);
     static void consoleLockTimer(thread_call_param_t p0, thread_call_param_t p1);
     void setTerminateDefer(IOService * provider, bool defer);
+    uint64_t getAuthorizationID( void );
+    IOReturn setAuthorizationID( uint64_t authorizationID );
+    void cpusRunning(void);
 
 private:
     static IOReturn waitMatchIdle( UInt32 ms );
@@ -1346,6 +1386,12 @@ private:
                                      OSArray * doPhase2List, void*, void * );
     static void actionDidTerminate( IOService * victim, IOOptionBits options,
                                     void *, void *, void *);
+
+    static void actionWillStop( IOService * victim, IOOptionBits options, 
+				void *, void *, void *);
+    static void actionDidStop( IOService * victim, IOOptionBits options,
+				void *, void *, void *);
+
     static void actionFinalize( IOService * victim, IOOptionBits options,
                                 void *, void *, void *);
     static void actionStop( IOService * client, IOService * provider,
@@ -1667,8 +1713,7 @@ public:
 
 /*! @function powerStateForDomainState
     @abstract Determines what power state the device would be in for a given power domain state.
-    @discussion Power management calls a driver with this method to find out what power state the device would be in for a given power domain state. This happens when the power domain is changing state and power management needs to determine the effect of the change.
-    Most drivers do not need to implement this method, and can rely upon the default IOService implementation. The IOService implementation scans the power state array looking for the highest state whose <code>inputPowerRequirement</code> field exactly matches the value of the <code>domainState</code> parameter. If more intelligent determination is required, the power managed driver should implement the method and override the superclass's implementation.
+    @discussion This call is unused by power management. Drivers should override <code>initialPowerStateForDomainState</code> and/or <code>maxCapabilityForDomainState</code> instead to change the default mapping of domain state to driver power state.
     @param domainState Flags that describe the character of "domain power"; they represent the <code>outputPowerCharacter</code> field of a state in the power domain's power state array.
     @result A state number. */
 
@@ -1769,12 +1814,15 @@ public:
     IOReturn changePowerStateWithOverrideTo( IOPMPowerStateIndex ordinal, IOPMRequestTag tag );
     IOReturn changePowerStateForRootDomain( IOPMPowerStateIndex ordinal );
     IOReturn setIgnoreIdleTimer( bool ignore );
+    IOReturn quiescePowerTree( void * target, IOPMCompletionAction action, void * param );
     uint32_t getPowerStateForClient( const OSSymbol * client );
     static const char * getIOMessageString( uint32_t msg );
     static void setAdvisoryTickleEnable( bool enable );
     void reset_watchdog_timer( void );
     void start_watchdog_timer ( void );
     bool stop_watchdog_timer ( void );
+    IOReturn registerInterestForNotifer( IONotifier *notify, const OSSymbol * typeOfInterest,
+                  IOServiceInterestHandler handler, void * target, void * ref );
 
 #ifdef __LP64__
     static IOWorkLoop * getPMworkloop( void );
@@ -1833,6 +1881,8 @@ private:
     void stop_ack_timer ( void );
     void start_ack_timer( UInt32 value, UInt32 scale );
     void startSettleTimer( void );
+    void start_spindump_timer( const char * delay_type );
+    void stop_spindump_timer( void );
     bool checkForDone ( void );
     bool responseValid ( uint32_t x, int pid );
     void computeDesiredState( unsigned long tempDesire, bool computeOnly );
@@ -1842,8 +1892,10 @@ private:
 
     static void ack_timer_expired( thread_call_param_t, thread_call_param_t );
     static void watchdog_timer_expired ( thread_call_param_t arg0, thread_call_param_t arg1 );
+    static void spindump_timer_expired( thread_call_param_t arg0, thread_call_param_t arg1 );
     static IOReturn actionAckTimerExpired(OSObject *, void *, void *, void *, void * );
     static IOReturn watchdog_timer_expired ( OSObject *, void *, void *, void *, void * );
+    static IOReturn actionSpinDumpTimerExpired(OSObject *, void *, void *, void *, void * );
 
     static IOReturn actionDriverCalloutDone(OSObject *, void *, void *, void *, void * );
     static IOPMRequest * acquirePMRequest( IOService * target, IOOptionBits type, IOPMRequest * active = 0 );
@@ -1853,6 +1905,8 @@ private:
     static void pmTellClientWithResponse( OSObject * object, void * context );
     static void pmTellCapabilityAppWithResponse ( OSObject * object, void * arg );
     static void pmTellCapabilityClientWithResponse( OSObject * object, void * arg );
+    static void submitPMRequest( IOPMRequest * request );
+    static void submitPMRequests( IOPMRequest ** request, IOItemCount count );
     bool ackTimerTick( void );
     void addPowerChild1( IOPMRequest * request );
     void addPowerChild2( IOPMRequest * request );
@@ -1868,14 +1922,12 @@ private:
     void handleActivityTickle( IOPMRequest * request );
     void handleInterestChanged( IOPMRequest * request );
     void handleSynchronizePowerTree( IOPMRequest * request );
-    void submitPMRequest( IOPMRequest * request );
-    void submitPMRequest( IOPMRequest ** request, IOItemCount count );
     void executePMRequest( IOPMRequest * request );
-    bool servicePMRequest( IOPMRequest * request, IOPMWorkQueue * queue  );
-    bool retirePMRequest(  IOPMRequest * request, IOPMWorkQueue * queue );
-    bool servicePMRequestQueue( IOPMRequest * request, IOPMRequestQueue * queue );
-    bool servicePMReplyQueue( IOPMRequest * request, IOPMRequestQueue * queue );
-    bool servicePMFreeQueue( IOPMRequest * request, IOPMCompletionQueue * queue );
+    bool actionPMWorkQueueInvoke( IOPMRequest * request, IOPMWorkQueue * queue );
+    bool actionPMWorkQueueRetire( IOPMRequest * request, IOPMWorkQueue * queue );
+    bool actionPMRequestQueue( IOPMRequest * request, IOPMRequestQueue * queue );
+    bool actionPMReplyQueue( IOPMRequest * request, IOPMRequestQueue * queue );
+    bool actionPMCompletionQueue( IOPMRequest * request, IOPMCompletionQueue * queue );
     bool notifyInterestedDrivers( void );
     void notifyInterestedDriversDone( void );
     bool notifyControllingDriver( void );

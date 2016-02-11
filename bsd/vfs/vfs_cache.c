@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -218,6 +218,9 @@ build_path(vnode_t first_vp, char *buff, int buflen, int *outlen, int flags, vfs
 
 	if (first_vp == NULLVP)
 		return (EINVAL);
+		
+	if (buflen <= 1)
+		return (ENOSPC);
 
 	/*
 	 * Grab the process fd so we can evaluate fd_rdir.
@@ -339,8 +342,12 @@ again:
 			 * and disallow further path construction
 			 */
 			if ((vp->v_parent == NULLVP) && (rootvnode != vp)) {
-				/* Only '/' is allowed to have a NULL parent pointer */
-				ret = EINVAL;
+				/*
+				 * Only '/' is allowed to have a NULL parent
+				 * pointer. Upper level callers should ideally
+				 * re-drive name lookup on receiving a ENOENT.
+				 */
+				ret = ENOENT;
 
 				/* The code below will exit early if 'tvp = vp' == NULL */
 			}
@@ -1245,11 +1252,11 @@ skiprsrcfork:
 		}
 
 		if ( (mp = vp->v_mountedhere) && ((cnp->cn_flags & NOCROSSMOUNT) == 0)) {
-
-		        if (mp->mnt_realrootvp == NULLVP || mp->mnt_generation != mount_generation ||
-				mp->mnt_realrootvp_vid != mp->mnt_realrootvp->v_id)
-			        break;
-			vp = mp->mnt_realrootvp;
+			vnode_t tmp_vp = mp->mnt_realrootvp;
+			if (tmp_vp == NULLVP || mp->mnt_generation != mount_generation ||
+				mp->mnt_realrootvp_vid != tmp_vp->v_id)
+				break;
+			vp = tmp_vp;
 		}
 
 #if CONFIG_TRIGGERS
@@ -1258,10 +1265,8 @@ skiprsrcfork:
 		 * trigger in hand, resolve it.  Note that we don't need to 
 		 * leave the fast path if the mount has already happened.
 		 */
-		if ((vp->v_resolve != NULL) && 
-				(vp->v_resolve->vr_resolve_func != NULL)) {
+		if (vp->v_resolve)
 			break;
-		} 
 #endif /* CONFIG_TRIGGERS */
 
 
@@ -1403,7 +1408,7 @@ cache_lookup_locked(vnode_t dvp, struct componentname *cnp)
 	struct namecache *ncp;
 	struct nchashhead *ncpp;
 	long namelen = cnp->cn_namelen;
-	unsigned int hashval = (cnp->cn_hash & NCHASHMASK);
+	unsigned int hashval = cnp->cn_hash;
 	
 	if (nc_disabled) {
 		return NULL;
@@ -1487,7 +1492,7 @@ cache_lookup(struct vnode *dvp, struct vnode **vpp, struct componentname *cnp)
 
 	if (cnp->cn_hash == 0)
 		cnp->cn_hash = hash_string(cnp->cn_nameptr, cnp->cn_namelen);
-	hashval = (cnp->cn_hash & NCHASHMASK);
+	hashval = cnp->cn_hash;
 
 	if (nc_disabled) {
 		return 0;
@@ -1560,12 +1565,9 @@ relook:
 
 	/*
 	 * We found a "negative" match, ENOENT notifies client of this match.
-	 * The nc_whiteout field records whether this is a whiteout.
 	 */
 	NCHSTAT(ncs_neghits);
 
-	if (ncp->nc_whiteout)
-	        cnp->cn_flags |= ISWHITEOUT;
 	NAME_CACHE_UNLOCK();
 	return (ENOENT);
 }
@@ -1702,12 +1704,30 @@ cache_enter_locked(struct vnode *dvp, struct vnode *vp, struct componentname *cn
 	ncp->nc_vp = vp;
 	ncp->nc_dvp = dvp;
 	ncp->nc_hashval = cnp->cn_hash;
-	ncp->nc_whiteout = FALSE;
 
 	if (strname == NULL)
 		ncp->nc_name = add_name_internal(cnp->cn_nameptr, cnp->cn_namelen, cnp->cn_hash, FALSE, 0);
 	else
 		ncp->nc_name = strname;
+
+	//
+	// If the bytes of the name associated with the vnode differ,
+	// use the name associated with the vnode since the file system
+	// may have set that explicitly in the case of a lookup on a
+	// case-insensitive file system where the case of the looked up
+	// name differs from what is on disk.  For more details, see:
+	//   <rdar://problem/8044697> FSEvents doesn't always decompose diacritical unicode chars in the paths of the changed directories
+	// 
+	const char *vn_name = vp ? vp->v_name : NULL;
+	unsigned int len = vn_name ? strlen(vn_name) : 0;
+	if (vn_name && ncp && ncp->nc_name && strncmp(ncp->nc_name, vn_name, len) != 0) {
+		unsigned int hash = hash_string(vn_name, len);
+		
+		vfs_removename(ncp->nc_name);
+		ncp->nc_name = add_name_internal(vn_name, len, hash, FALSE, 0);
+		ncp->nc_hashval = hash;
+	}
+
 	/*
 	 * make us the newest entry in the cache
 	 * i.e. we'll be the last to be stolen
@@ -1738,13 +1758,10 @@ cache_enter_locked(struct vnode *dvp, struct vnode *vp, struct componentname *cn
 	} else {
 	        /*
 		 * this is a negative cache entry (vp == NULL)
-		 * stick it on the negative cache list
-		 * and record the whiteout state
+		 * stick it on the negative cache list.
 		 */
 	        TAILQ_INSERT_TAIL(&neghead, ncp, nc_un.nc_negentry);
 	  
-		if (cnp->cn_flags & ISWHITEOUT)
-		        ncp->nc_whiteout = TRUE;
 		ncs_negtotal++;
 
 		if (ncs_negtotal > desiredNegNodes) {

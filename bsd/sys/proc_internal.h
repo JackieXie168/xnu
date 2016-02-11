@@ -93,28 +93,13 @@ __END_DECLS
  * PL = Process Lock
  * PGL = Process Group Lock
  * PFDL = Process File Desc Lock
+ * PUCL = Process User Credentials Lock
  * PSL = Process Spin Lock
  * PPL = Parent Process Lock (planed for later usage)
  * LL = List Lock
  * SL = Session Lock
 */
 struct label;
-
-/*
- * Added by SPARTA, Inc.
- */
-/*
- * Login context.
- */
-struct lctx {
-	LIST_ENTRY(lctx) lc_list;	/* List of all login contexts. */
-	LIST_HEAD(, proc) lc_members;	/* Pointer to lc members. */
-	int		lc_mc;		/* Member Count. */
-	pid_t		lc_id;		/* Login context ID. */
-	lck_mtx_t	lc_mtx;		/* Mutex to protect members */
-
-	struct label	*lc_label;	/* Login context MAC label. */
-};
 
 /*
  * One structure allocated per session.
@@ -237,9 +222,10 @@ struct	proc {
 	TAILQ_HEAD( ,eventqelt) p_evlist;	/* (PL) */
 
 	lck_mtx_t	p_fdmlock;		/* proc lock to protect fdesc */
+	lck_mtx_t 	p_ucred_mlock;		/* mutex lock to protect p_ucred */
 
 	/* substructures: */
-	kauth_cred_t	p_ucred;		/* Process owner's identity. (PL) */
+	kauth_cred_t	p_ucred;		/* Process owner's identity. (PUCL) */
 	struct	filedesc *p_fd;			/* Ptr to open files structure. (PFDL) */
 	struct	pstats *p_stats;		/* Accounting/statistics (PL). */
 	struct	plimit *p_limit;		/* Process limits.(PL) */
@@ -336,6 +322,13 @@ struct	proc {
 	uint32_t	p_pcaction;	/* action  for process control on starvation */
 	uint8_t p_uuid[16];		/* from LC_UUID load command */
 
+	/* 
+	 * CPU type and subtype of binary slice executed in
+	 * this process.  Protected by proc lock.
+	 */
+	cpu_type_t	p_cputype;
+	cpu_subtype_t	p_cpusubtype;
+
 /* End area that is copied on creation. */
 /* XXXXXXXXXXXXX End of BCOPY'ed on fork (AIOLOCK)XXXXXXXXXXXXXXXX */
 #define	p_endcopy	p_aio_total_count
@@ -353,18 +346,20 @@ struct	proc {
 
 	/* DEPRECATE following field  */
 	u_short	p_acflag;	/* Accounting flags. */
-	volatile u_short p_vfs_iopolicy;	/* VFS iopolicy flags. */
+	volatile u_short p_vfs_iopolicy;	/* VFS iopolicy flags. (atomic bit ops) */
 
-	struct lctx *p_lctx;		/* Pointer to login context. */
-	LIST_ENTRY(proc) p_lclist;	/* List of processes in lctx. */
 	user_addr_t 	p_threadstart;		/* pthread start fn */
 	user_addr_t 	p_wqthread;		/* pthread workqueue fn */
 	int 	p_pthsize;			/* pthread size */
+	uint32_t	p_pth_tsd_offset;	/* offset from pthread_t to TSD for new threads */
 	user_addr_t	p_targconc;		/* target concurrency ptr */
+	user_addr_t	p_stack_addr_hint;	/* stack allocation hint for wq threads */
 	void * 	p_wqptr;			/* workq ptr */
 	int 	p_wqsize;			/* allocated size */
 	boolean_t       p_wqiniting;            /* semaphore to serialze wq_open */
 	lck_spin_t	p_wqlock;		/* lock to protect work queue */
+	struct kqueue * p_wqkqueue;             /* private workq kqueue */
+
 	struct  timeval p_start;        	/* starting time */
 	void *	p_rcall;
 	int		p_ractive;
@@ -393,16 +388,21 @@ struct	proc {
 	uint32_t          p_memstat_state;              /* state */
 	int32_t           p_memstat_effectivepriority;  /* priority after transaction state accounted for */
 	int32_t           p_memstat_requestedpriority;  /* active priority */
-	uint64_t          p_memstat_userdata;           /* user state */
 	uint32_t          p_memstat_dirty;              /* dirty state */
+	uint64_t          p_memstat_userdata;           /* user state */
 	uint64_t          p_memstat_idledeadline;       /* time at which process became clean */
 #if CONFIG_JETSAM
-	int32_t           p_memstat_memlimit;           /* cached memory limit */
+	int32_t           p_memstat_memlimit;           /* cached memory limit, toggles between active and inactive limits */
+	int32_t           p_memstat_memlimit_active;	/* memory limit enforced when process is in active jetsam state */
+	int32_t           p_memstat_memlimit_inactive;	/* memory limit enforced when process is in inactive jetsam state */
 #endif
 #if CONFIG_FREEZE
 	uint32_t          p_memstat_suspendedfootprint; /* footprint at time of suspensions */
 #endif /* CONFIG_FREEZE */
 #endif /* CONFIG_MEMORYSTATUS */
+
+	/* cached proc-specific data required for corpse inspection */
+	pid_t             p_responsible_pid;	/* pid resonsible for this process */
 };
 
 #define PGRPID_DEAD 0xdeaddead
@@ -451,11 +451,11 @@ struct	proc {
 #define	P_LLIMWAIT	0x00040000
 #define P_LWAITED   	0x00080000 
 #define P_LINSIGNAL    	0x00100000 
-#define P_UNUSED  	0x00200000 	/* Unused */
+#define P_LRETURNWAIT  	0x00200000 	/* process is completing spawn/vfork-exec/fork */
 #define P_LRAGE_VNODES	0x00400000
 #define P_LREGISTER	0x00800000	/* thread start fns registered  */
 #define P_LVMRSRCOWNER	0x01000000	/* can handle the resource ownership of  */
-/* old P_LPTERMINATE    0x02000000 */
+#define P_LRETURNWAITER 0x02000000	/* thread is waiting on P_LRETURNWAIT being cleared */
 #define P_LTERM_DECRYPTFAIL	0x04000000	/* process terminating due to key failure to decrypt */
 #define	P_LTERM_JETSAM		0x08000000	/* process is being jetsam'd */
 #define P_JETSAM_VMPAGESHORTAGE	0x00000000	/* jetsam: lowest jetsam priority proc, killed due to vm page shortage */
@@ -464,6 +464,7 @@ struct	proc {
 #define P_JETSAM_PID		0x30000000	/* jetsam: pid */
 #define P_JETSAM_IDLEEXIT	0x40000000	/* jetsam: idle exit */
 #define P_JETSAM_VNODE		0x50000000	/* jetsam: vnode kill */
+#define P_JETSAM_FCTHRASHING	0x60000000	/* jetsam: lowest jetsam priority proc, killed due to filecache thrashing */
 #define P_JETSAM_MASK		0x70000000	/* jetsam type mask */
 
 /* Process control state for resource starvation */
@@ -481,6 +482,7 @@ struct	proc {
 
 /* additional process flags */
 #define P_LADVLOCK		0x01
+#define P_LXBKIDLEINPROG	0x02
 
 /* p_vfs_iopolicy flags */
 #define P_VFS_IOPOLICY_FORCE_HFS_CASE_SENSITIVITY 0x0001
@@ -515,6 +517,9 @@ struct	proc {
 #ifdef KERNEL
 #include <sys/time.h>	/* user_timeval, user_itimerval */
 
+/* This packing breaks symmetry with userspace side (struct extern_proc 
+ * of proc.h) for the ARMV7K ABI where 64-bit types are 64-bit aligned
+ */
 #pragma pack(4)
 struct user32_extern_proc {
 	union {
@@ -643,18 +648,6 @@ extern vm_offset_t * execargs_cache;
 
 #define SESS_LEADER(p, sessp)	((sessp)->s_leader == (p))
 
-/* Lock and unlock a login context. */
-#define LCTX_LOCK(lc)	lck_mtx_lock(&(lc)->lc_mtx)
-#define LCTX_UNLOCK(lc)	lck_mtx_unlock(&(lc)->lc_mtx)
-#define LCTX_LOCKED(lc)
-#define LCTX_LOCK_ASSERT(lc, type)
-#define ALLLCTX_LOCK	lck_mtx_lock(&alllctx_lock)
-#define ALLLCTX_UNLOCK	lck_mtx_unlock(&alllctx_lock)
-extern lck_mtx_t alllctx_lock;
-extern lck_grp_t * lctx_lck_grp;
-extern lck_grp_attr_t * lctx_lck_grp_attr;
-extern lck_attr_t * lctx_lck_attr;
-
 #define	PIDHASH(pid)	(&pidhashtbl[(pid) & pidhash])
 extern LIST_HEAD(pidhashhead, proc) *pidhashtbl;
 extern u_long pidhash;
@@ -670,6 +663,7 @@ extern lck_grp_t * proc_lck_grp;
 #if CONFIG_FINE_LOCK_GROUPS
 extern lck_grp_t * proc_mlock_grp;
 extern lck_grp_t * proc_fdmlock_grp;
+extern lck_grp_t * proc_ucred_mlock_grp;
 extern lck_grp_t * proc_slock_grp;
 #endif
 extern lck_grp_attr_t * proc_lck_grp_attr;
@@ -692,6 +686,8 @@ extern void proc_fdlock(struct proc *);
 extern void proc_fdlock_spin(struct proc *);
 extern void proc_fdunlock(struct proc *);
 extern void proc_fdlock_assert(proc_t p, int assertflags);
+extern void proc_ucred_lock(struct proc *);
+extern void proc_ucred_unlock(struct proc *);
 __private_extern__ int proc_core_name(const char *name, uid_t uid, pid_t pid,
 		char *cr_name, size_t cr_name_len);
 extern int isinferior(struct proc *, struct proc *);
@@ -700,17 +696,12 @@ __private_extern__ struct proc *proc_find_zombref(pid_t);	/* Find zombie by id. 
 __private_extern__ void proc_drop_zombref(struct proc * p);	/* Find zombie by id. */
 
 
-extern struct	lctx *lcfind(pid_t);		/* Find a login context by id */
-extern struct	lctx *lccreate(void);		/* Create a new login context */
-
 extern int	chgproccnt(uid_t uid, int diff);
-extern void	enterlctx(struct proc *p, struct lctx *l, int create);
 extern void	pinsertchild(struct proc *parent, struct proc *child);
 extern int	enterpgrp(struct proc *p, pid_t pgid, int mksess);
 extern void	fixjobc(struct proc *p, struct pgrp *pgrp, int entering);
 extern int	inferior(struct proc *p);
 extern int	leavepgrp(struct proc *p);
-extern void	leavelctx(struct proc *p);
 extern void	resetpriority(struct proc *);
 extern void	setrunnable(struct proc *);
 extern void	setrunqueue(struct proc *);
@@ -721,14 +712,14 @@ extern int	msleep0(void *chan, lck_mtx_t *mtx, int pri, const char *wmesg, int t
 extern void	vfork_return(struct proc *child, int32_t *retval, int rval);
 extern int	exit1(struct proc *, int, int *);
 extern int	exit1_internal(struct proc *, int, int *, boolean_t, boolean_t, int);
-extern int	fork1(proc_t, thread_t *, int);
+extern int	fork1(proc_t, thread_t *, int, coalition_t *);
 extern void vfork_exit_internal(struct proc *p, int rv, int forced);
 extern void proc_reparentlocked(struct proc *child, struct proc * newparent, int cansignal, int locked);
 extern int pgrp_iterate(struct pgrp * pgrp, int flags, int (*callout)(proc_t , void *), void *arg, int (*filterfn)(proc_t , void *), void *filterarg);
 extern int proc_iterate(int flags, int (*callout)(proc_t , void *), void *arg, int (*filterfn)(proc_t , void *), void *filterarg);
 extern int proc_rebootscan(int (*callout)(proc_t , void *), void *arg, int (*filterfn)(proc_t , void *), void *filterarg);
 extern int proc_childrenwalk(proc_t p, int (*callout)(proc_t , void *), void *arg);
-extern proc_t proc_findinternal(int pid, int funneled);
+extern proc_t proc_findinternal(int pid, int locked);
 extern proc_t proc_findthread(thread_t thread);
 extern void proc_refdrain(proc_t);
 extern void proc_childdrainlocked(proc_t);
@@ -755,9 +746,10 @@ extern proc_t proc_parentholdref(proc_t);
 extern int proc_parentdropref(proc_t, int);
 int     itimerfix(struct timeval *tv);
 int     itimerdecr(struct proc * p, struct itimerval *itp, int usec);
+int  timespec_is_valid(const struct timespec *);
 void proc_signalstart(struct proc *, int locked);
 void proc_signalend(struct proc *, int locked);
-int  proc_transstart(struct proc *, int locked);
+int  proc_transstart(struct proc *, int locked, int non_blocking);
 void proc_transcommit(struct proc *, int locked);
 void proc_transend(struct proc *, int locked);
 int  proc_transwait(struct proc *, int locked);
@@ -773,7 +765,7 @@ void proc_resetregister(proc_t p);
 thread_t proc_thread(proc_t);
 extern int proc_pendingsignals(proc_t, sigset_t);
 int proc_getpcontrol(int pid, int * pcontrolp);
-int proc_dopcontrol(proc_t p, void *unused_arg);
+int proc_dopcontrol(proc_t p);
 int proc_resetpcontrol(int pid);
 #if PSYNCH
 void pth_proc_hashinit(proc_t);
@@ -784,6 +776,10 @@ void psynch_wq_cleanup(__unused void *  param, __unused void * param1);
 extern lck_mtx_t * pthread_list_mlock;
 #endif /* PSYNCH */
 struct uthread * current_uthread(void);
+
+void proc_set_return_wait(struct proc *);
+void proc_clear_return_wait(proc_t p, thread_t child_thread);
+void proc_wait_to_return(void);
 
 /* return 1 if process is forcing case-sensitive HFS+ access, 0 for default */
 extern int proc_is_forcing_hfs_case_sensitivity(proc_t);

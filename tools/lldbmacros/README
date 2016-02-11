@@ -13,6 +13,7 @@ E. FAQ and Generel Coding Guidelines
      ii. Formatted Output printing guidelines [MUST READ]
     iii. Coding conventions.  [MUST READ]
      iv. Submitting changes in lldbmacros [MUST READ]
+      v. Common utility functions and paradigms
 F. Development and Debugging on lldb kernel debugging platform.
       i. Reading a exception backtrace
      ii. Loading custom or local lldbmacros and operating_system plugin
@@ -22,7 +23,11 @@ F. Development and Debugging on lldb kernel debugging platform.
 ========================================
 A. How to use lldb for kernel debugging
 ========================================
-lldb can be used for kernel debugging the same way as gdb. The simplest way is to start lldb with kernel symbol file. The lldb environment will ready to connect over kdp-remote '<hostname:port>' or 'gdb-remote <hostname:port>'. In case using a core file please do 'file --core /path/to/corefile'
+lldb can be used for kernel debugging the same way as gdb. The simplest way is to start lldb with kernel symbol file. The lldb environment by default does not allow loading automatic python modules. Please add the following setting in
+File: ~/.lldbinit 
+settings set target.load-script-from-symbol-file true
+
+Now lldb will be ready to connect over kdp-remote '<hostname:port>' or 'gdb-remote <hostname:port>'. In case using a core file please do 'file --core /path/to/corefile'
 
 Following are detailed steps on how to debug a panic'ed / NMI'ed machine (For the curious souls).
  lldb debugging in detail:-
@@ -121,7 +126,7 @@ where:
                  -v          : increase the verbosity of the command. Each '-v' encountered will increase verbosity by 1.
                  -p <plugin> : pass the output of command to <plugin> for processing and followup with command requests by it.
   CMDOPTIONS   : These are command level options (always a CAPITAL letter option) that are defined by the macro developer. Please do
-                 help <cmdname> to know how each option operates on that particular command.
+                 help <cmdname> to know how each option operates on that particular command. For an example of how to use CMDOPTIONS, take a look at vm_object_walk_pages in memory.py
 
 ii. Writing new commands.
 --------------------------
@@ -245,8 +250,14 @@ i. Frequently Asked Questions
      This way the expressing withing ` ` is evaluated by lldb and the value is passed to the command.
      Note that if your argument pointer is bad or the memory is corrupted lldb macros will fail with a long backtrace that may not make sense. gdb used to fail silently but lldb does not.
      Please see Section F(i) for more information on reading backtraces.
+  
+  Q. I connected to a coredump file with lldb --core corefile and I got RuntimeError: Unable to find lldb thread for tid=XYZ. What should I do?
+  A. This is most likely the case that lldb ignored the operating system plugin in the dSYM and hence threads are not populated. Please put the line 'settings set target.load-script-from-symbol-file true' in your ~/.lldbinit file. If you do not have access you can alternatively do
+    bash# lldb
+    (lldb) settings set target.load-script-from-symbol-file true
+    (lldb) file --core corefile
 
-     
+
 ii. Formatted output printing - zen and peace for life
 ------------------------------------------------------
 
@@ -298,7 +309,14 @@ iv. Submitting changes in lldbmacros
   * Do a clean build of kernel from xnu top level directory.
   * Verify that your changes are present in the dSYM directory of new build. 
   * Re-run all your test and verification steps with the lldbmacros from the newly packaged dSYM/Contents/Resources/Python/lldbmacros.
- 
+
+v. Common utility functions and paradigms
+-----------------------------------------
+ Please search and look around the code for common util functions and paradigm
+  * Take a peek at utils.py for common utility like sizeof_fmt() to humanize size strings in KB, MB etc. The convention is to have functions that do self contained actions and does not require intricate knowledge of kernel structures in utils.py
+  * If you need to get pagesize of the traget system, do not hard code any value. kern.globals.page_size is your friend. Similarly use config['verbosity'] for finding about configs.
+  * If you are developing a command for structure that is different based on development/release kernels please use "hasattr()" functionality to conditionalize referencing #ifdef'ed fields in structure. See example in def GetTaskSummary(task) in process.py
+
 ===============================================================
 F. Development and Debugging on lldb kernel debugging platform.
 ===============================================================

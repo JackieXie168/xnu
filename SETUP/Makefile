@@ -11,7 +11,12 @@ SETUP_SUBDIRS = 	\
 	kextsymboltool	\
 	setsegname	\
 	decomment	\
-	installfile
+	installfile	\
+	replacecontents
+
+ifeq ($(BUILD_JSON_COMPILATION_DATABASE),1)
+SETUP_SUBDIRS += json_compilation_db
+endif
 
 include $(MakeInc_rule)
 include $(MakeInc_dir)

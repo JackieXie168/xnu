@@ -312,8 +312,6 @@ machdep_syscall(x86_saved_state_t *state)
 	default:
 		panic("machdep_syscall: too many args");
 	}
-	if (current_thread()->funnel_lock)
-		(void) thread_funnel_set(current_thread()->funnel_lock, FALSE);
 
 	DEBUG_KPRINT_SYSCALL_MDEP("machdep_syscall: retval=%u\n", regs->eax);
 
@@ -354,11 +352,12 @@ machdep_syscall64(x86_saved_state_t *state)
 	case 1:
 		regs->rax = (*entry->routine.args64_1)(regs->rdi);
 		break;
+	case 2:
+		regs->rax = (*entry->routine.args64_2)(regs->rdi, regs->rsi);
+		break;
 	default:
 		panic("machdep_syscall64: too many args");
 	}
-	if (current_thread()->funnel_lock)
-		(void) thread_funnel_set(current_thread()->funnel_lock, FALSE);
 
 	DEBUG_KPRINT_SYSCALL_MDEP("machdep_syscall: retval=%llu\n", regs->rax);
 
@@ -394,7 +393,11 @@ mach_call_arg_munger32(uint32_t sp, struct mach_call_args *args, const mach_trap
 {
 	if (copyin((user_addr_t)(sp + sizeof(int)), (char *)args, trapp->mach_trap_u32_words * sizeof (int)))
 		return KERN_INVALID_ARGUMENT;
-	trapp->mach_trap_arg_munge32(NULL, args);
+#if CONFIG_REQUIRES_U32_MUNGING
+	trapp->mach_trap_arg_munge32(args);
+#else
+#error U32 mach traps on x86_64 kernel requires munging
+#endif
 	return KERN_SUCCESS;
 }
 
@@ -412,6 +415,12 @@ mach_call_munger(x86_saved_state_t *state)
 	kern_return_t retval;
 	struct mach_call_args args = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 	x86_saved_state32_t	*regs;
+
+#if PROC_REF_DEBUG
+	struct uthread *ut = get_bsdthread_info(current_thread());
+
+	uthread_reset_proc_refcount(ut);
+#endif
 
 	assert(is_saved_state32(state));
 	regs = saved_state32(state);
@@ -472,6 +481,12 @@ mach_call_munger(x86_saved_state_t *state)
 
 	throttle_lowpri_io(1);
 
+#if PROC_REF_DEBUG
+	if (__improbable(uthread_get_proc_refcount(ut) != 0)) {
+		panic("system call returned with uu_proc_refcount != 0");
+	}
+#endif
+
 	thread_exception_return();
 	/* NOTREACHED */
 }
@@ -485,7 +500,14 @@ mach_call_munger64(x86_saved_state_t *state)
 	int call_number;
 	int argc;
 	mach_call_t mach_call;
+	struct mach_call_args args = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 	x86_saved_state64_t	*regs;
+
+#if PROC_REF_DEBUG
+	struct uthread *ut = get_bsdthread_info(current_thread());
+
+	uthread_reset_proc_refcount(ut);
+#endif
 
 	assert(is_saved_state64(state));
 	regs = saved_state64(state);
@@ -511,17 +533,23 @@ mach_call_munger64(x86_saved_state_t *state)
 		/* NOTREACHED */
 	}
 	argc = mach_trap_table[call_number].mach_trap_arg_count;
+	if (argc) {
+		int args_in_regs = MIN(6, argc);
 
-	if (argc > 6) {
+		memcpy(&args.arg1, &regs->rdi, args_in_regs * sizeof(syscall_arg_t));
+
+		if (argc > 6) {
 	        int copyin_count;
 
-		copyin_count = (argc - 6) * (int)sizeof(uint64_t);
+			assert(argc <= 9);
+			copyin_count = (argc - 6) * (int)sizeof(syscall_arg_t);
 
-	        if (copyin((user_addr_t)(regs->isf.rsp + sizeof(user_addr_t)), (char *)&regs->v_arg6, copyin_count)) {
+	        if (copyin((user_addr_t)(regs->isf.rsp + sizeof(user_addr_t)), (char *)&args.arg7, copyin_count)) {
 		        regs->rax = KERN_INVALID_ARGUMENT;
 			
-			thread_exception_return();
-			/* NOTREACHED */
+				thread_exception_return();
+				/* NOTREACHED */
+			}
 		}
 	}
 
@@ -529,7 +557,7 @@ mach_call_munger64(x86_saved_state_t *state)
 	mach_kauth_cred_uthread_update();
 #endif
 
-	regs->rax = (uint64_t)mach_call((void *)(&regs->rdi));
+	regs->rax = (uint64_t)mach_call((void *)&args);
 	
 	DEBUG_KPRINT_SYSCALL_MACH( "mach_call_munger64: retval=0x%llx\n", regs->rax);
 
@@ -538,6 +566,12 @@ mach_call_munger64(x86_saved_state_t *state)
 		regs->rax, 0, 0, 0, 0);
 
 	throttle_lowpri_io(1);
+
+#if PROC_REF_DEBUG
+	if (__improbable(uthread_get_proc_refcount(ut) != 0)) {
+		panic("system call returned with uu_proc_refcount != 0");
+	}
+#endif
 
 	thread_exception_return();
 	/* NOTREACHED */

@@ -101,7 +101,7 @@
 int physical_transfer_cluster_count = 0;
 
 #define VM_SUPER_CLUSTER	0x40000
-#define VM_SUPER_PAGES          (VM_SUPER_CLUSTER / PAGE_SIZE)
+#define VM_SUPER_PAGES          (VM_SUPER_CLUSTER / PAGE_MIN_SIZE)
 
 /*
  * 0 means no shift to pages, so == 1 page/cluster. 1 would mean
@@ -757,10 +757,10 @@ ps_delete(
 		if(dp_pages_free < cluster_transfer_minimum)
 			error = KERN_FAILURE;
 		else {
-			vm_object_t	transfer_object;
-			unsigned int	count;
-			upl_t		upl;
-			int		upl_flags;
+			vm_object_t	    transfer_object;
+			unsigned int	    count;
+			upl_t		    upl;
+			upl_control_flags_t upl_flags;
 
 			transfer_object = vm_object_allocate((vm_object_size_t)VM_SUPER_CLUSTER);
 			count = 0;
@@ -1234,7 +1234,7 @@ vs_alloc_async(void)
 			alias_struct = (struct vstruct_alias *) 
 				kalloc(sizeof (struct vstruct_alias));
 			if(alias_struct != NULL) {
-				alias_struct->vs = (struct vstruct *)vsa;
+				__IGNORE_WCASTALIGN(alias_struct->vs = (struct vstruct *)vsa);
 				alias_struct->name = &default_pager_ops;
 				reply_port->ip_alias = (uintptr_t) alias_struct;
 				vsa->reply_port = reply_port;
@@ -1908,6 +1908,7 @@ ps_vstruct_reclaim(
 	fault_info.cluster_size = VM_SUPER_CLUSTER;
 	fault_info.behavior = VM_BEHAVIOR_SEQUENTIAL;
 	fault_info.user_tag = 0;
+	fault_info.pmap_options = 0;
 	fault_info.lo_offset = 0;
 	fault_info.hi_offset = ptoa_32(vs->vs_size << vs->vs_clshift);
 	fault_info.io_sync = reclaim_backing_store;
@@ -2697,7 +2698,7 @@ ps_read_device(
 	*residualp = size - total_read;
 	if((dev_buffer != *bufferp) && (total_read != 0)) {
 		vm_offset_t temp_buffer;
-		vm_allocate(kernel_map, &temp_buffer, total_read, VM_FLAGS_ANYWHERE);
+		vm_allocate(kernel_map, &temp_buffer, total_read, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(VM_KERN_MEMORY_OSFMK));
 		memcpy((void *) temp_buffer, (void *) *bufferp, total_read);
 		if(vm_map_copyin_page_list(kernel_map, temp_buffer, total_read, 
 			VM_MAP_COPYIN_OPT_SRC_DESTROY | 
@@ -2924,7 +2925,7 @@ pvs_cluster_read(
 	int			cl_index;
 	unsigned int		xfer_size;
 	dp_offset_t		orig_vs_offset;
-	dp_offset_t       ps_offset[(VM_SUPER_CLUSTER / PAGE_SIZE) >> VSTRUCT_MIN_CLSHIFT];
+	dp_offset_t		ps_offset[(VM_SUPER_CLUSTER / PAGE_SIZE) >> VSTRUCT_MIN_CLSHIFT];
 	paging_segment_t        psp[(VM_SUPER_CLUSTER / PAGE_SIZE) >> VSTRUCT_MIN_CLSHIFT];
 	struct clmap		clmap;
 	upl_t			upl;

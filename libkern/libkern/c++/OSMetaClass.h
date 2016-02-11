@@ -65,12 +65,8 @@ class OSOrderedSet;
 #else /* XNU_KERNEL_PRIVATE */
 #include <TargetConditionals.h>
 
-#if TARGET_OS_EMBEDDED
-#define APPLE_KEXT_VTABLE_PADDING   0
-#else /* TARGET_OS_EMBEDDED */
 /*! @parseOnly */
 #define APPLE_KEXT_VTABLE_PADDING   1
-#endif /* TARGET_OS_EMBEDDED */
 
 #endif /* XNU_KERNEL_PRIVATE */
 
@@ -91,6 +87,20 @@ class OSOrderedSet;
 
 /*! @parseOnly */
 #define APPLE_KEXT_DEPRECATED  __attribute__((deprecated))
+
+
+#if __cplusplus >= 201103L
+#define APPLE_KEXT_OVERRIDE  				override
+#if defined(__LP64__)
+#define APPLE_KEXT_COMPATIBILITY_OVERRIDE
+#else
+#define APPLE_KEXT_COMPATIBILITY_OVERRIDE	APPLE_KEXT_OVERRIDE
+#endif
+#else
+#define APPLE_KEXT_OVERRIDE
+#define APPLE_KEXT_COMPATIBILITY_OVERRIDE
+#endif
+
 
 /*!
  * @class OSMetaClassBase
@@ -1586,7 +1596,7 @@ public:
             virtual OSObject *alloc() const;                    \
         } gMetaClass;                                           \
         friend class className ::MetaClass;                     \
-        virtual const OSMetaClass * getMetaClass() const;       \
+        virtual const OSMetaClass * getMetaClass() const APPLE_KEXT_OVERRIDE; \
     protected:                                                  \
     className (const OSMetaClass *);                            \
     virtual ~ className ()
@@ -2069,6 +2079,17 @@ void className ::_RESERVED ## className ## index ()             \
     // I/O Kit debug internal routines.
     static void printInstanceCounts();
     static void serializeClassDictionary(OSDictionary * dict);
+#ifdef XNU_KERNEL_PRIVATE
+#if IOTRACKING
+public:
+    static void * trackedNew(size_t size);
+    static void trackedDelete(void * mem, size_t size);
+    void trackedInstance(OSObject * instance) const;
+    void trackedFree(OSObject * instance) const;
+    void trackedAccumSize(OSObject * instance, size_t size) const;
+    struct IOTrackingQueue * getTracking() const;
+#endif
+#endif
 
 private:
     // Obsolete APIs

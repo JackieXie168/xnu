@@ -234,8 +234,8 @@ frag6_icmp6_timeex_error(struct fq6_head *diq6)
 		MBUFQ_FOREACH_SAFE(m, diq6, m_tmp) {
 			MBUFQ_REMOVE(diq6, m);
 			MBUFQ_NEXT(m) = NULL;
-			icmp6_error(m, ICMP6_TIME_EXCEEDED,
-			    ICMP6_TIME_EXCEED_REASSEMBLY, 0);
+			icmp6_error_flag(m, ICMP6_TIME_EXCEEDED,
+			    ICMP6_TIME_EXCEED_REASSEMBLY, 0, 0);
 		}
 	}
 }
@@ -298,14 +298,8 @@ frag6_input(struct mbuf **mp, int *offp, int proto)
 	MBUF_STRICT_DATA_ALIGNMENT_CHECK_32(m);
 
 	ip6 = mtod(m, struct ip6_hdr *);
-#ifndef PULLDOWN_TEST
 	IP6_EXTHDR_CHECK(m, offset, sizeof(struct ip6_frag), goto done);
 	ip6f = (struct ip6_frag *)((caddr_t)ip6 + offset);
-#else
-	IP6_EXTHDR_GET(ip6f, struct ip6_frag *, m, offset, sizeof(*ip6f));
-	if (ip6f == NULL)
-		goto done;
-#endif
 
 #ifdef IN6_IFSTAT_STRICT
 	/* find the destination interface of the packet. */

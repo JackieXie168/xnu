@@ -312,11 +312,11 @@ typedef struct mach_port_status {
 } mach_port_status_t;
 
 /* System-wide values for setting queue limits on a port */
-#define MACH_PORT_QLIMIT_ZERO		((mach_port_msgcount_t) 0)
-#define MACH_PORT_QLIMIT_BASIC		((mach_port_msgcount_t) 5)
-#define MACH_PORT_QLIMIT_SMALL		((mach_port_msgcount_t) 16)
-#define MACH_PORT_QLIMIT_LARGE		((mach_port_msgcount_t) 1024)
-#define MACH_PORT_QLIMIT_KERNEL		((mach_port_msgcount_t) 65536)
+#define MACH_PORT_QLIMIT_ZERO		(0)
+#define MACH_PORT_QLIMIT_BASIC		(5)
+#define MACH_PORT_QLIMIT_SMALL		(16)
+#define MACH_PORT_QLIMIT_LARGE		(1024)
+#define MACH_PORT_QLIMIT_KERNEL		(65534)
 #define MACH_PORT_QLIMIT_MIN		MACH_PORT_QLIMIT_ZERO
 #define MACH_PORT_QLIMIT_DEFAULT	MACH_PORT_QLIMIT_BASIC
 #define MACH_PORT_QLIMIT_MAX		MACH_PORT_QLIMIT_LARGE
@@ -348,6 +348,7 @@ typedef int	mach_port_flavor_t;
 #define MACH_PORT_DNREQUESTS_SIZE	3	/* info is int */
 #define MACH_PORT_TEMPOWNER		4	/* indicates receive right will be reassigned to another task */
 #define MACH_PORT_IMPORTANCE_RECEIVER	5	/* indicates recieve right accepts priority donation */
+#define MACH_PORT_DENAP_RECEIVER	6	/* indicates receive right accepts de-nap donation */
 #define MACH_PORT_INFO_EXT		7	/* uses mach_port_info_ext_t */
 
 #define MACH_PORT_LIMITS_INFO_COUNT	((natural_t) \
@@ -382,7 +383,7 @@ typedef struct mach_port_qos {
 #define MPO_IMPORTANCE_RECEIVER 0x08	/* Mark the port as importance receiver */
 #define MPO_INSERT_SEND_RIGHT   0x10	/* Insert a send right for the port */
 #define MPO_STRICT		0x20	/* Apply strict guarding for port */
-
+#define MPO_DENAP_RECEIVER	0x40	/* Mark the port as App de-nap receiver */
 /*
  * Structure to define optional attributes for a newly
  * constructed port.

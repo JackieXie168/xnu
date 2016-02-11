@@ -35,7 +35,6 @@
 #include <kern/thread.h>
 #include <kern/task.h>
 #include <kern/spl.h>
-#include <kern/lock.h>
 #include <kern/ast.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_object.h>
@@ -44,13 +43,14 @@
 #include <vm/pmap.h>
 #include <vm/vm_protos.h> /* last */
 #include <sys/resource.h>
+#include <sys/signal.h>
 
 #undef thread_should_halt
 
 /* BSD KERN COMPONENT INTERFACE */
 
 task_t	bsd_init_task = TASK_NULL;
-char	init_task_failure_data[1024];
+boolean_t init_task_died;
 extern unsigned int not_in_kdp; /* Skip acquiring locks if we're in kdp */
  
 thread_t get_firstthread(task_t);
@@ -60,9 +60,15 @@ boolean_t current_thread_aborted(void);
 void task_act_iterate_wth_args(task_t, void(*)(thread_t, void *), void *);
 kern_return_t get_signalact(task_t , thread_t *, int);
 int get_vmsubmap_entries(vm_map_t, vm_object_offset_t, vm_object_offset_t);
-void syscall_exit_funnelcheck(void);
-int fill_task_rusage_v2(task_t task, struct rusage_info_v2 *ri);
+int fill_task_rusage(task_t task, rusage_info_current *ri);
+int fill_task_io_rusage(task_t task, rusage_info_current *ri);
+int fill_task_qos_rusage(task_t task, rusage_info_current *ri);
+void fill_task_billed_usage(task_t task, rusage_info_current *ri);
+void task_bsdtask_kill(task_t);
 
+#if MACH_BSD
+extern void psignal(void *, int);
+#endif
 
 /*
  *
@@ -72,6 +78,13 @@ void  *get_bsdtask_info(task_t t)
 	return(t->bsd_info);
 }
 
+void task_bsdtask_kill(task_t t)
+{
+	void * bsd_info = get_bsdtask_info(t);
+	if (bsd_info != NULL) {
+		psignal(bsd_info, SIGKILL);
+	}
+}
 /*
  *
  */
@@ -226,9 +239,9 @@ ledger_t  get_task_ledger(task_t t)
 
 /*
  * This is only safe to call from a thread executing in
- * in the task's context or if the task is locked  Otherwise,
+ * in the task's context or if the task is locked. Otherwise,
  * the map could be switched for the task (and freed) before
- * we to return it here.
+ * we go to return it here.
  */
 vm_map_t  get_task_map(task_t t)
 {
@@ -323,6 +336,10 @@ swap_task_map(task_t task, thread_t thread, vm_map_t map, boolean_t doswitch)
 
 /*
  *
+ * This is only safe to call from a thread executing in
+ * in the task's context or if the task is locked. Otherwise,
+ * the map could be switched for the task (and freed) before
+ * we go to return it here.
  */
 pmap_t  get_task_pmap(task_t t)
 {
@@ -338,6 +355,45 @@ uint64_t get_task_resident_size(task_t task)
 	
 	map = (task == kernel_task) ? kernel_map: task->map;
 	return((uint64_t)pmap_resident_count(map->pmap) * PAGE_SIZE_64);
+}
+
+uint64_t get_task_compressed(task_t task) 
+{
+	vm_map_t map;
+	
+	map = (task == kernel_task) ? kernel_map: task->map;
+	return((uint64_t)pmap_compressed(map->pmap) * PAGE_SIZE_64);
+}
+
+uint64_t get_task_resident_max(task_t task) 
+{
+	vm_map_t map;
+	
+	map = (task == kernel_task) ? kernel_map: task->map;
+	return((uint64_t)pmap_resident_max(map->pmap) * PAGE_SIZE_64);
+}
+
+uint64_t get_task_purgeable_size(task_t task) 
+{
+	kern_return_t ret;
+	ledger_amount_t credit, debit;
+	uint64_t volatile_size = 0;
+
+	ret = ledger_get_entries(task->ledger, task_ledgers.purgeable_volatile, &credit, &debit);
+	if (ret != KERN_SUCCESS) {
+		return 0;
+	}
+
+	volatile_size += (credit - debit);
+
+	ret = ledger_get_entries(task->ledger, task_ledgers.purgeable_volatile_compressed, &credit, &debit);
+	if (ret != KERN_SUCCESS) {
+		return 0;
+	}
+
+	volatile_size += (credit - debit);
+
+	return volatile_size;
 }
 
 /*
@@ -372,13 +428,19 @@ uint64_t get_task_phys_footprint_max(task_t task)
 	return 0;
 }
 
-/*
- *
- */
-pmap_t  get_map_pmap(vm_map_t map)
+uint64_t get_task_cpu_time(task_t task)
 {
-	return(map->pmap);
+	kern_return_t ret;
+	ledger_amount_t credit, debit;
+	
+	ret = ledger_get_entries(task->ledger, task_ledgers.cpu_time, &credit, &debit);
+	if (KERN_SUCCESS == ret) {
+		return (credit - debit);
+	}
+
+	return 0;
 }
+
 /*
  *
  */
@@ -432,10 +494,11 @@ get_vmsubmap_entries(
 	while((entry != vm_map_to_entry(map)) && (entry->vme_start < end)) {
 		if(entry->is_sub_map) {
 			total_entries += 	
-				get_vmsubmap_entries(entry->object.sub_map, 
-					entry->offset, 
-					entry->offset + 
-					(entry->vme_end - entry->vme_start));
+				get_vmsubmap_entries(VME_SUBMAP(entry), 
+						     VME_OFFSET(entry), 
+						     (VME_OFFSET(entry) + 
+						      entry->vme_end -
+						      entry->vme_start));
 		} else {
 			total_entries += 1;
 		}
@@ -460,10 +523,11 @@ get_vmmap_entries(
 	while(entry != vm_map_to_entry(map)) {
 		if(entry->is_sub_map) {
 			total_entries += 	
-				get_vmsubmap_entries(entry->object.sub_map, 
-					entry->offset, 
-					entry->offset + 
-					(entry->vme_end - entry->vme_start));
+				get_vmsubmap_entries(VME_SUBMAP(entry), 
+						     VME_OFFSET(entry),
+						     (VME_OFFSET(entry) + 
+						      entry->vme_end -
+						      entry->vme_start));
 		} else {
 			total_entries += 1;
 		}
@@ -579,17 +643,6 @@ task_act_iterate_wth_args(
 }
 
 
-void
-astbsd_on(void)
-{
-	boolean_t	reenable;
-
-	reenable = ml_set_interrupts_enabled(FALSE);
-	ast_on_fast(AST_BSD);
-	(void)ml_set_interrupts_enabled(reenable);
-}
-
-
 #include <sys/bsdtask_info.h>
 
 void
@@ -602,14 +655,14 @@ fill_taskprocinfo(task_t task, struct proc_taskinfo_internal * ptinfo)
 	uint32_t syscalls_unix = 0;
 	uint32_t syscalls_mach = 0;
 
+	task_lock(task);
+
 	map = (task == kernel_task)? kernel_map: task->map;
 
 	ptinfo->pti_virtual_size  = map->size;
 	ptinfo->pti_resident_size =
 		(mach_vm_size_t)(pmap_resident_count(map->pmap))
 		* PAGE_SIZE_64;
-
-	task_lock(task);
 
 	ptinfo->pti_policy = ((task != kernel_task)?
                                           POLICY_TIMESHARE: POLICY_RR);
@@ -705,7 +758,7 @@ fill_taskthreadinfo(task_t task, uint64_t thaddr, int thuniqueid, struct proc_th
 			ptinfo->pth_flags = basic_info.flags;
 			ptinfo->pth_sleep_time = basic_info.sleep_time;
 			ptinfo->pth_curpri = thact->sched_pri;
-			ptinfo->pth_priority = thact->priority;
+			ptinfo->pth_priority = thact->base_pri;
 			ptinfo->pth_maxpriority = thact->max_priority;
 			
 			if ((vpp != NULL) && (thact->uthread != NULL)) 
@@ -757,31 +810,19 @@ get_numthreads(task_t task)
 	return(task->thread_count);
 }
 
-void 
-syscall_exit_funnelcheck(void)
-{
-        thread_t thread;
-
-	thread = current_thread();
-
-        if (thread->funnel_lock)
-		panic("syscall exit with funnel held\n");
-}
-
-
 /*
  * Gather the various pieces of info about the designated task, 
  * and collect it all into a single rusage_info.
  */
 int
-fill_task_rusage_v2(task_t task, struct rusage_info_v2 *ri)
+fill_task_rusage(task_t task, rusage_info_current *ri)
 {
 	struct task_power_info powerinfo;
 
 	assert(task != TASK_NULL);
 	task_lock(task);
 
-	task_power_info_locked(task, &powerinfo);
+	task_power_info_locked(task, &powerinfo, NULL);
 	ri->ri_pkg_idle_wkups = powerinfo.task_platform_idle_wakeups;
 	ri->ri_interrupt_wkups = powerinfo.task_interrupt_wakeups;
 	ri->ri_user_time = powerinfo.total_user;
@@ -795,6 +836,66 @@ fill_task_rusage_v2(task_t task, struct rusage_info_v2 *ri)
 	                   (ledger_amount_t *)&ri->ri_wired_size);
 
 	ri->ri_pageins = task->pageins;
+
+	task_unlock(task);
+	return (0);
+}
+
+void
+fill_task_billed_usage(task_t task __unused, rusage_info_current *ri)
+{
+#if CONFIG_BANK
+	ri->ri_billed_system_time = bank_billed_time(task->bank_context);
+	ri->ri_serviced_system_time = bank_serviced_time(task->bank_context);
+#else
+	ri->ri_billed_system_time = 0;
+	ri->ri_serviced_system_time = 0;
+#endif
+}
+
+int
+fill_task_io_rusage(task_t task, rusage_info_current *ri)
+{
+	assert(task != TASK_NULL);
+	task_lock(task);
+
+	if (task->task_io_stats) {
+		ri->ri_diskio_bytesread = task->task_io_stats->disk_reads.size;
+		ri->ri_diskio_byteswritten = (task->task_io_stats->total_io.size - task->task_io_stats->disk_reads.size);
+	} else {
+		/* I/O Stats unavailable */
+		ri->ri_diskio_bytesread = 0;
+		ri->ri_diskio_byteswritten = 0;
+	}
+	task_unlock(task);
+	return (0);
+}
+
+int
+fill_task_qos_rusage(task_t task, rusage_info_current *ri)
+{
+	thread_t thread;
+
+	assert(task != TASK_NULL);
+	task_lock(task);
+
+	/* Rollup Qos time of all the threads to task */
+	queue_iterate(&task->threads, thread, thread_t, task_threads) {
+		if (thread->options & TH_OPT_IDLE_THREAD)
+			continue;
+
+		thread_mtx_lock(thread);
+		thread_update_qos_cpu_time(thread, TRUE);
+		thread_mtx_unlock(thread);
+		
+	}
+	ri->ri_cpu_time_qos_default = task->cpu_time_qos_stats.cpu_time_qos_default;
+	ri->ri_cpu_time_qos_maintenance = task->cpu_time_qos_stats.cpu_time_qos_maintenance;
+	ri->ri_cpu_time_qos_background = task->cpu_time_qos_stats.cpu_time_qos_background;
+	ri->ri_cpu_time_qos_utility = task->cpu_time_qos_stats.cpu_time_qos_utility;
+	ri->ri_cpu_time_qos_legacy = task->cpu_time_qos_stats.cpu_time_qos_legacy;
+	ri->ri_cpu_time_qos_user_initiated = task->cpu_time_qos_stats.cpu_time_qos_user_initiated;
+	ri->ri_cpu_time_qos_user_interactive = task->cpu_time_qos_stats.cpu_time_qos_user_interactive;
 
 	task_unlock(task);
 	return (0);

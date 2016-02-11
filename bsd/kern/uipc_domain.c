@@ -102,9 +102,20 @@ static lck_grp_attr_t	*domain_proto_mtx_grp_attr;
 decl_lck_mtx_data(static, domain_proto_mtx);
 decl_lck_mtx_data(static, domain_timeout_mtx);
 
-extern sysctlfn net_sysctl;
-
 static u_int64_t _net_uptime;
+
+#if (DEVELOPMENT || DEBUG)
+
+SYSCTL_DECL(_kern_ipc);
+
+static int sysctl_do_drain_domains SYSCTL_HANDLER_ARGS;
+
+SYSCTL_PROC(_kern_ipc, OID_AUTO, do_drain_domains,
+	CTLTYPE_INT|CTLFLAG_RW|CTLFLAG_LOCKED,
+	0, 0,
+	sysctl_do_drain_domains, "I", "force manual drain domains");
+
+#endif /* DEVELOPMENT || DEBUG */
 
 static void
 pr_init_old(struct protosw *pp, struct domain *dp)
@@ -909,53 +920,6 @@ pffindprotonotype(int family, int protocol)
 	return (pp);
 }
 
-int
-net_sysctl(int *name, u_int namelen, user_addr_t oldp, size_t *oldlenp,
-    user_addr_t newp, size_t newlen, struct proc *p)
-{
-#pragma unused(p)
-	int family, protocol, error = 0;
-	struct domain *dp;
-	struct protosw *pp;
-	domain_guard_t guard;
-
-	/*
-	 * All sysctl names at this level are nonterminal;
-	 * next two components are protocol family and protocol number,
-	 * then at least one addition component.
-	 */
-	if (namelen < 3)
-		return (EISDIR);		/* overloaded */
-	family = name[0];
-	protocol = name[1];
-
-	if (family == 0)
-		return (0);
-
-	guard = domain_guard_deploy();
-	TAILQ_FOREACH(dp, &domains, dom_entry) {
-		if (dp->dom_family == family)
-			break;
-	}
-	if (dp == NULL) {
-		error = ENOPROTOOPT;
-		goto done;
-	}
-
-	TAILQ_FOREACH(pp, &dp->dom_protosw, pr_entry) {
-		if (pp->pr_protocol == protocol && pp->pr_sysctl != NULL) {
-			error = (*pp->pr_sysctl)(name + 2, namelen - 2,
-			    (void *)(uintptr_t)oldp, oldlenp,
-			    (void *)(uintptr_t)newp, newlen);
-			goto done;
-		}
-	}
-	error = ENOPROTOOPT;
-done:
-	domain_guard_release(guard);
-	return (error);
-}
-
 void
 pfctlinput(int cmd, struct sockaddr *sa)
 {
@@ -1101,3 +1065,24 @@ domain_unguard_release(domain_unguard_t unguard)
 	else
 		lck_mtx_assert(&domain_proto_mtx, LCK_MTX_ASSERT_OWNED);
 }
+
+#if (DEVELOPMENT || DEBUG)
+ 
+static int
+sysctl_do_drain_domains SYSCTL_HANDLER_ARGS
+{
+#pragma unused(arg1, arg2)
+	int error;
+	int dummy = 0;
+
+	error = sysctl_handle_int(oidp, &dummy, 0, req);	
+	if (error || req->newptr == USER_ADDR_NULL)
+		return (error);
+
+	net_drain_domains();
+
+	return (0);
+}
+
+#endif /* DEVELOPMENT || DEBUG */
+ 

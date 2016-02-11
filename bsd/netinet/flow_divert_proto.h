@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2012-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -30,6 +30,8 @@
 #define __FLOW_DIVERT_PROTO_H__
 
 #define FLOW_DIVERT_CONTROL_NAME		"com.apple.flow-divert"
+
+#define FLOW_DIVERT_TLV_LENGTH_UINT32	1
 
 #define FLOW_DIVERT_PKT_CONNECT			1
 #define FLOW_DIVERT_PKT_CONNECT_RESULT		2
@@ -65,12 +67,19 @@
 #define FLOW_DIVERT_TLV_PID			26
 #define FLOW_DIVERT_TLV_UUID			27
 #define FLOW_DIVERT_TLV_PREFIX_COUNT		28
+#define FLOW_DIVERT_TLV_FLAGS			29
+#define FLOW_DIVERT_TLV_FLOW_TYPE               30
+
+#define FLOW_DIVERT_FLOW_TYPE_TCP               1
+#define FLOW_DIVERT_FLOW_TYPE_UDP               3
 
 #define FLOW_DIVERT_CHUNK_SIZE			4096
 
 #define FLOW_DIVERT_TOKEN_GETOPT_MAX_SIZE	128
 
 #define FLOW_DIVERT_DNS_SERVICE_SIGNING_ID	"com.apple.mDNSResponder"
+
+#define FLOW_DIVERT_TOKEN_FLAG_VALIDATED	0x0000001
 
 struct flow_divert_packet_header {
     uint8_t		packet_type;

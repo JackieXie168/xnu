@@ -68,16 +68,61 @@ def IterateListEntry(element, element_type, field_name):
         next_el = elt.__getattr__(field_name).le_next
         elt = cast(next_el, element_type)
 
-def IterateQueue(queue_head, element_ptr_type, element_field_name):
-    """ iterate over a queue in kernel of type queue_head_t. refer to osfmk/kern/queue.h
+def IterateLinkageChain(queue_head, element_type, field_name, field_ofst=0):
+    """ Iterate over a Linkage Chain queue in kernel of type queue_head_t. (osfmk/kern/queue.h method 1)
+        This is equivalent to the qe_foreach_element() macro
+        params:
+            queue_head   - value       : Value object for queue_head.
+            element_type - lldb.SBType : pointer type of the element which contains the queue_chain_t. Typically its structs like thread, task etc..
+                         - str         : OR a string describing the type. ex. 'task *'
+            field_name   - str         : Name of the field (in element) which holds a queue_chain_t
+            field_ofst   - int         : offset from the 'field_name' (in element) which holds a queue_chain_t
+                                         This is mostly useful if a particular element contains an array of queue_chain_t
+        returns:
+            A generator does not return. It is used for iterating.
+            value  : An object thats of type (element_type). Always a pointer object
+        example usage:
+            coalq = kern.GetGlobalVariable('coalitions_q')
+            for coal in IterateLinkageChain(coalq, 'struct coalition *', 'coalitions'):
+                print GetCoalitionInfo(coal)
+    """
+    global kern
+    if type(element_type) == str:
+        element_type = gettype(element_type)
+
+    if unsigned(queue_head) == 0:
+        return
+
+    if element_type.IsPointerType():
+        elem_ofst = getfieldoffset(element_type.GetPointeeType(), field_name) + field_ofst
+    else:
+        elem_ofst = getfieldoffset(element_type, field_name) + field_ofst
+
+    link = queue_head.next
+    while (unsigned(link) != unsigned(queue_head)):
+        addr = unsigned(link) - elem_ofst;
+        # I can't use the GetValueFromAddress function of the kernel class
+        # because I have no instance of that class!
+        obj = value(link.GetSBValue().CreateValueFromExpression(None,'(void *)'+str(addr)))
+        obj = cast(obj, element_type)
+        yield obj
+        link = link.next
+
+
+def IterateQueue(queue_head, element_ptr_type, element_field_name, backwards=False):
+    """ Iterate over an Element Chain queue in kernel of type queue_head_t. (osfmk/kern/queue.h method 2)
         params:
             queue_head         - value : Value object for queue_head.
-            element_ptr_type       - lldb.SBType : a pointer type of the element 'next' points to. Typically its structs like thread, task etc..
+            element_ptr_type   - lldb.SBType : a pointer type of the element 'next' points to. Typically its structs like thread, task etc..
                                - str         : OR a string describing the type. ex. 'task *'
             element_field_name - str : name of the field in target struct.
+            backwards          - backwards : traverse the queue backwards
         returns:
             A generator does not return. It is used for iterating.
             value  : an object thats of type (element_type) queue_head->next. Always a pointer object
+        example usage:
+            for page_meta in IterateQueue(kern.globals.first_zone.pages.all_free, 'struct zone_page_metadata *', 'pages'):
+                print page_meta
     """
     if type(element_ptr_type) == str :
         element_ptr_type = gettype(element_ptr_type)
@@ -88,16 +133,21 @@ def IterateQueue(queue_head, element_ptr_type, element_field_name):
         queue_head_addr = queue_head.GetValueAsUnsigned()
     else:
         queue_head_addr = queue_head.GetAddress().GetLoadAddress(LazyTarget.GetTarget())
-    cur_elt = queue_head.GetChildMemberWithName('next')
+    if backwards:
+        cur_elt = queue_head.GetChildMemberWithName('prev')
+    else:
+        cur_elt = queue_head.GetChildMemberWithName('next')
+
     while True:
 
         if not cur_elt.IsValid() or cur_elt.GetValueAsUnsigned() == 0 or cur_elt.GetValueAsUnsigned() == queue_head_addr:
             break
         elt = cur_elt.Cast(element_ptr_type)
         yield value(elt)
-        cur_elt = elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('next')
-
-
+        if backwards:
+            cur_elt = elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('prev')
+        else:
+            cur_elt = elt.GetChildMemberWithName(element_field_name).GetChildMemberWithName('next')
 
 class KernelTarget(object):
     """ A common kernel object that provides access to kernel objects and information.
@@ -111,6 +161,7 @@ class KernelTarget(object):
         self._debugger = debugger # This holds an lldb.SBDebugger object for debugger state
         self._threads_list = []
         self._tasks_list = []
+        self._coalitions_list = []
         self._allproc = []
         self._terminated_tasks_list = []
         self._zones_list = []
@@ -126,7 +177,7 @@ class KernelTarget(object):
             def __getattr__(self, name):
                 v = self._xnu_kernobj_12obscure12.GetGlobalVariable(name)
                 if not v.GetSBValue().IsValid():
-                    raise ValueError('no such global variable by name: %s '%str(name))
+                    raise ValueError('No such global variable by name: %s '%str(name))
                 return v
         self.globals = _GlobalVariableFind(self)
         LazyTarget.Initialize(debugger)
@@ -198,7 +249,10 @@ class KernelTarget(object):
             returns: value - python object representing global variable.
             raises : Exception in case the variable is not found.
         """
-        return value(LazyTarget.GetTarget().FindGlobalVariables(name, 0).GetValueAtIndex(0))
+        self._globals_cache_dict = caching.GetDynamicCacheData("kern._globals_cache_dict", {})
+        if name not in self._globals_cache_dict:
+            self._globals_cache_dict[name] = value(LazyTarget.GetTarget().FindGlobalVariables(name, 1).GetValueAtIndex(0))
+        return self._globals_cache_dict[name]
 
     def GetLoadAddressForSymbol(self, name):
         """ Get the load address of a symbol in the kernel.
@@ -268,15 +322,37 @@ class KernelTarget(object):
     def StraddlesPage(self, addr, size):
         if size > unsigned(self.GetGlobalVariable("page_size")):
             return True
-        return (((addr + size) & (unsigned(self.GetGlobalVariable("page_size"))-1)) < size)
+        val = ((addr + size) & (unsigned(self.GetGlobalVariable("page_size"))-1))
+        return (val < size and val > 0)
 
     def PhysToKernelVirt(self, addr):
         if self.arch == 'x86_64':
             return (addr + unsigned(self.GetGlobalVariable('physmap_base')))
-        elif self.arch == 'arm':
+        elif self.arch == 'arm' or self.arch == 'arm64':
             return (addr - unsigned(self.GetGlobalVariable("gPhysBase")) + unsigned(self.GetGlobalVariable("gVirtBase")))
         else:
             raise ValueError("PhysToVirt does not support {0}".format(arch))
+
+    def GetNanotimeFromAbstime(self, abstime):
+        """ convert absolute time (which is in MATUs) to nano seconds.
+            Since based on architecture the conversion may differ.
+            params:
+                abstime - int absolute time as shown by mach_absolute_time
+            returns:
+                int - nanosecs of time
+        """
+        usec_divisor = caching.GetStaticCacheData("kern.rtc_usec_divisor", None)
+        if not usec_divisor:
+            if self.arch == 'x86_64':
+                usec_divisor = 1000
+            else:
+                rtclockdata_addr = self.GetLoadAddressForSymbol('RTClockData')
+                rtc = self.GetValueFromAddress(rtclockdata_addr, 'struct _rtclock_data_ *')
+                usec_divisor = unsigned(rtc.rtc_usec_divisor)
+            usec_divisor = int(usec_divisor)
+            caching.SaveStaticCacheData('kern.rtc_usec_divisor', usec_divisor)
+        nsecs = (abstime * 1000)/usec_divisor
+        return nsecs
 
     def __getattribute__(self, name):
         if name == 'zones' :
@@ -310,6 +386,17 @@ class KernelTarget(object):
             caching.SaveDynamicCacheData("kern._tasks_list", self._tasks_list)
             return self._tasks_list
 
+        if name == 'coalitions' :
+            self._coalitions_list = caching.GetDynamicCacheData("kern._coalitions_list", [])
+            if len(self._coalitions_list) > 0 : return self._coalitions_list
+            coalition_queue_head = self.GetGlobalVariable('coalitions_q')
+            coalition_type = LazyTarget.GetTarget().FindFirstType('coalition')
+            coalition_ptr_type = coalition_type.GetPointerType()
+            for coal in IterateLinkageChain(addressof(coalition_queue_head), coalition_ptr_type, 'coalitions'):
+                self._coalitions_list.append(coal)
+            caching.SaveDynamicCacheData("kern._coalitions_list", self._coalitions_list)
+            return self._coalitions_list
+
         if name == 'terminated_tasks' :
             self._terminated_tasks_list = caching.GetDynamicCacheData("kern._terminated_tasks_list", [])
             if len(self._terminated_tasks_list) > 0 : return self._terminated_tasks_list
@@ -331,6 +418,17 @@ class KernelTarget(object):
                 proc_val = cast(proc_val.p_list.le_next, 'proc *')
             caching.SaveDynamicCacheData("kern._allproc", self._allproc)
             return self._allproc
+
+        if name == 'interrupt_stats' :
+            self._interrupt_stats_list = caching.GetDynamicCacheData("kern._interrupt_stats_list", [])
+            if len(self._interrupt_stats_list) > 0 : return self._interrupt_stats_list
+            interrupt_stats_head = self.GetGlobalVariable('gInterruptAccountingDataList')
+            interrupt_stats_type = LazyTarget.GetTarget().FindFirstType('IOInterruptAccountingData')
+            interrupt_stats_ptr_type = interrupt_stats_type.GetPointerType()
+            for interrupt_stats_obj in IterateQueue(interrupt_stats_head, interrupt_stats_ptr_type, 'chain'):
+                self._interrupt_stats_list.append(interrupt_stats_obj)
+            caching.SaveDynamicCacheData("kern._interrupt_stats", self._interrupt_stats_list)
+            return self._interrupt_stats_list
 
         if name == 'zombprocs' :
             self._zombproc_list = caching.GetDynamicCacheData("kern._zombproc_list", [])
@@ -354,7 +452,7 @@ class KernelTarget(object):
             self._arch = caching.GetStaticCacheData("kern.arch", None)
             if self._arch != None : return self._arch
             arch = LazyTarget.GetTarget().triple.split('-')[0]
-            if arch in ('armv7', 'armv7s'):
+            if arch in ('armv7', 'armv7s', 'armv7k'):
                 self._arch = 'arm'
             else:
                 self._arch = arch
@@ -365,7 +463,7 @@ class KernelTarget(object):
             self._ptrsize = caching.GetStaticCacheData("kern.ptrsize", None)
             if self._ptrsize != None : return self._ptrsize
             arch = LazyTarget.GetTarget().triple.split('-')[0]
-            if arch in ('x86_64'):
+            if arch in ('x86_64', 'arm64'):
                 self._ptrsize = 8
             else:
                 self._ptrsize = 4

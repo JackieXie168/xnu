@@ -45,10 +45,12 @@ DYLIBDST=$(DSTROOT)/usr/lib/system
 ARCHIVEDST=$(DSTROOT)/usr/local/lib
 LIBKXLD_DYLIB=libkxld.dylib
 LIBKXLD_ARCHIVE=libkxld.a
+LIBKXLD_DSYM=$(LIBKXLD_DYLIB).dSYM
 LIBKXLD_INSTALLNAME=/usr/lib/system/$(LIBKXLD_DYLIB)
 LIBKXLDOBJ_DYLIB=$(OBJROOT)/$(LIBKXLD_DYLIB)
 LIBKXLDOBJ_ARCHIVE=$(OBJROOT)/$(LIBKXLD_ARCHIVE)
 LIBKXLDSYM_DYLIB=$(SYMROOT)/$(LIBKXLD_DYLIB)
+LIBKXLDSYM_DYLIB_DSYM=$(SYMROOT)/$(LIBKXLD_DSYM)
 LIBKXLDSYM_ARCHIVE=$(SYMROOT)/$(LIBKXLD_ARCHIVE)
 LIBKXLDDST_DYLIB=$(DYLIBDST)/$(LIBKXLD_DYLIB)
 LIBKXLDDST_ARCHIVE=$(ARCHIVEDST)/$(LIBKXLD_ARCHIVE)
@@ -56,7 +58,14 @@ TESTSRC=$(SRCROOT)/tests
 TESTDST=./BUILD/tests
 
 # Flags
-SDKROOT ?= /
+ifdef SDKROOT
+	SDK_DIR := $(shell xcodebuild -version -sdk $(SDKROOT) Path)
+endif
+
+ifeq ($(strip $(SDK_DIR)),)
+	SDK_DIR := /
+endif
+
 DEFINES = -DPRIVATE
 CFLAGS=-std=c99 -Wall -Wextra -Werror -pedantic -Wformat=2 -Wcast-align \
 	-Wwrite-strings -Wshorten-64-to-32 -Wshadow -Winit-self -Wpointer-arith \
@@ -68,16 +77,17 @@ LDFLAGS=$(ARCHS) -dynamiclib -install_name $(LIBKXLD_INSTALLNAME) \
 	-current_version $(CURRENT_VERSION) -lstdc++
 INCLUDES=-I$(HDRSRC) -isystem $(EXTHDRSRC)
 
-ifneq ($(SDKROOT),/)
-	CFLAGS += -isysroot $(SDKROOT)
-	LDFLAGS += -isysroot $(SDKROOT)
+ifneq ($(SDK_DIR),/)
+	CFLAGS += -isysroot $(SDK_DIR)
+	LDFLAGS += -isysroot $(SDK_DIR)
 endif
 
 # Tools
-CC = xcrun -sdk $(SDKROOT) clang
+CC = xcrun -sdk $(SDK_DIR) clang
 CLANG_ANALYZER = clang --analyze
-LIBTOOL = xcrun -sdk $(SDKROOT) libtool
-STRIP = xcrun -sdk $(SDKROOT) strip
+LIBTOOL = xcrun -sdk $(SDK_DIR) libtool
+STRIP = xcrun -sdk $(SDK_DIR) strip
+DSYMUTIL = xcrun -sdk $(SDK_DIR) dsymutil
 
 # Files
 HDR_NAMES=kxld.h kxld_types.h
@@ -96,7 +106,7 @@ $(shell [ -d $(OBJROOT) ] || mkdir -p $(OBJROOT))
 $(OBJROOT)/%.o : $(OBJSRC)/%.c
 	$(CC) $(RC_CFLAGS) $(CFLAGS) $(DEFINES) $(OPTIM) $(INCLUDES) -c $< -o $@
 $(OBJROOT)/%.o : $(TESTSRC)/%.c
-	$(CC) $(RC_CFLAGS) $(CFLAGS) $(DEFINES) -O0 -DDEBUG $(INCLUDES) -I $(SRCROOT) -c $< -o $@
+	$(CC) $(RC_CFLAGS) $(CFLAGS) $(DEFINES) -O0 -DDEBUG $(INCLUDES) -I$(SRCROOT) -c $< -o $@
 
 SRCROOTESC=$(subst /,\/,$(SRCROOT))
 OBJROOTESC=$(subst /,\/,$(OBJROOT))
@@ -104,7 +114,7 @@ SEDOBJS=sed -E 's/(^[a-z_]+)\.o/$(OBJROOTESC)\/\1\.o $(OBJROOTESC)\/\1\.d/'
 SEDSRCS=sed -E 's/ ([a-z_]+\.[ch])/ $(SRCROOTESC)\/\1/g'
 $(OBJROOT)/%.d: $(OBJSRC)/%.c
 	@set -e; rm -f $@; \
-	$(CC) $(INCLUDES) -MM $< | $(SEDOBJS) | $(SEDSRCS) > $@;
+	$(CC) $(CFLAGS) $(DEFINES) $(INCLUDES) -MM $< | $(SEDOBJS) | $(SEDSRCS) > $@;
 
 # Rules
 release: OPTIM=-Os -dynamic
@@ -124,6 +134,7 @@ build: $(LIBKXLDSYM_$(PRODUCT_TYPE))
 $(LIBKXLDSYM_DYLIB): $(LIBKXLDOBJ_DYLIB)
 	@mkdir -p $(SYMROOT)
 	install -c -m 644 $< $@
+	$(DSYMUTIL) $@ -o $(LIBKXLDSYM_DYLIB_DSYM)
 
 $(LIBKXLDSYM_ARCHIVE): $(LIBKXLDOBJ_ARCHIVE)
 	@mkdir -p $(SYMROOT)
@@ -183,8 +194,8 @@ $(TESTDST)/copyrighttest: $(COPYTESTOBJS)
 	install -c -m 755 $(OBJROOT)/copyrighttest $@
 
 analyze:
-	@$(CLANG_ANALYZER) *.c
-	@$(CLANG_ANALYZER) -I. tests/*.c
+	@$(CLANG_ANALYZER) $(CFLAGS) $(INCLUDES) $(filter-out WKdm%.c,$(wildcard *.c))
+	@$(CLANG_ANALYZER) $(CFLAGS) $(INCLUDES) -I$(SRCROOT) tests/*.c
 	@rm -f *.plist
 
 clean: 

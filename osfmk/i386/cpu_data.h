@@ -43,6 +43,7 @@
 #include <pexpert/pexpert.h>
 #include <mach/i386/thread_status.h>
 #include <mach/i386/vm_param.h>
+#include <i386/locks.h>
 #include <i386/rtclock_protos.h>
 #include <i386/pmCPU.h>
 #include <i386/cpu_topology.h>
@@ -59,6 +60,7 @@
 struct cpu_cons_buffer;
 struct cpu_desc_table;
 struct mca_state;
+struct prngContext;
 
 /*
  * Data structures embedded in per-cpu data:
@@ -180,10 +182,6 @@ typedef struct cpu_data
 	uint64_t		cpu_dr7; /* debug control register */
 	uint64_t		cpu_int_event_time;	/* intr entry/exit time */
 	pal_rtc_nanotime_t	*cpu_nanotime;		/* Nanotime info */
-#if	CONFIG_COUNTERS
-	thread_t		csw_old_thread;
-	thread_t		csw_new_thread;
-#endif /* CONFIG COUNTERS */	
 #if KPC
 	/* double-buffered performance counter data */
 	uint64_t                *cpu_kpc_buf[2];
@@ -218,6 +216,7 @@ typedef struct cpu_data
  	uint64_t		cpu_cur_insns;
  	uint64_t		cpu_cur_ucc;
  	uint64_t		cpu_cur_urc;
+	uint64_t		cpu_gpmcs[4];
 	uint64_t                cpu_max_observed_int_latency;
 	int                     cpu_max_observed_int_latency_vector;
 	volatile boolean_t	cpu_NMI_acknowledged;
@@ -238,6 +237,7 @@ typedef struct cpu_data
 #if CONFIG_MCA
 	struct mca_state	*cpu_mca_state;		/* State at MC fault */
 #endif
+	struct prngContext	*cpu_prng;		/* PRNG's context */
  	int			cpu_type;
  	int			cpu_subtype;
  	int			cpu_threadtype;

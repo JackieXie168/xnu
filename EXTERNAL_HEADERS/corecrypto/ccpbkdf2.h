@@ -1,16 +1,15 @@
 /*
- *  ccpbkdf.h
+ *  ccpbkdf2.h
  *  corecrypto
  *
- *  Copyright 1999-2001, 2010 Apple Inc. All rights reserved.
+ *  Created on 12/15/2010
  *
- *  Derived from pbkdf2.h by Mitch Adler on 09-12-2010. 
+ *  Copyright (c) 2010,2011,2012,2015 Apple Inc. All rights reserved.
  *
  */
 
 #ifndef _CORECRYPTO_CCPBKDF2_H_
 #define _CORECRYPTO_CCPBKDF2_H_
-
 
 #include <corecrypto/ccdigest.h>
 

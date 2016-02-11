@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -82,6 +82,26 @@
 #endif
 
 /*
+ * Compatibility with compilers and environments that don't support compiler
+ * feature checking function-like macros.
+ */
+#ifndef __has_builtin
+#define __has_builtin(x) 0
+#endif
+#ifndef __has_include
+#define __has_include(x) 0
+#endif
+#ifndef __has_feature
+#define __has_feature(x) 0
+#endif
+#ifndef __has_attribute
+#define __has_attribute(x) 0
+#endif
+#ifndef __has_extension
+#define __has_extension(x) 0
+#endif
+
+/*
  * The __CONCAT macro is used to concatenate parts of symbol names, e.g.
  * with "#define OLD(foo) __CONCAT(old,foo)", OLD(foo) produces oldfoo.
  * The __CONCAT macro is a bit tricky -- make sure you don't put spaces
@@ -155,26 +175,17 @@
  */
 #define __deprecated	__attribute__((deprecated))
 
-#ifdef __has_extension
-    #if __has_extension(attribute_deprecated_with_message)
-        #define __deprecated_msg(_msg) __attribute__((deprecated(_msg)))
-    #else
-        #define __deprecated_msg(_msg) __attribute__((deprecated))
-    #endif
-#elif defined(__GNUC__) && ((__GNUC__ >= 5) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 5)))
-    #define __deprecated_msg(_msg) __attribute__((deprecated(_msg)))
+#if __has_extension(attribute_deprecated_with_message) || \
+		(defined(__GNUC__) && ((__GNUC__ >= 5) || ((__GNUC__ == 4) && (__GNUC_MINOR__ >= 5))))
+	#define __deprecated_msg(_msg) __attribute__((deprecated(_msg)))
 #else
-    #define __deprecated_msg(_msg) __attribute__((deprecated))
+	#define __deprecated_msg(_msg) __attribute__((deprecated))
 #endif
 
-#ifdef __has_extension
-    #if __has_extension(enumerator_attributes)
-        #define __deprecated_enum_msg(_msg) __deprecated_msg(_msg)
-    #else
-        #define __deprecated_enum_msg(_msg)
-    #endif
+#if __has_extension(enumerator_attributes)
+	#define __deprecated_enum_msg(_msg) __deprecated_msg(_msg)
 #else
-    #define __deprecated_enum_msg(_msg)
+	#define __deprecated_enum_msg(_msg)
 #endif
 
 /* __unavailable causes the compiler to error out when encountering
@@ -196,6 +207,22 @@
 #define __restrict
 #else
 #define __restrict	restrict
+#endif
+
+/* Compatibility with compilers and environments that don't support the
+ * nullability feature.
+ */
+
+#if !__has_feature(nullability)
+#ifndef __nullable
+#define __nullable
+#endif
+#ifndef __nonnull
+#define __nonnull
+#endif
+#ifndef __null_unspecified
+#define __null_unspecified
+#endif
 #endif
 
 /* Declaring inline functions within headers is error-prone due to differences
@@ -237,6 +264,27 @@
    * inline.  Oh well.
    */
 # define __header_always_inline    __header_inline
+#endif
+
+/*
+ * Compiler-dependent macros that bracket portions of code where the
+ * "-Wunreachable-code" warning should be ignored. Please use sparingly.
+ */
+#if defined(__clang__)
+# define __unreachable_ok_push \
+         _Pragma("clang diagnostic push") \
+         _Pragma("clang diagnostic ignored \"-Wunreachable-code\"")
+# define __unreachable_ok_pop \
+         _Pragma("clang diagnostic pop")
+#elif defined(__GNUC__) && ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 6))
+# define __unreachable_ok_push \
+         _Pragma("GCC diagnostic push") \
+         _Pragma("GCC diagnostic ignored \"-Wunreachable-code\"")
+# define __unreachable_ok_pop \
+         _Pragma("GCC diagnostic pop")
+#else
+# define __unreachable_ok_push
+# define __unreachable_ok_pop
 #endif
 
 /*
@@ -329,8 +377,12 @@
 #define __DARWIN_ONLY_64_BIT_INO_T	0
 #define __DARWIN_ONLY_UNIX_CONFORMANCE	0
 #define __DARWIN_ONLY_VERS_1050		0
-#define	__DARWIN_SUF_DARWIN10	"_darwin10"
-#define	__DARWIN10_ALIAS(sym)	__asm("_" __STRING(sym) __DARWIN_SUF_DARWIN10)
+#if defined(__x86_64__)
+#define	__DARWIN_SUF_DARWIN14	"_darwin14"
+#define	__DARWIN14_ALIAS(sym)	__asm("_" __STRING(sym) __DARWIN_SUF_DARWIN14)
+#else
+#define	__DARWIN14_ALIAS(sym)
+#endif
 #else /* !KERNEL */
 #ifdef PLATFORM_iPhoneOS
 /* Platform: iPhoneOS */
@@ -344,6 +396,54 @@
 #define __DARWIN_ONLY_UNIX_CONFORMANCE	1
 #define __DARWIN_ONLY_VERS_1050		1
 #endif /* PLATFORM_iPhoneSimulator */
+#ifdef PLATFORM_tvOS
+/* Platform: tvOS */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_tvOS */
+#ifdef PLATFORM_AppleTVOS
+/* Platform: AppleTVOS */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_AppleTVOS */
+#ifdef PLATFORM_tvSimulator
+/* Platform: tvSimulator */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_tvSimulator */
+#ifdef PLATFORM_AppleTVSimulator
+/* Platform: AppleTVSimulator */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_AppleTVSimulator */
+#ifdef PLATFORM_iPhoneOSNano
+/* Platform: iPhoneOSNano */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_iPhoneOSNano */
+#ifdef PLATFORM_iPhoneNanoSimulator
+/* Platform: iPhoneNanoSimulator */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_iPhoneNanoSimulator */
+#ifdef PLATFORM_WatchOS
+/* Platform: WatchOS */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_WatchOS */
+#ifdef PLATFORM_WatchSimulator
+/* Platform: WatchSimulator */
+#define __DARWIN_ONLY_64_BIT_INO_T	1
+#define __DARWIN_ONLY_UNIX_CONFORMANCE	1
+#define __DARWIN_ONLY_VERS_1050		1
+#endif /* PLATFORM_WatchSimulator */
 #ifdef PLATFORM_MacOSX
 /* Platform: MacOSX */
 #define __DARWIN_ONLY_64_BIT_INO_T	0
@@ -499,6 +599,7 @@
 #define __DARWIN_ALIAS(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_UNIX03)
 #define __DARWIN_ALIAS_C(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_NON_CANCELABLE __DARWIN_SUF_UNIX03)
 #define __DARWIN_ALIAS_I(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_64_BIT_INO_T __DARWIN_SUF_UNIX03)
+#define __DARWIN_NOCANCEL(sym)  	__asm("_" __STRING(sym) __DARWIN_SUF_NON_CANCELABLE)
 #define __DARWIN_INODE64(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_64_BIT_INO_T)
 
 #define __DARWIN_1050(sym)		__asm("_" __STRING(sym) __DARWIN_SUF_1050)
@@ -523,7 +624,7 @@
 #elif defined(__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__)
 #define __DARWIN_ALIAS_STARTING(_mac, _iphone, x)   __DARWIN_ALIAS_STARTING_MAC_##_mac(x)
 #else
-#define __DARWIN_ALIAS_STARTING(_mac, _iphone, x)
+#define __DARWIN_ALIAS_STARTING(_mac, _iphone, x)   x
 #endif
 #endif /* KERNEL */
 
@@ -696,6 +797,16 @@
 #elif !defined(__sys_cdefs_arch_unknown__) && defined(__x86_64__)
 #else
 #error Unsupported architecture
+#endif
+
+#ifdef XNU_KERNEL_PRIVATE
+/*
+ * Selectively ignore cast alignment warnings
+ */
+#define __IGNORE_WCASTALIGN(x) _Pragma("clang diagnostic push")                     \
+                               _Pragma("clang diagnostic ignored \"-Wcast-align\"") \
+                               x;                                                   \
+                               _Pragma("clang diagnostic pop")
 #endif
 
 #endif /* !_CDEFS_H_ */

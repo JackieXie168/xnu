@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2003-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -65,7 +65,7 @@
 #include <sys/syslog.h>
 #include <libkern/crypto/sha1.h>
 #include <libkern/OSAtomic.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -181,7 +181,7 @@ in6_generate_tmp_iid(
 	/* XXX assumption on the size of IFID */
 	bcopy(seed1, &seed[8], 8);
 
-	if (0) {		/* for debugging purposes only */
+	if ((0)) {		/* for debugging purposes only */
 		int i;
 
 		printf("%s: new randomized ID from: ", __func__);
@@ -226,7 +226,7 @@ in6_generate_tmp_iid(
 	 */
 	bcopy(&digest[8], seed0, 8);
 
-	if (0) {		/* for debugging purposes only */
+	if ((0)) {		/* for debugging purposes only */
 		int i;
 
 		printf("to: ");
@@ -518,7 +518,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 	 * address, and then reconfigure another one, the prefix is still
 	 * valid with referring to the old link-local address.
 	 */
-	if ((pr = nd6_prefix_lookup(&pr0)) == NULL) {
+	if ((pr = nd6_prefix_lookup(&pr0, ND6_PREFIX_EXPIRY_UNSPEC)) == NULL) {
 		if ((error = nd6_prelist_add(&pr0, NULL, &pr, TRUE)) != 0) {
 			IFA_REMREF(&ia->ia_ifa);
 			lck_mtx_destroy(&pr0.ndpr_lock, ifa_mtx_grp);
@@ -526,7 +526,7 @@ in6_ifattach_linklocal(struct ifnet *ifp, struct in6_aliasreq *ifra)
 		}
 	}
 
-	in6_post_msg(ifp, KEV_INET6_NEW_LL_ADDR, ia);
+	in6_post_msg(ifp, KEV_INET6_NEW_LL_ADDR, ia, NULL);
 	IFA_REMREF(&ia->ia_ifa);
 
 	/* Drop use count held above during lookup/add */
@@ -551,7 +551,7 @@ in6_ifattach_loopback(
 	 * in6_update_ifa() does not use ifra_name, but we accurately set it
 	 * for safety.
 	 */
-	strncpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
+	strlcpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
 
 	ifra.ifra_prefixmask.sin6_len = sizeof (struct sockaddr_in6);
 	ifra.ifra_prefixmask.sin6_family = AF_INET6;
@@ -575,9 +575,6 @@ in6_ifattach_loopback(
 
 	/* we don't need to perform DAD on loopback interfaces. */
 	ifra.ifra_flags |= IN6_IFF_NODAD;
-
-	/* skip registration to the prefix list. XXX should be temporary. */
-	ifra.ifra_flags |= IN6_IFF_NOPFX;
 
 	/* add the new interface address */
 	error = in6_update_ifa(ifp, &ifra, 0, &ia);
@@ -623,7 +620,7 @@ in6_nigroup(
 	if (p - name > sizeof (n) - 1)
 		return (-1);	/* label too long */
 	l = p - name;
-	strncpy(n, name, l);
+	strlcpy(n, name, l);
 	n[(int)l] = '\0';
 	for (q = (u_char *) n; *q; q++) {
 		if ('A' <= *q && *q <= 'Z')
@@ -688,6 +685,7 @@ in6_ifattach_prelim(struct ifnet *ifp)
 	struct in6_ifextra *ext;
 	void **pbuf, *base;
 	int error = 0;
+	struct in6_ifaddr *ia6 = NULL;
 
 	VERIFY(ifp != NULL);
 
@@ -723,13 +721,13 @@ skipmcast:
 #endif
 
 	if (ifp->if_inet6data == NULL) {
-		ext = (struct in6_ifextra *)_MALLOC(in6_extra_size, M_IFADDR,
+		ext = (struct in6_ifextra *)_MALLOC(in6_extra_bufsize, M_IFADDR,
 		    M_WAITOK|M_ZERO);
 		if (!ext)
 			return (ENOMEM);
 		base = (void *)P2ROUNDUP((intptr_t)ext + sizeof(uint64_t),
 		    sizeof(uint64_t));
-		VERIFY(((intptr_t)base + in6_extra_size) <= 
+		VERIFY(((intptr_t)base + in6_extra_size) <=
 		    ((intptr_t)ext + in6_extra_bufsize));
 		pbuf = (void **)((intptr_t)base - sizeof(void *));
 		*pbuf = ext;
@@ -737,7 +735,7 @@ skipmcast:
 		VERIFY(IS_P2ALIGNED(ifp->if_inet6data, sizeof(uint64_t)));
 	} else {
 		/*
-		 * Since the structure is never freed, we need to zero out 
+		 * Since the structure is never freed, we need to zero out
 		 * some of its members. We avoid zeroing out the scope6
 		 * structure on purpose because other threads might be
 		 * using its contents.
@@ -746,12 +744,28 @@ skipmcast:
 		    sizeof(IN6_IFEXTRA(ifp)->icmp6_ifstat));
 		bzero(&IN6_IFEXTRA(ifp)->in6_ifstat,
 		    sizeof(IN6_IFEXTRA(ifp)->in6_ifstat));
+		/*
+		 * XXX When recycling, nd_ifinfo gets initialized, other
+		 * than the lock, inside nd6_ifattach
+		 */
 	}
 
-	/* initialize NDP variables */
-	if ((error = nd6_ifattach(ifp)) != 0)
-		return (error);
-
+	/*
+	 * XXX Only initialize NDP ifinfo for the interface
+	 * if interface has not yet been configured with
+	 * link local IPv6 address.
+	 * Could possibly be optimized with an interface flag if need
+	 * be. For now using in6ifa_ifpforlinklocal.
+	 */
+	ia6 = in6ifa_ifpforlinklocal(ifp, 0);
+	if (ia6 == NULL) {
+		/* initialize NDP variables */
+		nd6_ifattach(ifp);
+	} else {
+		VERIFY(ND_IFINFO(ifp)->initialized);
+		IFA_REMREF(&ia6->ia_ifa);
+		ia6 = NULL;
+	}
 	scope6_ifattach(ifp);
 
 	/* initialize loopback interface address */
@@ -801,7 +815,7 @@ in6_ifattach_aliasreq(struct ifnet *ifp, struct ifnet *altifp,
 	 * in6_update_ifa() does not use ifra_name, but we accurately set it
 	 * for safety.
 	 */
-	strncpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
+	strlcpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
 
 	/* Initialize the IPv6 interface address in our in6_aliasreq block */
 	if ((ifp->if_eflags & IFEF_NOAUTOIPV6LL) != 0 && ifra0 != NULL) {
@@ -876,8 +890,8 @@ int
 in6_ifattach_llstartreq(struct ifnet *ifp, struct in6_llstartreq *llsr)
 {
 	struct in6_aliasreq ifra;
-	struct in6_ifaddr *ia6;
-	struct nd_ifinfo *ndi;
+	struct in6_ifaddr *ia6 = NULL;
+	struct nd_ifinfo *ndi = NULL;
 	int error;
 
 	VERIFY(llsr != NULL);
@@ -892,14 +906,11 @@ in6_ifattach_llstartreq(struct ifnet *ifp, struct in6_llstartreq *llsr)
 	if (nd6_send_opstate == ND6_SEND_OPMODE_DISABLED)
 		return (ENXIO);
 
-	lck_rw_lock_shared(nd_if_rwlock);
 	ndi = ND_IFINFO(ifp);
 	VERIFY(ndi != NULL && ndi->initialized);
 	if ((ndi->flags & ND6_IFF_INSECURE) != 0) {
-		lck_rw_done(nd_if_rwlock);
 		return (ENXIO);
 	}
-	lck_rw_done(nd_if_rwlock);
 
 	/* assign a link-local address, only if there isn't one here already. */
 	ia6 = in6ifa_ifpforlinklocal(ifp, 0);
@@ -909,7 +920,7 @@ in6_ifattach_llstartreq(struct ifnet *ifp, struct in6_llstartreq *llsr)
 	}
 
 	bzero(&ifra, sizeof (ifra));
-	strncpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
+	strlcpy(ifra.ifra_name, if_name(ifp), sizeof (ifra.ifra_name));
 
 	ifra.ifra_addr.sin6_family = AF_INET6;
 	ifra.ifra_addr.sin6_len = sizeof (struct sockaddr_in6);
@@ -1145,10 +1156,8 @@ in6_iid_mktmp(struct ifnet *ifp, u_int8_t *retbuf, const u_int8_t *baseid,
     int generate)
 {
 	u_int8_t nullbuf[8];
-	struct nd_ifinfo *ndi;
+	struct nd_ifinfo *ndi = ND_IFINFO(ifp);
 
-	lck_rw_lock_shared(nd_if_rwlock);
-	ndi = ND_IFINFO(ifp);
 	VERIFY(ndi != NULL && ndi->initialized);
 	lck_mtx_lock(&ndi->lock);
 	bzero(nullbuf, sizeof (nullbuf));
@@ -1167,28 +1176,27 @@ in6_iid_mktmp(struct ifnet *ifp, u_int8_t *retbuf, const u_int8_t *baseid,
 
 	bcopy(ndi->randomid, retbuf, 8);
 	lck_mtx_unlock(&ndi->lock);
-	lck_rw_done(nd_if_rwlock);
 }
 
 void
 in6_tmpaddrtimer(void *arg)
 {
 #pragma unused(arg)
-	int i;
-	struct nd_ifinfo *ndi;
+	struct ifnet *ifp = NULL;
+	struct nd_ifinfo *ndi = NULL;
 	u_int8_t nullbuf[8];
 
 	timeout(in6_tmpaddrtimer, (caddr_t)0, (ip6_temp_preferred_lifetime -
 	    ip6_desync_factor - ip6_temp_regen_advance) * hz);
 
-	lck_rw_lock_shared(nd_if_rwlock);
 	bzero(nullbuf, sizeof (nullbuf));
-	for (i = 1; i < if_index + 1; i++) {
-		if (!nd_ifinfo || i >= nd_ifinfo_indexlim)
-			break;
-		ndi = &nd_ifinfo[i];
-		if (!ndi->initialized)
+	ifnet_head_lock_shared();
+	for (ifp = ifnet_head.tqh_first; ifp;
+	    ifp = ifp->if_link.tqe_next) {
+		ndi = ND_IFINFO(ifp);
+		if ((NULL == ndi) || (FALSE == ndi->initialized)) {
 			continue;
+		}
 		lck_mtx_lock(&ndi->lock);
 		if (bcmp(ndi->randomid, nullbuf, sizeof (nullbuf)) != 0) {
 			/*
@@ -1200,5 +1208,5 @@ in6_tmpaddrtimer(void *arg)
 		}
 		lck_mtx_unlock(&ndi->lock);
 	}
-	lck_rw_done(nd_if_rwlock);
+	ifnet_head_done();
 }

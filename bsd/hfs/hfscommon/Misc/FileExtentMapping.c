@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -35,6 +35,7 @@
 #include "../headers/BTreesInternal.h"
 
 #include <sys/malloc.h>
+#include <sys/vnode_internal.h>
  
 /*
 ============================================================
@@ -66,7 +67,9 @@ Public (Exported) Routines:
 	FlushExtentFile
 					Flush the extents file for a given volume.
 
-
+	SearchExtentFile
+					Search the FCB and extents file for an extent record that
+					contains a given file position (in bytes).
 
 
 ============================================================
@@ -74,9 +77,6 @@ Internal Routines:
 ============================================================
 	FindExtentRecord
 					Search the extents BTree for a particular extent record.
-	SearchExtentFile
-					Search the FCB and extents file for an extent record that
-					contains a given file position (in bytes).
 	SearchExtentRecord
 					Search a given extent record to see if it contains a given
 					file position (in bytes).  Used by SearchExtentFile.
@@ -97,7 +97,9 @@ Internal Routines:
 					and was in the extents file, then delete the record instead.
 */
 
+#if CONFIG_HFS_STD
 static const int64_t kTwoGigabytes = 0x80000000LL;
+#endif
 
 enum
 {
@@ -140,16 +142,6 @@ static OSErr CreateExtentRecord(
 static OSErr GetFCBExtentRecord(
 	const FCB				*fcb,
 	HFSPlusExtentRecord		extents);
-
-static OSErr SearchExtentFile(
-	ExtendedVCB		*vcb,
-	const FCB	 			*fcb,
-	int64_t 				filePosition,
-	HFSPlusExtentKey		*foundExtentKey,
-	HFSPlusExtentRecord		foundExtentData,
-	u_int32_t				*foundExtentDataIndex,
-	u_int32_t				*extentBTreeHint,
-	u_int32_t				*endingFABNPlusOne );
 
 static OSErr SearchExtentRecord(
 	ExtendedVCB		*vcb,
@@ -875,6 +867,69 @@ int32_t CompareExtentKeysPlus( const HFSPlusExtentKey *searchKey, const HFSPlusE
 	return( result );
 }
 
+static int
+should_pin_blocks(hfsmount_t *hfsmp, FCB *fcb)
+{
+	if (!ISSET(hfsmp->hfs_flags, HFS_CS_HOTFILE_PIN)
+		|| fcb->ff_cp == NULL || fcb->ff_cp->c_vp == NULL) {
+		return 0;
+	}
+
+	int pin_blocks;
+
+	//
+	// File system metadata should get pinned
+	//
+	if (vnode_issystem(fcb->ff_cp->c_vp)) {
+		return 1;
+	}
+
+	//
+	// If a file is AutoCandidate, we should not pin its blocks because
+	// it was an automatically added file and this function is intended
+	// to pin new blocks being added to user-generated content.
+	//
+	if (fcb->ff_cp->c_attr.ca_recflags & kHFSAutoCandidateMask) {
+		return 0;
+	}
+
+	//
+	// If a file is marked FastDevPinned it is an existing pinned file 
+	// or a new file that should be pinned.
+	//
+	// If a file is marked FastDevCandidate it is a new file that is
+	// being written to for the first time so we don't want to pin it
+	// just yet as it may not meet the criteria (i.e. too large).
+	//
+	if ((fcb->ff_cp->c_attr.ca_recflags & (kHFSFastDevPinnedMask)) != 0) {
+		pin_blocks = 1;
+	} else {
+		pin_blocks = 0;
+	}
+
+	return pin_blocks;
+}
+	
+
+
+static void
+pin_blocks_if_needed(ExtendedVCB *vcb, FCB *fcb, u_int32_t startBlock, u_int32_t blockCount)	
+{
+	if (!should_pin_blocks(vcb, fcb)) {
+		return;
+	}
+	
+	// ask CoreStorage to pin the new blocks being added to this file
+	if (hfs_pin_block_range((struct hfsmount *)vcb, HFS_PIN_IT, startBlock, blockCount, vfs_context_kernel()) == 0) {
+		struct vnode *vp = fcb->ff_cp->c_vp;
+		
+		// and make sure to keep our accounting in order
+		hfs_hotfile_adjust_blocks(vp, -blockCount);
+	}
+}
+
+
+
 /*
  * Add a file extent to a file.
  *
@@ -926,8 +981,12 @@ AddFileExtent(ExtendedVCB *vcb, FCB *fcb, u_int32_t startBlock, u_int32_t blockC
 		foundIndex = 0;
 
 		error = CreateExtentRecord(vcb, &foundKey, foundData, &hint);
-		if (error == fxOvFlErr)
+		if (error == fxOvFlErr) {
 			error = dskFulErr;
+		} else if (error == 0) {
+			pin_blocks_if_needed(vcb, fcb, startBlock, blockCount);
+		}
+		
 	} else {
 		/* 
 		 * Add a new extent into existing record.
@@ -935,6 +994,9 @@ AddFileExtent(ExtendedVCB *vcb, FCB *fcb, u_int32_t startBlock, u_int32_t blockC
 		foundData[foundIndex].startBlock = startBlock;
 		foundData[foundIndex].blockCount = blockCount;
 		error = UpdateExtentRecord(vcb, fcb, 0, &foundKey, foundData, hint);
+		if (error == 0) {
+			pin_blocks_if_needed(vcb, fcb, startBlock, blockCount);
+		}
 	}
 	(void) FlushExtentFile(vcb);
 
@@ -981,6 +1043,8 @@ OSErr ExtendFileC (
 	int64_t 			availbytes;
 	int64_t				peof;
 	u_int32_t			prevblocks;
+	uint32_t			fastdev = 0;
+
 	struct hfsmount *hfsmp = (struct hfsmount*)vcb;	
 	allowFlushTxns = 0;
 	needsFlush = false;
@@ -1028,7 +1092,12 @@ OSErr ExtendFileC (
 		FTOC(fcb)->c_blocks   += blocksToAdd;
 		fcb->ff_blocks        += blocksToAdd;
 
-		FTOC(fcb)->c_flag |= C_MODIFIED | C_FORCEUPDATE;
+		/*
+		 * We haven't touched the disk here; no blocks have been
+		 * allocated and the volume will not be inconsistent if we
+		 * don't update the catalog record immediately.
+		 */
+		FTOC(fcb)->c_flag |= C_MINOR_MOD;
 		*actualBytesAdded = bytesToAdd;
 		return (0);
 	}
@@ -1098,7 +1167,7 @@ OSErr ExtendFileC (
 		//	Enough blocks are already allocated.  Just update the FCB to reflect the new length.
 		fcb->ff_blocks = peof / volumeBlockSize;
 		FTOC(fcb)->c_blocks += (bytesToAdd / volumeBlockSize);
-		FTOC(fcb)->c_flag |= C_MODIFIED | C_FORCEUPDATE;
+		FTOC(fcb)->c_flag |= C_MODIFIED;
 		goto Exit;
 	}
 	if (err != fxRangeErr)		// Any real error?
@@ -1169,6 +1238,10 @@ OSErr ExtendFileC (
 	else {
 		wantContig = true;
 	}
+
+	if (should_pin_blocks(hfsmp, fcb))
+		fastdev = HFS_ALLOC_FAST_DEV;
+
 	useMetaZone = flags & kEFMetadataMask;
 	do {
 		if (blockHint != 0)
@@ -1185,10 +1258,12 @@ OSErr ExtendFileC (
 		if (availbytes <= 0) {
 			err = dskFulErr;
 		} else {
-			if (wantContig && (availbytes < bytesToAdd))
+			if (wantContig && (availbytes < bytesToAdd)) {
 				err = dskFulErr;
+			}
 			else {
-				uint32_t ba_flags = 0;
+				uint32_t ba_flags = fastdev;
+
 				if (wantContig) {
 					ba_flags |= HFS_ALLOC_FORCECONTIG;	
 				}
@@ -1247,12 +1322,6 @@ OSErr ExtendFileC (
 
 		}
 		if (err == noErr) {
-		    if (actualNumBlocks != 0) {
-				// this catalog entry *must* get forced to disk when
-				// hfs_update() is called
-				FTOC(fcb)->c_flag |= C_FORCEUPDATE;
-			}
-
 			//	Add the new extent to the existing extent record, or create a new one.
 			if ((actualStartBlock == startBlock) && (blockHint == 0)) {
 				//	We grew the file's last extent, so just adjust the number of blocks.
@@ -1315,7 +1384,7 @@ OSErr ExtendFileC (
 					if (err != noErr) break;
 				}
 			}
-			
+
 			// Figure out how many bytes were actually allocated.
 			// NOTE: BlockAllocate could have allocated more than we asked for.
 			// Don't set the PEOF beyond what our client asked for.
@@ -1330,7 +1399,7 @@ OSErr ExtendFileC (
 			}
 			fcb->ff_blocks += (bytesThisExtent / volumeBlockSize);
 			FTOC(fcb)->c_blocks += (bytesThisExtent / volumeBlockSize);
-			FTOC(fcb)->c_flag |= C_MODIFIED | C_FORCEUPDATE;
+			FTOC(fcb)->c_flag |= C_MODIFIED;
 
 			//	If contiguous allocation was requested, then we've already got one contiguous
 			//	chunk.  If we didn't get all we wanted, then adjust the error to disk full.
@@ -1360,6 +1429,11 @@ Exit:
 		*actualBytesAdded = 0;
 	}
 
+	if (fastdev) {
+		hfs_hotfile_adjust_blocks(fcb->ff_cp->c_vp, 
+					  (int64_t)prevblocks - fcb->ff_blocks);
+	}
+
 	if (needsFlush)
 		(void) FlushExtentFile(vcb);
 
@@ -1367,9 +1441,9 @@ Exit:
 
 #if CONFIG_HFS_STD
 HFS_Std_Overflow:
-#endif
 	err = fileBoundsErr;
 	goto ErrorExit;
+#endif
 }
 
 
@@ -1468,7 +1542,7 @@ OSErr TruncateFileC (
 		 * has been removed from disk already.  We wouldn't need to force 
 		 * another update
 		 */
-		FTOC(fcb)->c_flag |= (C_MODIFIED | C_FORCEUPDATE);
+		FTOC(fcb)->c_flag |= C_MODIFIED;
 	}
 	//
 	//	If the new PEOF is 0, then truncateToExtent has no meaning (we should always deallocate
@@ -1709,7 +1783,7 @@ CopyExtents:
 		FTOC(fcb)->c_blocks -= headblks;
 		fcb->ff_blocks = blkcnt;
 
-		FTOC(fcb)->c_flag |= C_FORCEUPDATE;
+		FTOC(fcb)->c_flag |= C_MODIFIED;
 		FTOC(fcb)->c_touch_chgtime = TRUE;
 
 		(void) FlushExtentFile(vcb);
@@ -1845,7 +1919,7 @@ static OSErr SearchExtentRecord(
 //		(other)			(some other internal I/O error)
 //‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹‹
 
-static OSErr SearchExtentFile(
+OSErr SearchExtentFile(
 	ExtendedVCB 	*vcb,
 	const FCB	 		*fcb,
 	int64_t 			filePosition,

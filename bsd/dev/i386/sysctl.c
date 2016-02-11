@@ -32,6 +32,7 @@
 #include <sys/sysctl.h>
 #include <i386/cpuid.h>
 #include <i386/tsc.h>
+#include <i386/rtclock_protos.h>
 #include <i386/machine_routines.h>
 #include <i386/pal_routines.h>
 #include <i386/ucode.h>
@@ -498,9 +499,15 @@ SYSCTL_NODE(_machdep_cpu, OID_AUTO, xsave, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
 
 SYSCTL_PROC(_machdep_cpu_xsave, OID_AUTO, extended_state,
 	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
-	    (void *)offsetof(cpuid_xsave_leaf_t, extended_state),
+	    (void *) 0,
 	    sizeof(cpuid_xsave_leaf_t),
-	    cpu_xsave, "IU", "XSAVE Extended State");
+	    cpu_xsave, "IU", "XSAVE Extended State Main Leaf");
+
+SYSCTL_PROC(_machdep_cpu_xsave, OID_AUTO, extended_state1,
+	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
+	    (void *) sizeof(cpuid_xsave_leaf_t),
+	    sizeof(cpuid_xsave_leaf_t),
+	    cpu_xsave, "IU", "XSAVE Extended State Sub-leaf 1");
 
 
 SYSCTL_NODE(_machdep_cpu, OID_AUTO, arch_perf, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
@@ -681,8 +688,23 @@ SYSCTL_PROC(_machdep_cpu_flex_ratio, OID_AUTO, max,
 	    cpu_flex_ratio_max, "I", "Flex ratio max (non-turbo)");
 
 SYSCTL_PROC(_machdep_cpu, OID_AUTO, ucupdate, 
-			CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0,
+	    CTLTYPE_INT | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0,
             cpu_ucode_update, "S", "Microcode update interface");
+
+SYSCTL_NODE(_machdep_cpu, OID_AUTO, tsc_ccc, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
+	"TSC/CCC frequency information");
+
+SYSCTL_PROC(_machdep_cpu_tsc_ccc, OID_AUTO, numerator,
+	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
+	    (void *)offsetof(i386_cpu_info_t, cpuid_tsc_leaf.numerator),
+	    sizeof(uint32_t),
+	    i386_cpu_info, "I", "Numerator of TSC/CCC ratio");
+
+SYSCTL_PROC(_machdep_cpu_tsc_ccc, OID_AUTO, denominator,
+	    CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, 
+	    (void *)offsetof(i386_cpu_info_t, cpuid_tsc_leaf.denominator),
+	    sizeof(uint32_t),
+	    i386_cpu_info, "I", "Denominator of TSC/CCC ratio");
 
 static const uint32_t apic_timer_vector = (LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_TIMER_INTERRUPT);
 static const uint32_t apic_IPI_vector = (LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_INTERPROCESSOR_INTERRUPT);
@@ -690,8 +712,8 @@ static const uint32_t apic_IPI_vector = (LAPIC_DEFAULT_INTERRUPT_BASE + LAPIC_IN
 SYSCTL_NODE(_machdep, OID_AUTO, vectors, CTLFLAG_RD | CTLFLAG_LOCKED, 0,
 	"Interrupt vector assignments");
 
-SYSCTL_UINT     (_machdep_vectors, OID_AUTO, timer, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (uint32_t *)&apic_timer_vector, 0, "");
-SYSCTL_UINT     (_machdep_vectors, OID_AUTO, IPI, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, (uint32_t *)&apic_IPI_vector, 0, "");
+SYSCTL_UINT     (_machdep_vectors, OID_AUTO, timer, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, __DECONST(uint32_t *,&apic_timer_vector), 0, "");
+SYSCTL_UINT     (_machdep_vectors, OID_AUTO, IPI, CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED, __DECONST(uint32_t *,&apic_IPI_vector), 0, "");
 
 uint64_t pmap_pv_hashlist_walks;
 uint64_t pmap_pv_hashlist_cnts;
@@ -737,25 +759,29 @@ SYSCTL_QUAD(_machdep_tsc, OID_AUTO, frequency,
 
 extern uint32_t deep_idle_rebase;
 SYSCTL_UINT(_machdep_tsc, OID_AUTO, deep_idle_rebase,
-	CTLFLAG_RW|CTLFLAG_KERN|CTLFLAG_LOCKED, &deep_idle_rebase, 0, "");
+	CTLFLAG_RD|CTLFLAG_LOCKED, &deep_idle_rebase, 0, "");
+SYSCTL_QUAD(_machdep_tsc, OID_AUTO, at_boot,
+	CTLFLAG_RD|CTLFLAG_LOCKED, &tsc_at_boot, "");
+SYSCTL_QUAD(_machdep_tsc, OID_AUTO, rebase_abs_time,
+	CTLFLAG_RD|CTLFLAG_LOCKED, &tsc_rebase_abs_time, "");
 
 SYSCTL_NODE(_machdep_tsc, OID_AUTO, nanotime,
 	CTLFLAG_RD|CTLFLAG_LOCKED, NULL, "TSC to ns conversion");
 SYSCTL_QUAD(_machdep_tsc_nanotime, OID_AUTO, tsc_base,
 	CTLFLAG_RD | CTLFLAG_LOCKED,
-	(uint64_t *) &pal_rtc_nanotime_info.tsc_base, "");
+	__DECONST(uint64_t *, &pal_rtc_nanotime_info.tsc_base), "");
 SYSCTL_QUAD(_machdep_tsc_nanotime, OID_AUTO, ns_base,
 	CTLFLAG_RD | CTLFLAG_LOCKED,
-	(uint64_t *)&pal_rtc_nanotime_info.ns_base, "");
+	__DECONST(uint64_t *, &pal_rtc_nanotime_info.ns_base), "");
 SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, scale,
 	CTLFLAG_RD | CTLFLAG_LOCKED,
-	(uint32_t *)&pal_rtc_nanotime_info.scale, 0, "");
+	__DECONST(uint32_t *, &pal_rtc_nanotime_info.scale), 0, "");
 SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, shift,
 	CTLFLAG_RD | CTLFLAG_LOCKED,
-	(uint32_t *)&pal_rtc_nanotime_info.shift, 0, "");
+	__DECONST(uint32_t *, &pal_rtc_nanotime_info.shift), 0, "");
 SYSCTL_UINT(_machdep_tsc_nanotime, OID_AUTO, generation,
 	CTLFLAG_RD | CTLFLAG_LOCKED,
-	(uint32_t *)&pal_rtc_nanotime_info.generation, 0, "");
+	__DECONST(uint32_t *, &pal_rtc_nanotime_info.generation), 0, "");
 
 SYSCTL_NODE(_machdep, OID_AUTO, misc, CTLFLAG_RW|CTLFLAG_LOCKED, 0,
 	"Miscellaneous x86 kernel parameters");
@@ -775,7 +801,14 @@ SYSCTL_PROC(_machdep_misc, OID_AUTO, machine_check_panic,
 	    0, 0,
 	    misc_machine_check_panic, "A", "Machine-check exception test");
 
-
+#if DEVELOPMENT || DEBUG
+SYSCTL_QUAD(_machdep, OID_AUTO, reportphyreadabs,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&reportphyreaddelayabs, "");
+SYSCTL_INT(_machdep, OID_AUTO, reportphyreadosbt,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&reportphyreadosbt, 0, "");
+#endif
 
 extern void timer_queue_trace_cpu(int);
 static int
@@ -833,86 +866,6 @@ SYSCTL_INT(_kern, OID_AUTO, interrupt_timer_coalescing_enabled,
 SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_idle_entry_hard_deadline_max,
 		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
 		&idle_entry_timer_processing_hdeadline_threshold, 0, "");
-/* Coalescing tuning parameters for various thread/task attributes */
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_bg_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_bg_shift, 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_bg_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_bg_ns_max, "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_kt_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_kt_shift, 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_kt_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_kt_ns_max, "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_fp_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_fp_shift, 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_fp_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_fp_ns_max, "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_ts_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_ts_shift, 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_ts_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.timer_coalesce_ts_ns_max, "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier0_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[0], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier0_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[0], "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier1_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[1], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier1_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[1], "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier2_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[2], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier2_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[2], "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier3_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[3], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier3_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[3], "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier4_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[4], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier4_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[4], "");
-
-SYSCTL_INT(_kern, OID_AUTO, timer_coalesce_tier5_scale,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_scale[5], 0, "");
-
-SYSCTL_QUAD(_kern, OID_AUTO, timer_coalesce_tier5_ns_max,
-		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
-		&tcoal_prio_params.latency_qos_ns_max[5], "");
 
 /* Track potentially expensive eager timer evaluations on QoS tier
  * switches.
@@ -928,28 +881,7 @@ extern uint64_t ml_timer_eager_evaluation_max;
 SYSCTL_QUAD(_machdep, OID_AUTO, eager_timer_evaluation_max,
 		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
 		&ml_timer_eager_evaluation_max, "");
-
-/* Communicate the "user idle level" heuristic to the timer layer, and
- * potentially other layers in the future.
- */
-
-static int
-timer_set_user_idle_level(__unused struct sysctl_oid *oidp, __unused void *arg1, __unused int arg2, struct sysctl_req *req) {
-	int new_value = 0, old_value = 0, changed = 0, error;
-
-	old_value = ml_timer_get_user_idle_level();
-
-	error = sysctl_io_number(req, old_value, sizeof(int), &new_value, &changed);
-
-	if (error == 0 && changed) {
-		if (ml_timer_set_user_idle_level(new_value) != KERN_SUCCESS)
-			error = ERANGE;
-	}
-
-	return error;
-}
-
-SYSCTL_PROC(_machdep, OID_AUTO, user_idle_level,
-	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED, 
-	    0, 0,
-	    timer_set_user_idle_level, "I", "User idle level heuristic, 0-128");
+extern uint64_t x86_isr_fp_simd_use;
+SYSCTL_QUAD(_machdep, OID_AUTO, x86_fp_simd_isr_uses,
+		CTLFLAG_KERN | CTLFLAG_RW | CTLFLAG_LOCKED,
+		&x86_isr_fp_simd_use, "");

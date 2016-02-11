@@ -171,6 +171,14 @@ typedef int wait_timeout_urgency_t;
 #define TIMEOUT_URGENCY_LEEWAY		0x20		/* don't ignore provided leeway value */
 
 #define TIMEOUT_URGENCY_FIRST_AVAIL	0x40		/* first available bit outside of urgency mask/leeway */
+#define	TIMEOUT_URGENCY_RATELIMITED	0x80
+
+/*
+ * Timeout and deadline tokens for waits.
+ * The following tokens define common values for leeway and deadline parameters.
+ */
+#define TIMEOUT_NO_LEEWAY		(0ULL)
+#define TIMEOUT_WAIT_FOREVER		(0ULL)
 
 #ifdef	KERNEL_PRIVATE
 
@@ -200,6 +208,11 @@ typedef struct grrr_run_queue               *grrr_run_queue_t;
 typedef struct grrr_group					*grrr_group_t;
 #define GRRR_GROUP_NULL						((grrr_group_t) 0)
 
+#if defined(CONFIG_SCHED_MULTIQ)
+typedef struct sched_group              *sched_group_t;
+#define SCHED_GROUP_NULL                ((sched_group_t) 0)
+#endif /* defined(CONFIG_SCHED_MULTIQ) */
+
 #else	/* MACH_KERNEL_PRIVATE */
 
 struct wait_queue_set ;
@@ -215,11 +228,8 @@ typedef struct _wait_queue_link	*wait_queue_link_t;
 #define WAIT_QUEUE_LINK_NULL	((wait_queue_link_t)0)
 #define SIZEOF_WAITQUEUE_LINK	wait_queue_link_size()
 
-/* legacy definitions - going away */
-struct wait_queue_sub ;
-typedef struct wait_queue_sub	*wait_queue_sub_t;
-#define WAIT_QUEUE_SUB_NULL 	((wait_queue_sub_t)0)
-#define SIZEOF_WAITQUEUE_SUB	wait_queue_set_size()
+typedef struct perfcontrol_state	*perfcontrol_state_t;
+#define PERFCONTROL_STATE_NULL		((perfcontrol_state_t)0)
 
 #endif	/* KERNEL_PRIVATE */
 

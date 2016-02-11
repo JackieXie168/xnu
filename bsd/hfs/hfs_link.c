@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -238,8 +238,15 @@ hfs_makelink(struct hfsmount *hfsmp, struct vnode *src_vp, struct cnode *cp,
 
 			/* Put the original file back. */
 			err = cat_rename(hfsmp, &to_desc, &dcp->c_desc, &cp->c_desc, NULL);
-			if (err && err != EIO && err != ENXIO)
-				panic("hfs_makelink: error %d from cat_rename backout 1", err);
+			if (err) {
+				if (err != EIO && err != ENXIO)
+					printf("hfs_makelink: error %d from cat_rename backout 1", err);
+				hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+			}
+			if (retval != EIO && retval != ENXIO) {
+				printf("hfs_makelink: createindirectlink (1) failed: %d\n", retval);
+				retval = EIO;
+			}
 			goto out;
 		}
 		cp->c_attr.ca_linkref = indnodeno;
@@ -287,10 +294,18 @@ hfs_makelink(struct hfsmount *hfsmp, struct vnode *src_vp, struct cnode *cp,
 		
 		/* Put the original file back. */
 		err = cat_rename(hfsmp, &to_desc, &dcp->c_desc, &cp->c_desc, NULL);
-		if (err && err != EIO && err != ENXIO)
-			panic("hfs_makelink: error %d from cat_rename backout 2", err);
+		if (err) {
+			if (err != EIO && err != ENXIO)
+				printf("hfs_makelink: error %d from cat_rename backout 2", err);
+			hfs_mark_inconsistent(hfsmp, HFS_ROLLBACK_FAILED);
+		}
 
 		cp->c_attr.ca_linkref = 0;
+
+		if (retval != EIO && retval != ENXIO) {
+			printf("hfs_makelink: createindirectlink (2) failed: %d\n", retval);
+			retval = EIO;
+		}
 		goto out;
 	} else if (retval == 0) {
 
@@ -314,10 +329,6 @@ hfs_makelink(struct hfsmount *hfsmp, struct vnode *src_vp, struct cnode *cp,
 	    if (newlink) {
 		vnode_t vp;
 		
-		if (retval != 0) {
-		    panic("hfs_makelink: retval %d but newlink = 1!\n", retval);
-		}
-
 		hfsmp->hfs_private_attr[type].ca_entries++;
 		/* From application perspective, directory hard link is a 
 		 * normal directory.  Therefore count the new directory 
@@ -328,8 +339,12 @@ hfs_makelink(struct hfsmount *hfsmp, struct vnode *src_vp, struct cnode *cp,
 		}
 		retval = cat_update(hfsmp, &hfsmp->hfs_private_desc[type],
 		    &hfsmp->hfs_private_attr[type], NULL, NULL);
-		if (retval != 0 && retval != EIO && retval != ENXIO) {
-		    panic("hfs_makelink: cat_update of privdir failed! (%d)\n", retval);
+		if (retval) {
+			if (retval != EIO && retval != ENXIO) {
+				printf("hfs_makelink: cat_update of privdir failed! (%d)\n", retval);
+				retval = EIO;
+			}
+			hfs_mark_inconsistent(hfsmp, HFS_OP_INCOMPLETE);
 		}
 		cp->c_flag |= C_HARDLINK;
 
@@ -373,10 +388,9 @@ hfs_makelink(struct hfsmount *hfsmp, struct vnode *src_vp, struct cnode *cp,
 				}
 			}
 		}
+			cp->c_flag |= C_MODIFIED;
 		cp->c_touch_chgtime = TRUE;
-		cp->c_flag |= C_FORCEUPDATE;
 	    }
-	    dcp->c_flag |= C_FORCEUPDATE;
 	}
 out:
 	hfs_systemfile_unlock(hfsmp, lockflags);
@@ -427,6 +441,16 @@ hfs_vnop_link(struct vnop_link_args *ap)
 	if (v_type == VBLK || v_type == VCHR) {
 		return (EPERM);  
 	}
+
+	/*
+	 * For now, return ENOTSUP for a symlink target. This can happen
+	 * for linkat(2) when called without AT_SYMLINK_FOLLOW.
+	 */
+	if (v_type == VLNK)
+		return (ENOTSUP);
+
+	cp = VTOC(vp);
+
 	if (v_type == VDIR) {
 #if CONFIG_HFS_DIRLINK
 		/* Make sure our private directory exists. */
@@ -441,8 +465,10 @@ hfs_vnop_link(struct vnop_link_args *ap)
 		if (hfsmp->jnl == NULL) {
 			return (EPERM);
 		}
+
 		/* Directory hardlinks also need the parent of the original directory. */
-		if ((error = hfs_vget(hfsmp, hfs_currentparent(VTOC(vp)), &fdvp, 1, 0))) {
+		if ((error = hfs_vget(hfsmp, hfs_currentparent(cp, /* have_lock: */ false),
+							  &fdvp, 1, 0))) {
 			return (error);
 		}
 #else
@@ -480,9 +506,8 @@ hfs_vnop_link(struct vnop_link_args *ap)
 		}
 	}
 	tdcp = VTOC(tdvp);
-	cp = VTOC(vp);
 	/* grab the parent CNID from originlist after grabbing cnode locks */
-	parentcnid = hfs_currentparent(cp);
+	parentcnid = hfs_currentparent(cp, /* have_lock: */ true);
 
 	/* 
 	 * Make sure we didn't race the src or dst parent directories with rmdir.
@@ -584,6 +609,7 @@ hfs_vnop_link(struct vnop_link_args *ap)
 	lockflags = 0;
 
 	cp->c_linkcount++;
+	cp->c_flag |= C_MODIFIED;
 	cp->c_touch_chgtime = TRUE;
 	error = hfs_makelink(hfsmp, vp, cp, tdcp, cnp);
 	if (error) {
@@ -610,26 +636,34 @@ hfs_vnop_link(struct vnop_link_args *ap)
 			}
 		}
 		tdcp->c_dirchangecnt++;
+		tdcp->c_flag |= C_MODIFIED;
 		hfs_incr_gencount(tdcp);
 		tdcp->c_touch_chgtime = TRUE;
 		tdcp->c_touch_modtime = TRUE;
-		tdcp->c_flag |= C_FORCEUPDATE;
 
 		error = hfs_update(tdvp, 0);
-		if (error && error != EIO && error != ENXIO) {
-			panic("hfs_vnop_link: error %d updating tdvp %p\n", error, tdvp);
+		if (error) {
+			if (error != EIO && error != ENXIO) {
+				printf("hfs_vnop_link: error %d updating tdvp %p\n", error, tdvp);
+				error = EIO;
+			}
+			hfs_mark_inconsistent(hfsmp, HFS_OP_INCOMPLETE);
 		}
-		
+
 		if ((v_type == VDIR) && 
 		    (fdcp != NULL) && 
 		    ((fdcp->c_attr.ca_recflags & kHFSHasChildLinkMask) == 0)) {
 
 			fdcp->c_attr.ca_recflags |= kHFSHasChildLinkMask;
+			fdcp->c_flag |= C_MODIFIED;
 			fdcp->c_touch_chgtime = TRUE;
-			fdcp->c_flag |= C_FORCEUPDATE;
 			error = hfs_update(fdvp, 0);
-			if (error && error != EIO && error != ENXIO) {
-				panic("hfs_vnop_link: error %d updating fdvp %p\n", error, fdvp);
+			if (error) {
+				if (error != EIO && error != ENXIO) {
+					printf("hfs_vnop_link: error %d updating fdvp %p\n", error, fdvp);
+					// No point changing error as it's set immediate below
+				}
+				hfs_mark_inconsistent(hfsmp, HFS_OP_INCOMPLETE);
 			}
 
 			/* Set kHFSHasChildLinkBit in the source hierarchy */
@@ -642,11 +676,11 @@ hfs_vnop_link(struct vnop_link_args *ap)
 		hfs_volupdate(hfsmp, VOL_MKFILE,
 			(tdcp->c_cnid == kHFSRootFolderID));
 	}
-	/* Make sure update occurs inside transaction */
-	cp->c_flag |= C_FORCEUPDATE;  
 
-	if ((error == 0) && (ret = hfs_update(vp, TRUE)) != 0 && ret != EIO && ret != ENXIO) {
-		panic("hfs_vnop_link: error %d updating vp @ %p\n", ret, vp);
+	if (error == 0 && (ret = hfs_update(vp, 0)) != 0) {
+		if (ret != EIO && ret != ENXIO)
+			printf("hfs_vnop_link: error %d updating vp @ %p\n", ret, vp);
+		hfs_mark_inconsistent(hfsmp, HFS_OP_INCOMPLETE);
 	}
 
 out:
@@ -761,9 +795,9 @@ hfs_unlink(struct hfsmount *hfsmp, struct vnode *dvp, struct vnode *vp, struct c
 	dcp->c_dirchangecnt++;
 	hfs_incr_gencount(dcp);
 	microtime(&tv);
-	dcp->c_ctime = tv.tv_sec;
-	dcp->c_mtime = tv.tv_sec;
-	(void ) cat_update(hfsmp, &dcp->c_desc, &dcp->c_attr, NULL, NULL);
+	dcp->c_touch_chgtime = dcp->c_touch_modtime = true;
+	dcp->c_flag |= C_MODIFIED;
+	hfs_update(dcp->c_vp, 0);
 
 	/*
 	 * If this is the last link then we need to process the inode.
@@ -844,7 +878,7 @@ hfs_unlink(struct hfsmount *hfsmp, struct vnode *dvp, struct vnode *vp, struct c
 		    firstlink == cndesc.cd_cnid) {
 			if (setfirstlink(hfsmp, cp->c_fileid, nextlinkid) == 0)
 				cp->c_attr.ca_recflags |= kHFSHasAttributesMask;
-		} else if (vnode_isreg(vp) && cp->c_attr.ca_firstlink == cndesc.cd_cnid) {
+		} else if (cp->c_attr.ca_firstlink == cndesc.cd_cnid) {
 			cp->c_attr.ca_firstlink = nextlinkid;
 		}
 		/* Update previous link. */
@@ -855,21 +889,22 @@ hfs_unlink(struct hfsmount *hfsmp, struct vnode *dvp, struct vnode *vp, struct c
 		if (nextlinkid) {
 			(void) cat_update_siblinglinks(hfsmp, nextlinkid, prevlinkid, HFS_IGNORABLE_LINK);
 		}
-
-		/*
-		 * The call to cat_releasedesc below will only release the name buffer;
-		 * it does not zero out the rest of the fields in the 'cat_desc' data structure.
-		 * 
-		 * As a result, since there are still other links at this point, we need
-		 * to make the current cnode descriptor point to the raw inode.  If a path-based
-		 * system call comes along first, it will replace the descriptor with a valid link
-		 * ID.  If a userland process already has a file descriptor open, then they will
-		 * bypass that lookup, though.  Replacing the descriptor CNID with the raw
-		 * inode will force it to generate a new full path.
-		 */
-		cp->c_cnid = cp->c_fileid;
-
 	}
+
+	/*
+	 * The call to cat_releasedesc below will only release the name
+	 * buffer; it does not zero out the rest of the fields in the
+	 * 'cat_desc' data structure.
+	 *
+	 * As a result, since there are still other links at this point,
+	 * we need to make the current cnode descriptor point to the raw
+	 * inode.  If a path-based system call comes along first, it will
+	 * replace the descriptor with a valid link ID.  If a userland
+	 * process already has a file descriptor open, then they will
+	 * bypass that lookup, though.  Replacing the descriptor CNID with
+	 * the raw inode will force it to generate a new full path.
+	 */
+	cp->c_cnid = cp->c_fileid;
 
 	/* Push new link count to disk. */
 	cp->c_ctime = tv.tv_sec;	
@@ -1107,7 +1142,7 @@ void
 hfs_savelinkorigin(cnode_t *cp, cnid_t parentcnid)
 {
 	linkorigin_t *origin = NULL;
-	void * thread = current_thread();
+	thread_t thread = current_thread();
 	int count = 0;
 	int maxorigins = (S_ISDIR(cp->c_mode)) ? MAX_CACHED_ORIGINS : MAX_CACHED_FILE_ORIGINS;
 	/*
@@ -1162,14 +1197,25 @@ void
 hfs_relorigin(struct cnode *cp, cnid_t parentcnid)
 {
 	linkorigin_t *origin, *prev;
-	void * thread = current_thread();
+	thread_t thread = current_thread();
 
 	TAILQ_FOREACH_SAFE(origin, &cp->c_originlist, lo_link, prev) {
-		if ((origin->lo_thread == thread) ||
-		    (origin->lo_parentcnid == parentcnid)) {
+		if (origin->lo_thread == thread) {
 			TAILQ_REMOVE(&cp->c_originlist, origin, lo_link);
 			FREE(origin, M_TEMP);
 			break;
+		} else if (origin->lo_parentcnid == parentcnid) {
+			/*
+			 * If the threads don't match, then we don't want to
+			 * delete the entry because that might cause other threads
+			 * to fall back and use whatever happens to be in
+			 * c_parentcnid or the wrong link ID.  By setting the
+			 * values to zero here, it should serve as an indication
+			 * that the path is no longer valid and that's better than
+			 * using a random parent ID or link ID.
+			 */
+			origin->lo_parentcnid = 0;
+			origin->lo_cnid = 0;
 		}
 	}
 }
@@ -1185,11 +1231,11 @@ hfs_haslinkorigin(cnode_t *cp)
 {
 	if (cp->c_flag & C_HARDLINK) {
 		linkorigin_t *origin;
-		void * thread = current_thread();
+		thread_t thread = current_thread();
 	
 		TAILQ_FOREACH(origin, &cp->c_originlist, lo_link) {
 			if (origin->lo_thread == thread) {
-				return (1);
+				return origin->lo_cnid != 0;
 			}
 		}
 	}
@@ -1203,17 +1249,25 @@ hfs_haslinkorigin(cnode_t *cp)
  */
 __private_extern__
 cnid_t
-hfs_currentparent(cnode_t *cp)
+hfs_currentparent(cnode_t *cp, bool have_lock)
 {
 	if (cp->c_flag & C_HARDLINK) {
+		if (!have_lock)
+			hfs_lock_always(cp, HFS_SHARED_LOCK);
+
 		linkorigin_t *origin;
-		void * thread = current_thread();
-	
+		thread_t thread = current_thread();
+
 		TAILQ_FOREACH(origin, &cp->c_originlist, lo_link) {
 			if (origin->lo_thread == thread) {
+				if (!have_lock)
+					hfs_unlock(cp);
 				return (origin->lo_parentcnid);
 			}
 		}
+
+		if (!have_lock)
+			hfs_unlock(cp);
 	}
 	return (cp->c_parentcnid);
 }
@@ -1229,7 +1283,7 @@ hfs_currentcnid(cnode_t *cp)
 {
 	if (cp->c_flag & C_HARDLINK) {
 		linkorigin_t *origin;
-		void * thread = current_thread();
+		thread_t thread = current_thread();
 	
 		TAILQ_FOREACH(origin, &cp->c_originlist, lo_link) {
 			if (origin->lo_thread == thread) {
@@ -1354,3 +1408,24 @@ out:
 	return MacToVFSError(result);
 }
 
+errno_t hfs_first_link(hfsmount_t *hfsmp, cnode_t *cp, cnid_t *link_id)
+{
+	errno_t error = 0;
+
+	if (S_ISDIR(cp->c_mode)) {
+		int lockf = hfs_systemfile_lock(hfsmp, SFL_ATTRIBUTE, HFS_SHARED_LOCK);
+
+		error = getfirstlink(hfsmp, cp->c_fileid, link_id);
+
+		hfs_systemfile_unlock(hfsmp, lockf);
+	} else {
+		if (cp->c_attr.ca_firstlink)
+			*link_id = cp->c_attr.ca_firstlink;
+		else {
+			// This can happen if the cnode has been deleted
+			error = ENOENT;
+		}
+	}
+
+	return error;
+}

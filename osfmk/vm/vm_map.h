@@ -105,7 +105,7 @@ __END_DECLS
 
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
-#include <kern/lock.h>
+#include <kern/locks.h>
 #include <kern/zalloc.h>
 #include <kern/macro_help.h>
 
@@ -138,8 +138,8 @@ typedef struct vm_map_entry	*vm_map_entry_t;
  *		memory object or a sub map (of the kernel map).
  */
 typedef union vm_map_object {
-	vm_object_t		vm_object;	/* object object */
-	vm_map_t		sub_map;	/* belongs to another map */
+	vm_object_t		vmo_object;	/* object object */
+	vm_map_t		vmo_submap;	/* belongs to another map */
 } vm_map_object_t;
 
 #define named_entry_lock_init(object)	lck_mtx_init(&(object)->Lock, &vm_object_lck_grp, &vm_object_lck_attr)
@@ -206,6 +206,54 @@ struct vm_map_links {
 	vm_map_offset_t		end;		/* end address */
 };
 
+/*
+ * IMPORTANT:
+ * The "alias" field can be updated while holding the VM map lock
+ * "shared".  It's OK as along as it's the only field that can be
+ * updated without the VM map "exclusive" lock.
+ */
+#define VME_OBJECT(entry) ((entry)->vme_object.vmo_object)
+#define VME_OBJECT_SET(entry, object)				\
+	MACRO_BEGIN						\
+	(entry)->vme_object.vmo_object = (object);		\
+	MACRO_END
+#define VME_SUBMAP(entry) ((entry)->vme_object.vmo_submap)
+#define VME_SUBMAP_SET(entry, submap)				\
+	MACRO_BEGIN						\
+	(entry)->vme_object.vmo_submap = (submap);		\
+	MACRO_END
+#define VME_OFFSET(entry) ((entry)->vme_offset & ~PAGE_MASK)
+#define VME_OFFSET_SET(entry, offset)		\
+	MACRO_BEGIN				\
+	int __alias;				\
+	__alias = VME_ALIAS((entry));		\
+	assert((offset & PAGE_MASK) == 0);	\
+	(entry)->vme_offset = offset | __alias;	\
+	MACRO_END
+#define VME_OBJECT_SHADOW(entry, length)			\
+	MACRO_BEGIN						\
+	vm_object_t		__object;			\
+	vm_object_offset_t	__offset;			\
+	__object = VME_OBJECT((entry));				\
+	__offset = VME_OFFSET((entry));				\
+	vm_object_shadow(&__object, &__offset, (length));	\
+	if (__object != VME_OBJECT((entry))) {			\
+		VME_OBJECT_SET((entry), __object);		\
+	}							\
+	if (__offset != VME_OFFSET((entry))) {			\
+		VME_OFFSET_SET((entry), __offset);		\
+	}							\
+	MACRO_END
+
+#define VME_ALIAS_MASK (PAGE_MASK)
+#define VME_ALIAS(entry) ((unsigned int)((entry)->vme_offset & VME_ALIAS_MASK))
+#define VME_ALIAS_SET(entry, alias) \
+	MACRO_BEGIN							\
+	vm_map_offset_t __offset;					\
+	__offset = VME_OFFSET((entry));					\
+	(entry)->vme_offset = __offset | ((alias) & VME_ALIAS_MASK);	\
+	MACRO_END
+
 struct vm_map_entry {
 	struct vm_map_links	links;		/* links to other entries */
 #define vme_prev		links.prev
@@ -214,37 +262,48 @@ struct vm_map_entry {
 #define vme_end			links.end
 
 	struct vm_map_store	store;
-	union vm_map_object	object;		/* object I point to */
-	vm_object_offset_t	offset;		/* offset into object */
+	union vm_map_object	vme_object;	/* object I point to */
+	vm_object_offset_t	vme_offset;	/* offset into object */
+
 	unsigned int
-	/* boolean_t */		is_shared:1,	/* region is shared */
-	/* boolean_t */		is_sub_map:1,	/* Is "object" a submap? */
-	/* boolean_t */		in_transition:1, /* Entry being changed */
-	/* boolean_t */		needs_wakeup:1,  /* Waiters on in_transition */
-	/* vm_behavior_t */	behavior:2,	/* user paging behavior hint */
+	/* boolean_t */	is_shared:1,	/* region is shared */
+	/* boolean_t */	is_sub_map:1,	/* Is "object" a submap? */
+	/* boolean_t */	in_transition:1, /* Entry being changed */
+	/* boolean_t */	needs_wakeup:1,	/* Waiters on in_transition */
+	/* vm_behavior_t */ behavior:2,	/* user paging behavior hint */
 		/* behavior is not defined for submap type */
-	/* boolean_t */		needs_copy:1,	/* object need to be copied? */
+	/* boolean_t */	needs_copy:1,	/* object need to be copied? */
+
 		/* Only in task maps: */
-	/* vm_prot_t */		protection:3,	/* protection code */
-	/* vm_prot_t */		max_protection:3,/* maximum protection */
-	/* vm_inherit_t */	inheritance:2,	/* inheritance */
-	/* boolean_t */		use_pmap:1,	/* nested pmaps */
-	/*
-	 * IMPORTANT:
-	 * The "alias" field can be updated while holding the VM map lock
-	 * "shared".  It's OK as along as it's the only field that can be
-	 * updated without the VM map "exclusive" lock.
-	 */
-	/* unsigned char */	alias:8,	/* user alias */
-	/* boolean_t */		no_cache:1,	/* should new pages be cached? */
-	/* boolean_t */		permanent:1,	/* mapping can not be removed */
-	/* boolean_t */		superpage_size:1,/* use superpages of a certain size */
-	/* boolean_t */		map_aligned:1,	/* align to map's page size */
-	/* boolean_t */		zero_wired_pages:1, /* zero out the wired pages of this entry it is being deleted without unwiring them */
-	/* boolean_t */		used_for_jit:1,
-	/* boolean_t */	from_reserved_zone:1,	/* Allocated from
-						 * kernel reserved zone	 */
-	__unused_bits:1;
+	/* vm_prot_t */	protection:3,	/* protection code */
+	/* vm_prot_t */	max_protection:3, /* maximum protection */
+	/* vm_inherit_t */ inheritance:2, /* inheritance */
+	/* boolean_t */	use_pmap:1,	/*
+					 * use_pmap is overloaded:
+					 * if "is_sub_map":
+					 * 	use a nested pmap?
+					 * else (i.e. if object):
+					 * 	use pmap accounting
+					 * 	for footprint?
+					 */
+	/* boolean_t */	no_cache:1,	/* should new pages be cached? */
+	/* boolean_t */	permanent:1,	/* mapping can not be removed */
+	/* boolean_t */	superpage_size:1, /* use superpages of a certain size */
+	/* boolean_t */	map_aligned:1,	/* align to map's page size */
+	/* boolean_t */	zero_wired_pages:1, /* zero out the wired pages of
+					     * this entry it is being deleted
+					     * without unwiring them */
+	/* boolean_t */	used_for_jit:1,
+	/* boolean_t */	from_reserved_zone:1, /* Allocated from
+					       * kernel reserved zone	 */
+
+	/* iokit accounting: use the virtual size rather than resident size: */
+	/* boolean_t */ iokit_acct:1,
+	/* boolean_t */ vme_resilient_codesign:1,
+	/* boolean_t */ vme_resilient_media:1,
+		__unused:6;
+;
+
 	unsigned short		wired_count;	/* can be paged if = 0 */
 	unsigned short		user_wired_count; /* for vm_wire */
 #if	DEBUG
@@ -317,7 +376,7 @@ struct vm_map_header {
  *		quickly find free space.
  */
 struct _vm_map {
-	lock_t			lock;		/* uni- and smp-lock */
+	lck_rw_t			lock;		/* map lock */
 	struct vm_map_header	hdr;		/* Map entry header */
 #define min_offset		hdr.links.start	/* start of range */
 #define max_offset		hdr.links.end	/* end of range */
@@ -334,7 +393,15 @@ struct _vm_map {
 	decl_lck_mtx_data(,	s_lock)		/* Lock ref, res fields */
 	lck_mtx_ext_t		s_lock_ext;
 	vm_map_entry_t		hint;		/* hint for quick lookups */
-	vm_map_entry_t		first_free;	/* First free space hint */
+	struct vm_map_links*	hole_hint;	/* hint for quick hole lookups */
+	union{
+		vm_map_entry_t		_first_free;	/* First free space hint */
+		struct vm_map_links*	_holes;		/* links all holes between entries */
+	}f_s;						/* Union for free space data structures being used */
+
+#define first_free		f_s._first_free
+#define holes_list		f_s._holes
+
 	unsigned int		
 	/* boolean_t */		wait_for_space:1, /* Should callers wait for space? */
 	/* boolean_t */		wiring_required:1, /* All memory wired? */
@@ -343,7 +410,8 @@ struct _vm_map {
 	/* boolean_t */		switch_protect:1, /*  Protect map from write faults while switched */
 	/* boolean_t */		disable_vmentry_reuse:1, /*  All vm entries should keep using newer and higher addresses in the map */ 
 	/* boolean_t */		map_disallow_data_exec:1, /* Disallow execution from data pages on exec-permissive architectures */
-	/* reserved */		pad:25;
+	/* boolean_t */		holelistenabled:1,
+	/* reserved */		pad:24;
 	unsigned int		timestamp;	/* Version number */
 	unsigned int		color_rr;	/* next color (not protected by a lock) */
 #if CONFIG_FREEZE
@@ -410,7 +478,11 @@ typedef struct vm_map_version {
  *
  *		The third format is a kernel buffer copy object - for data
  * 		small enough that physical copies were the most efficient
- *		method.
+ *		method. This method uses a zero-sized array unioned with
+ *		other format-specific data in the 'c_u' member. This unsized
+ *		array overlaps the other elements and allows us to use this
+ *		extra structure space for physical memory copies. On 64-bit
+ *		systems this saves ~64 bytes per vm_map_copy.
  */
 
 struct vm_map_copy {
@@ -421,12 +493,9 @@ struct vm_map_copy {
 	vm_object_offset_t	offset;
 	vm_map_size_t		size;
 	union {
-	    struct vm_map_header	hdr;	/* ENTRY_LIST */
-	    vm_object_t			object; /* OBJECT */
-	    struct {				
-		void			*kdata;	      /* KERNEL_BUFFER */
-		vm_size_t		kalloc_size;  /* size of this copy_t */
-	    } c_k;
+		struct vm_map_header    hdr;      /* ENTRY_LIST */
+		vm_object_t             object;   /* OBJECT */
+		uint8_t                 kdata[0]; /* KERNEL_BUFFER */
 	} c_u;
 };
 
@@ -434,9 +503,8 @@ struct vm_map_copy {
 #define cpy_hdr			c_u.hdr
 
 #define cpy_object		c_u.object
-
-#define cpy_kdata		c_u.c_k.kdata
-#define cpy_kalloc_size		c_u.c_k.kalloc_size
+#define cpy_kdata		c_u.kdata
+#define cpy_kdata_hdr_sz	(offsetof(struct vm_map_copy, c_u.kdata))
 
 #define VM_MAP_COPY_PAGE_SHIFT(copy) ((copy)->cpy_hdr.page_shift)
 #define VM_MAP_COPY_PAGE_SIZE(copy) (1 << VM_MAP_COPY_PAGE_SHIFT((copy)))
@@ -463,19 +531,35 @@ struct vm_map_copy {
 
 #define vm_map_lock_init(map)						\
 	((map)->timestamp = 0 ,						\
-	lock_init(&(map)->lock, TRUE, 0, 0))
+	lck_rw_init(&(map)->lock, &vm_map_lck_grp, &vm_map_lck_rw_attr))
 
-#define vm_map_lock(map)		lock_write(&(map)->lock)
+#define vm_map_lock(map)		lck_rw_lock_exclusive(&(map)->lock)
 #define vm_map_unlock(map)						\
-		((map)->timestamp++ ,	lock_write_done(&(map)->lock))
-#define vm_map_lock_read(map)		lock_read(&(map)->lock)
-#define vm_map_unlock_read(map)		lock_read_done(&(map)->lock)
+		((map)->timestamp++ ,	lck_rw_done(&(map)->lock))
+#define vm_map_lock_read(map)		lck_rw_lock_shared(&(map)->lock)
+#define vm_map_unlock_read(map)		lck_rw_done(&(map)->lock)
 #define vm_map_lock_write_to_read(map)					\
-		((map)->timestamp++ ,	lock_write_to_read(&(map)->lock))
+		((map)->timestamp++ ,	lck_rw_lock_exclusive_to_shared(&(map)->lock))
 /* lock_read_to_write() returns FALSE on failure.  Macro evaluates to 
  * zero on success and non-zero value on failure.
  */
-#define vm_map_lock_read_to_write(map)	(lock_read_to_write(&(map)->lock) != TRUE)
+#define vm_map_lock_read_to_write(map)	(lck_rw_lock_shared_to_exclusive(&(map)->lock) != TRUE)
+
+#if MACH_ASSERT || DEBUG
+#define vm_map_lock_assert_held(map) \
+	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_HELD)
+#define vm_map_lock_assert_shared(map)	\
+	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_SHARED)
+#define vm_map_lock_assert_exclusive(map) \
+	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_EXCLUSIVE)
+#define vm_map_lock_assert_notheld(map) \
+	lck_rw_assert(&(map)->lock, LCK_RW_ASSERT_NOTHELD)
+#else  /* MACH_ASSERT || DEBUG */ 
+#define vm_map_lock_assert_held(map)
+#define vm_map_lock_assert_shared(map)
+#define vm_map_lock_assert_exclusive(map)
+#define vm_map_lock_assert_notheld(map)
+#endif /* MACH_ASSERT || DEBUG */
 
 /*
  *	Exported procedures that operate on vm_map_t.
@@ -560,7 +644,8 @@ extern vm_map_entry_t	vm_map_entry_insert(
 				boolean_t		no_cache,
 				boolean_t		permanent,
 				unsigned int		superpage_size,
-				boolean_t		clear_map_aligned);
+				boolean_t		clear_map_aligned,
+				boolean_t		is_submap);
 
 
 /*
@@ -685,8 +770,8 @@ extern vm_object_t	vm_submap_object;
  */
 #define vm_map_entry_wait(map, interruptible)    	\
 	((map)->timestamp++ ,				\
-	 thread_sleep_lock_write((event_t)&(map)->hdr,  \
-			 &(map)->lock, interruptible))
+	 lck_rw_sleep(&(map)->lock, LCK_SLEEP_EXCLUSIVE|LCK_SLEEP_PROMOTED_PRI, \
+				  (event_t)&(map)->hdr,	interruptible))
 
 
 #define vm_map_entry_wakeup(map)        \
@@ -752,6 +837,7 @@ extern kern_return_t	vm_map_enter(
 				vm_prot_t		cur_protection,
 				vm_prot_t		max_protection,
 				vm_inherit_t		inheritance);
+
 
 /* XXX should go away - replaced with regular enter of contig object */
 extern  kern_return_t	vm_map_enter_cpm(
@@ -855,7 +941,9 @@ extern kern_return_t vm_map_query_volatile(
 	vm_map_t	map,
 	mach_vm_size_t	*volatile_virtual_size_p,
 	mach_vm_size_t	*volatile_resident_size_p,
-	mach_vm_size_t	*volatile_pmap_size_p);
+	mach_vm_size_t	*volatile_compressed_size_p,
+	mach_vm_size_t	*volatile_pmap_size_p,
+	mach_vm_size_t	*volatile_compressed_pmap_size_p);
 
 extern kern_return_t	vm_map_submap(
 				vm_map_t		map,
@@ -893,6 +981,25 @@ extern kern_return_t vm_map_set_cache_attr(
 
 extern int override_nx(vm_map_t map, uint32_t user_tag);
 
+extern int vm_map_purge(vm_map_t map);
+
+
+/* kext exported versions */
+
+extern kern_return_t vm_map_wire_external(
+	register vm_map_t	map,
+	register vm_map_offset_t	start,
+	register vm_map_offset_t	end,
+	register vm_prot_t	caller_prot,
+	boolean_t		user_wire);
+
+extern kern_return_t vm_map_wire_and_extract_external(
+	vm_map_t	map,
+	vm_map_offset_t	start,
+	vm_prot_t	caller_prot,
+	boolean_t	user_wire,
+	ppnum_t		*physpage_p);
+
 #endif /* MACH_KERNEL_PRIVATE */
 
 __BEGIN_DECLS
@@ -903,6 +1010,8 @@ extern vm_map_t		vm_map_create(
 				vm_map_offset_t 	min_off,
 				vm_map_offset_t 	max_off,
 				boolean_t		pageable);
+
+extern void		vm_map_disable_hole_optimization(vm_map_t map);
 
 /* Get rid of a map */
 extern void		vm_map_destroy(
@@ -939,6 +1048,13 @@ extern kern_return_t	vm_map_wire(
 				vm_prot_t		access_type,
 				boolean_t		user_wire);
 
+extern kern_return_t	vm_map_wire_and_extract(
+				vm_map_t		map,
+				vm_map_offset_t		start,
+				vm_prot_t		access_type,
+				boolean_t		user_wire,
+				ppnum_t			*physpage_p);
+
 /* unwire a region */
 extern kern_return_t	vm_map_unwire(
 				vm_map_t		map,
@@ -959,6 +1075,20 @@ extern kern_return_t	vm_map_enter_mem_object(
 				vm_prot_t		cur_protection,
 				vm_prot_t		max_protection,
 				vm_inherit_t		inheritance);
+
+/* Enter a mapping of a memory object */
+extern kern_return_t	vm_map_enter_mem_object_prefault(
+				vm_map_t		map,
+				vm_map_offset_t		*address,
+				vm_map_size_t		size,
+				vm_map_offset_t		mask,
+				int			flags,
+				ipc_port_t		port,
+				vm_object_offset_t	offset,
+				vm_prot_t		cur_protection,
+				vm_prot_t		max_protection,
+				upl_page_list_ptr_t	page_list,
+				unsigned int 		page_list_count);
 
 /* Enter a mapping of a memory object */
 extern kern_return_t	vm_map_enter_mem_object_control(
@@ -992,6 +1122,12 @@ extern kern_return_t	vm_map_copy_overwrite(
 				vm_map_copy_t           copy,
 				boolean_t               interruptible);
 
+/* returns TRUE if size of vm_map_copy == size parameter FALSE otherwise */
+extern boolean_t	vm_map_copy_validate_size(
+				vm_map_t		dst_map,
+				vm_map_copy_t		copy,
+				vm_map_size_t		size);
+
 /* Place a copy into a map */
 extern kern_return_t	vm_map_copyout(
 				vm_map_t		dst_map,
@@ -1023,6 +1159,17 @@ extern kern_return_t	vm_map_copyin_common(
 				vm_map_copy_t		*copy_result,	/* OUT */
 				boolean_t		use_maxprot);
 
+#define VM_MAP_COPYIN_SRC_DESTROY	0x00000001
+#define VM_MAP_COPYIN_USE_MAXPROT	0x00000002
+#define VM_MAP_COPYIN_ENTRY_LIST	0x00000004
+#define VM_MAP_COPYIN_ALL_FLAGS		0x00000007
+extern kern_return_t	vm_map_copyin_internal(
+				vm_map_t		src_map,
+				vm_map_address_t	src_addr,
+				vm_map_size_t		len,
+				int			flags,
+				vm_map_copy_t		*copy_result); /* OUT */
+
 extern kern_return_t	vm_map_copy_extract(
 	vm_map_t		src_map,
 	vm_map_address_t	src_addr,
@@ -1050,14 +1197,7 @@ extern boolean_t	vm_map_has_hard_pagezero(
 
 extern boolean_t	vm_map_is_64bit(
 			        vm_map_t		map);
-#define vm_map_has_4GB_pagezero(map) 	vm_map_has_hard_pagezero(map, (vm_map_offset_t)0x100000000ULL)
 
-
-extern void		vm_map_set_4GB_pagezero(
-			        vm_map_t		map);
-
-extern void		vm_map_clear_4GB_pagezero(
-			        vm_map_t		map);
 
 extern kern_return_t	vm_map_raise_max_offset(
 	vm_map_t	map,
@@ -1068,7 +1208,7 @@ extern kern_return_t	vm_map_raise_min_offset(
 	vm_map_offset_t	new_min_offset);
 
 extern vm_map_offset_t	vm_compute_max_offset(
-				unsigned		is64);
+				boolean_t		is64);
 
 extern uint64_t 	vm_map_get_max_aslr_slide_pages(
 				vm_map_t map);
@@ -1095,7 +1235,7 @@ extern boolean_t first_free_is_valid(vm_map_t);
 extern int 		vm_map_page_shift(
 				vm_map_t 		map);
 
-extern int		vm_map_page_mask(
+extern vm_map_offset_t	vm_map_page_mask(
 				vm_map_t 		map);
 
 extern int		vm_map_page_size(
@@ -1106,6 +1246,10 @@ extern vm_map_offset_t	vm_map_round_page_mask(
 				vm_map_offset_t		mask);
 
 extern vm_map_offset_t	vm_map_trunc_page_mask(
+				vm_map_offset_t		offset,
+				vm_map_offset_t		mask);
+
+extern boolean_t	vm_map_page_aligned(
 				vm_map_offset_t		offset,
 				vm_map_offset_t		mask);
 
@@ -1172,6 +1316,8 @@ extern kern_return_t vm_map_set_page_shift(vm_map_t map, int pageshift);
 #define	VM_MAP_REMOVE_WAIT_FOR_KWIRE  	0x4
 #define VM_MAP_REMOVE_SAVE_ENTRIES	0x8
 #define VM_MAP_REMOVE_NO_PMAP_CLEANUP	0x10
+#define VM_MAP_REMOVE_NO_MAP_ALIGN	0x20
+#define VM_MAP_REMOVE_NO_UNNESTING	0x40
 
 /* Support for UPLs from vm_maps */
 
@@ -1181,15 +1327,26 @@ extern kern_return_t vm_map_get_upl(
 				upl_size_t		*size,
 				upl_t			*upl,
 				upl_page_info_array_t	page_info,
-				unsigned int	*page_infoCnt,
-				int		*flags,
-				int		force_data_sync);
+				unsigned int		*page_infoCnt,
+				upl_control_flags_t	*flags,
+				int			force_data_sync);
+
+extern void
+vm_map_sizes(vm_map_t map,
+		vm_map_size_t * psize,
+		vm_map_size_t * pfree,
+		vm_map_size_t * plargest_free);
 
 #if CONFIG_DYNAMIC_CODE_SIGNING
 extern kern_return_t vm_map_sign(vm_map_t map, 
 				 vm_map_offset_t start, 
 				 vm_map_offset_t end);
 #endif
+
+extern kern_return_t vm_map_partial_reap(
+              	vm_map_t map,
+		unsigned int *reclaimed_resident,
+		unsigned int *reclaimed_compressed);
 
 #if CONFIG_FREEZE
 void	vm_map_freeze_thaw_init(void);

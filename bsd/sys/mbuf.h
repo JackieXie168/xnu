@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 1999-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -103,17 +103,26 @@
 #define	_MLEN		(MSIZE - sizeof(struct m_hdr))	/* normal data len */
 #define	_MHLEN		(_MLEN - sizeof(struct pkthdr))	/* data len w/pkthdr */
 
-#define	NMBPBGSHIFT	(MBIGCLSHIFT - MSIZESHIFT)
-#define	NMBPBG		(1 << NMBPBGSHIFT)	/* # of mbufs per big cl */
+#define	NMBPGSHIFT	(PAGE_SHIFT - MSIZESHIFT)
+#define	NMBPG		(1 << NMBPGSHIFT)	/* # of mbufs per page */
+
+#define	NCLPGSHIFT	(PAGE_SHIFT - MCLSHIFT)
+#define	NCLPG		(1 << NCLPGSHIFT)	/* # of cl per page */
+
+#define	NBCLPGSHIFT	(PAGE_SHIFT - MBIGCLSHIFT)
+#define NBCLPG		(1 << NBCLPGSHIFT)	/* # of big cl per page */
+
+#define	NMBPCLSHIFT	(MCLSHIFT - MSIZESHIFT)
+#define	NMBPCL		(1 << NMBPCLSHIFT)	/* # of mbufs per cl */
+
+#define	NCLPJCLSHIFT	(M16KCLSHIFT - MCLSHIFT)
+#define	NCLPJCL		(1 << NCLPJCLSHIFT)	/* # of cl per jumbo cl */
 
 #define	NCLPBGSHIFT	(MBIGCLSHIFT - MCLSHIFT)
 #define	NCLPBG		(1 << NCLPBGSHIFT)	/* # of cl per big cl */
 
-#define	NMBPCLSHIFT	(NMBPBGSHIFT - NCLPBGSHIFT)
-#define	NMBPCL		(1 << NMBPCLSHIFT)	/* # of mbufs per cl */
-
-#define	NCLPJCLSHIFT	((M16KCLSHIFT - MBIGCLSHIFT) + NCLPBGSHIFT)
-#define	NCLPJCL		(1 << NCLPJCLSHIFT)	/* # of cl per jumbo cl */
+#define	NMBPBGSHIFT	(MBIGCLSHIFT - MSIZESHIFT)
+#define	NMBPBG		(1 << NMBPBGSHIFT)	/* # of mbufs per big cl */
 
 /*
  * Macros for type conversion
@@ -256,14 +265,6 @@ struct tcp_mtag {
 };
 
 /*
- * IPSec mbuf tag
- */
-struct ipsec_mtag {
-	uint32_t policy_id;
-#define	ipsec_policy	proto_mtag.__pr_u.ipsec.policy_id
-};
-
-/*
  * Protocol specific mbuf tag (at most one protocol metadata per mbuf).
  *
  * Care must be taken to ensure that they are mutually exclusive, e.g.
@@ -274,8 +275,16 @@ struct ipsec_mtag {
 struct proto_mtag {
 	union {
 		struct tcp_mtag	tcp;		/* TCP specific */
-		struct ipsec_mtag ipsec;	/* IPSec specific */
 	} __pr_u;
+};
+
+/*
+ * NECP specific mbuf tag.
+ */
+struct necp_mtag {
+	u_int32_t	necp_policy_id;
+	u_int32_t	necp_last_interface_index;
+	u_int32_t	necp_route_rule_id;
 };
 
 /*
@@ -351,16 +360,20 @@ struct	pkthdr {
 #define	dst_ifindex	_pkt_iaif.dst
 #define	dst_iff		_pkt_iaif.dst_flags
 		u_int64_t pkt_ifainfo;	/* data field used by ifainfo */
+		u_int32_t pkt_unsent_databytes; /* unsent data */
 	};
 #if MEASURE_BW
 	u_int64_t pkt_bwseq;		/* sequence # */
 #endif /* MEASURE_BW */
+	u_int64_t pkt_enqueue_ts;	/* enqueue time */
+
 	/*
 	 * Tags (external and built-in)
 	 */
 	SLIST_HEAD(packet_tags, m_tag) tags; /* list of external tags */
 	struct proto_mtag proto_mtag;	/* built-in protocol-specific tag */
 	struct pf_mtag	pf_mtag;	/* built-in PF tag */
+	struct necp_mtag necp_mtag; /* built-in NECP tag */
 	/*
 	 * Module private scratch space (32-bit aligned), currently 16-bytes
 	 * large.  Anything stored here is not guaranteed to survive across
@@ -433,6 +446,12 @@ struct	pkthdr {
 #define	PKTF_IFAINFO		0x4000	/* pkt has valid interface addr info */
 #define	PKTF_SO_BACKGROUND	0x8000	/* data is from background source */
 #define	PKTF_FORWARDED		0x10000	/* pkt was forwarded from another i/f */
+#define	PKTF_PRIV_GUARDED	0x20000	/* pkt_mpriv area guard enabled */
+#define	PKTF_KEEPALIVE		0x40000	/* pkt is kernel-generated keepalive */
+#define	PKTF_SO_REALTIME	0x80000	/* data is realtime traffic */
+#define	PKTF_VALID_UNSENT_DATA	0x100000 /* unsent data is valid */
+#define	PKTF_TCP_REXMT		0x200000 /* packet is TCP retransmission */
+
 /* flags related to flow control/advisory and identification */
 #define	PKTF_FLOW_MASK	\
 	(PKTF_FLOW_ID | PKTF_FLOW_ADV | PKTF_FLOW_LOCALSRC | PKTF_FLOW_RAWSOCK)
@@ -718,7 +737,8 @@ do {									\
  * If how is M_DONTWAIT and allocation fails, the original mbuf chain
  * is freed and m is set to NULL.
  */
-#define	M_PREPEND(m, plen, how)	((m) = m_prepend_2((m), (plen), (how)))
+#define	M_PREPEND(m, plen, how, align)	\
+    ((m) = m_prepend_2((m), (plen), (how), (align)))
 
 /* change mbuf to new type */
 #define	MCHTYPE(m, t)		m_mchtype(m, t)
@@ -946,6 +966,7 @@ struct omb_class_stat {
 	u_int64_t	mbcl_purge_cnt;	/* # of purges so far */
 	u_int64_t	mbcl_fail_cnt;	/* # of allocation failures */
 	u_int32_t	mbcl_ctotal;	/* total only for this class */
+	u_int32_t	mbcl_release_cnt; /* amount of memory returned */
 	/*
 	 * Cache layer statistics
 	 */
@@ -974,6 +995,7 @@ typedef struct mb_class_stat {
 	u_int64_t	mbcl_purge_cnt;	/* # of purges so far */
 	u_int64_t	mbcl_fail_cnt;	/* # of allocation failures */
 	u_int32_t	mbcl_ctotal;	/* total only for this class */
+	u_int32_t	mbcl_release_cnt; /* amount of memory returned */
 	/*
 	 * Cache layer statistics
 	 */
@@ -982,7 +1004,8 @@ typedef struct mb_class_stat {
 	u_int32_t	mbcl_mc_waiter_cnt;  /* # waiters on the cache */
 	u_int32_t	mbcl_mc_wretry_cnt;  /* # of wait retries */
 	u_int32_t	mbcl_mc_nwretry_cnt; /* # of no-wait retry attempts */
-	u_int64_t	mbcl_reserved[4];    /* for future use */
+	u_int32_t	mbcl_peak_reported; /* last usage peak reported */
+	u_int32_t	mbcl_reserved[7];    /* for future use */
 } mb_class_stat_t;
 
 #define	MCS_DISABLED	0	/* cache is permanently disabled */
@@ -1082,6 +1105,8 @@ struct mbuf;
 #define	M_COPYM_NOOP_HDR	0	/* don't copy/move pkthdr contents */
 #define	M_COPYM_COPY_HDR	1	/* copy pkthdr from old to new */
 #define	M_COPYM_MOVE_HDR	2	/* move pkthdr from old to new */
+#define	M_COPYM_MUST_COPY_HDR	3	/* MUST copy pkthdr from old to new */
+#define	M_COPYM_MUST_MOVE_HDR	4	/* MUST move pkthdr from old to new */
 
 /*
  * These macros are mapped to the appropriate KPIs, so that private code
@@ -1106,7 +1131,7 @@ extern struct mbuf *m_getpacket(void);
 extern struct mbuf *m_getpackets(int, int, int);
 extern struct mbuf *m_mclget(struct mbuf *, int);
 extern void *m_mtod(struct mbuf *);
-extern struct mbuf *m_prepend_2(struct mbuf *, int, int);
+extern struct mbuf *m_prepend_2(struct mbuf *, int, int, int);
 extern struct mbuf *m_pullup(struct mbuf *, int);
 extern struct mbuf *m_split(struct mbuf *, int, int);
 extern void m_mclfree(caddr_t p);
@@ -1172,6 +1197,9 @@ extern void m_mclfree(caddr_t p);
 #define	MBUF_TC2SCVAL(_tc)	((_tc) << 7)
 #define IS_MBUF_SC_BACKGROUND(_sc) (((_sc) == MBUF_SC_BK_SYS) || \
 	((_sc) == MBUF_SC_BK))
+#define	IS_MBUF_SC_REALTIME(_sc)	((_sc) >= MBUF_SC_AV && (_sc) <= MBUF_SC_VO)
+#define IS_MBUF_SC_BESTEFFORT(_sc)	((_sc) == MBUF_SC_BE || \
+    (_sc) == MBUF_SC_RD || (_sc) == MBUF_SC_OAM)
 
 #define	SCIDX_BK_SYS		MBUF_SCIDX(MBUF_SC_BK_SYS)
 #define	SCIDX_BK		MBUF_SCIDX(MBUF_SC_BK)
@@ -1213,8 +1241,8 @@ extern void m_mclfree(caddr_t p);
 	c == SCVAL_RV || c == SCVAL_VI || c == SCVAL_VO ||		\
 	c == SCVAL_CTL)
 
-extern union mbigcluster *mbutl;	/* start VA of mbuf pool */
-extern union mbigcluster *embutl;	/* end VA of mbuf pool */
+extern unsigned char *mbutl;	/* start VA of mbuf pool */
+extern unsigned char *embutl;	/* end VA of mbuf pool */
 extern unsigned int nmbclusters;	/* number of mapped clusters */
 extern int njcl;		/* # of jumbo clusters  */
 extern int njclbytes;	/* size of a jumbo cluster */
@@ -1289,6 +1317,8 @@ __private_extern__ struct mbuf *m_getpackets_internal(unsigned int *, int,
 __private_extern__ struct mbuf *m_allocpacket_internal(unsigned int *, size_t,
     unsigned int *, int, int, size_t);
 
+__private_extern__ void m_drain(void);
+
 /*
  * Packets may have annotations attached by affixing a list of "packet
  * tags" to the pkthdr structure.  Packet tags are dynamically allocated
@@ -1329,7 +1359,7 @@ enum {
 	KERNEL_TAG_TYPE_ENCAP			= 8,
 	KERNEL_TAG_TYPE_INET6			= 9,
 	KERNEL_TAG_TYPE_IPSEC			= 10,
-	KERNEL_TAG_TYPE_DRVAUX			= 11
+	KERNEL_TAG_TYPE_DRVAUX			= 11,
 };
 
 /* Packet tag routines */

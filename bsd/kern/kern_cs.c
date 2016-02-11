@@ -38,6 +38,7 @@
 
 #include <sys/fcntl.h>
 #include <sys/file.h>
+#include <sys/file_internal.h>
 #include <sys/kauth.h>
 #include <sys/mount.h>
 #include <sys/msg.h>
@@ -63,14 +64,14 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 
-#include <sys/kasl.h>
-#include <sys/syslog.h>
 
 #include <kern/assert.h>
 
 #include <pexpert/pexpert.h>
 
 #include <mach/shared_region.h>
+
+#include <libkern/section_keywords.h>
 
 unsigned long cs_procs_killed = 0;
 unsigned long cs_procs_invalidated = 0;
@@ -79,19 +80,29 @@ int cs_force_kill = 0;
 int cs_force_hard = 0;
 int cs_debug = 0;
 #if SECURE_KERNEL
-const int cs_enforcement_enable=1;
-#else
-#if CONFIG_ENFORCE_SIGNED_CODE
-int cs_enforcement_enable=1;
-#else
-int cs_enforcement_enable=0;
-#endif
+const int cs_enforcement_enable = 1;
+const int cs_library_val_enable = 1;
+#else /* !SECURE_KERNEL */
 int cs_enforcement_panic=0;
+
+#if CONFIG_ENFORCE_SIGNED_CODE
+#define DEFAULT_CS_ENFORCEMENT_ENABLE 1
+#else
+#define DEFAULT_CS_ENFORCEMENT_ENABLE 0
 #endif
+SECURITY_READ_ONLY_LATE(int) cs_enforcement_enable = DEFAULT_CS_ENFORCEMENT_ENABLE;
+
+#if CONFIG_ENFORCE_LIBRARY_VALIDATION
+#define DEFAULT_CS_LIBRARY_VA_ENABLE 1
+#else
+#define DEFAULT_CS_LIBRARY_VA_ENABLE 0
+#endif
+SECURITY_READ_ONLY_LATE(int) cs_library_val_enable = DEFAULT_CS_LIBRARY_VA_ENABLE;
+
+#endif /* !SECURE_KERNEL */
 int cs_all_vnodes = 0;
 
 static lck_grp_t *cs_lockgrp;
-static lck_rw_t * SigPUPLock;
 
 SYSCTL_INT(_vm, OID_AUTO, cs_force_kill, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_kill, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_force_hard, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_force_hard, 0, "");
@@ -102,15 +113,19 @@ SYSCTL_INT(_vm, OID_AUTO, cs_all_vnodes, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_all_vn
 #if !SECURE_KERNEL
 SYSCTL_INT(_vm, OID_AUTO, cs_enforcement, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_enforcement_enable, 0, "");
 SYSCTL_INT(_vm, OID_AUTO, cs_enforcement_panic, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_enforcement_panic, 0, "");
+
+#if !CONFIG_ENFORCE_LIBRARY_VALIDATION
+SYSCTL_INT(_vm, OID_AUTO, cs_library_validation, CTLFLAG_RW | CTLFLAG_LOCKED, &cs_library_val_enable, 0, "");
 #endif
+#endif /* !SECURE_KERNEL */
 
 int panic_on_cs_killed = 0;
 void
 cs_init(void)
 {
-#if MACH_ASSERT
+#if MACH_ASSERT && __x86_64__
 	panic_on_cs_killed = 1;
-#endif
+#endif /* MACH_ASSERT && __x86_64__ */
 	PE_parse_boot_argn("panic_on_cs_killed", &panic_on_cs_killed,
 			   sizeof (panic_on_cs_killed));
 #if !SECURE_KERNEL
@@ -126,10 +141,15 @@ cs_init(void)
 	}
 
 	PE_parse_boot_argn("cs_debug", &cs_debug, sizeof (cs_debug));
+
+#if !CONFIG_ENFORCE_LIBRARY_VALIDATION
+	PE_parse_boot_argn("cs_library_val_enable", &cs_library_val_enable,
+			   sizeof (cs_library_val_enable));
 #endif
+#endif /* !SECURE_KERNEL */
+
 	lck_grp_attr_t *attr = lck_grp_attr_alloc_init();
 	cs_lockgrp = lck_grp_alloc_init("KERNCS", attr);
-	SigPUPLock = lck_rw_alloc_init(cs_lockgrp, NULL);
 }
 
 int
@@ -170,11 +190,6 @@ cs_invalid_page(
 	uint32_t	csflags;
 
 	p = current_proc();
-
-	/*
-	 * XXX revisit locking when proc is no longer protected
-	 * by the kernel funnel...
-	 */
 
 	if (verbose)
 		printf("CODE SIGNING: cs_invalid_page(0x%llx): p=%d[%s]\n",
@@ -222,24 +237,12 @@ cs_invalid_page(
 	csflags = p->p_csflags;
 	proc_unlock(p);
 
-	if (verbose) {
-		char pid_str[10];
-		snprintf(pid_str, sizeof(pid_str), "%d", p->p_pid);
-		kern_asl_msg(LOG_NOTICE, "messagetracer",
-			5,
-			"com.apple.message.domain", "com.apple.kernel.cs.invalidate",
-			"com.apple.message.signature", send_kill ? "kill" : retval ? "deny" : "invalidate",
-			"com.apple.message.signature4", pid_str,
-			"com.apple.message.signature3", p->p_comm,
-			"com.apple.message.summarize", "YES",
-			NULL
-		);
+	if (verbose)
 		printf("CODE SIGNING: cs_invalid_page(0x%llx): "
 		       "p=%d[%s] final status 0x%x, %s page%s\n",
 		       vaddr, p->p_pid, p->p_comm, p->p_csflags,
 		       retval ? "denying" : "allowing (remove VALID)",
 		       send_kill ? " sending SIGKILL" : "");
-	}
 
 	if (send_kill)
 		threadsignal(current_thread(), SIGKILL, EXC_BAD_ACCESS);
@@ -268,228 +271,426 @@ cs_enforcement(struct proc *p)
 	return 0;
 }
 
-static struct {
-	struct cscsr_functions *funcs;
-	vm_map_offset_t csr_map_base;
-	vm_map_size_t csr_map_size;
-	int inuse;
-	int disabled;
-} csr_state;
-
-SYSCTL_INT(_vm, OID_AUTO, sigpup_disable, CTLFLAG_RW | CTLFLAG_LOCKED, &csr_state.disabled, 0, "");
-
-static int
-vnsize(vfs_context_t vfs, vnode_t vp, uint64_t *size)
-{
-	struct vnode_attr va;
-	int error;
-
-	VATTR_INIT(&va);
-	VATTR_WANTED(&va, va_data_size);
-
-	error = vnode_getattr(vp, &va, vfs);
-	if (error)
-		return error;
-	*size = va.va_data_size;
-	return 0;
-}
-
+/*
+ * Library validation functions 
+ */
 int
-sigpup_install(user_addr_t argsp)
+cs_require_lv(struct proc *p)
 {
-	struct sigpup_install_table args;
-	memory_object_control_t control;
-	kern_return_t result;
-	vfs_context_t vfs = NULL;
-	struct vnode_attr va;
-	vnode_t vp = NULL;
-        char *buf = NULL;
-	uint64_t size;
-	size_t len = 0;
-	int error = 0;
 	
-	if (!cs_enforcement_enable || csr_state.funcs == NULL)
-		return ENOTSUP;
+	if (cs_library_val_enable)
+		return 1;
 
-	lck_rw_lock_exclusive(SigPUPLock);
+	if (p == NULL)
+		p = current_proc();
+	
+	if (p != NULL && (p->p_csflags & CS_REQUIRE_LV))
+		return 1;
+	
+	return 0;
+}
 
-	if (kauth_cred_issuser(kauth_cred_get()) == 0) {
-		error = EPERM;
-		goto cleanup;
-	}
+/*
+ * Function: csblob_get_platform_binary
+ *
+ * Description: This function returns true if the binary is
+ *		in the trust cache.
+*/
 
-	if (cs_debug > 10)
-		printf("sigpup install\n");
+int
+csblob_get_platform_binary(struct cs_blob *blob)
+{
+    if (blob && blob->csb_platform_binary)
+	return 1;
+    return 0;
+}
 
-	if (csr_state.csr_map_base != 0 || csr_state.inuse) {
-		error = EPERM;
-		goto cleanup;
-	}
+/*
+ * Function: csblob_get_flags
+ *
+ * Description: This function returns the flags for a given blob
+*/
 
-	if (USER_ADDR_NULL == argsp) {
-		error = EINVAL;
-		goto cleanup;
-	}
-	if ((error = copyin(argsp, &args, sizeof(args))) != 0)
-		goto cleanup;
+unsigned int
+csblob_get_flags(struct cs_blob *blob)
+{
+	if (blob)
+		return blob->csb_flags;
+	return 0;
+}
 
-	if (cs_debug > 10)
-		printf("sigpup install with args\n");
+/*
+ * Function: csproc_get_blob
+ *
+ * Description: This function returns the cs_blob
+ *		for the process p
+ */
+struct cs_blob *
+csproc_get_blob(struct proc *p)
+{
+	if (NULL == p)
+		return NULL;
 
-	MALLOC(buf, char *, MAXPATHLEN, M_TEMP, M_WAITOK);
-	if (buf == NULL) {
-		error = ENOMEM;
-		goto cleanup;
-	}
-	if ((error = copyinstr((user_addr_t)args.path, buf, MAXPATHLEN, &len)) != 0)
-		goto cleanup;
+	if (NULL == p->p_textvp)
+		return NULL;
 
-	if ((vfs = vfs_context_create(NULL)) == NULL) {
-		error = ENOMEM;
-		goto cleanup;
-	}
+	return ubc_cs_blob_get(p->p_textvp, -1, p->p_textoff);
+}
 
-	if ((error = vnode_lookup(buf, VNODE_LOOKUP_NOFOLLOW, &vp, vfs)) != 0)
-		goto cleanup;
+/*
+ * Function: csproc_get_blob
+ *
+ * Description: This function returns the cs_blob
+ *		for the vnode vp
+ */
+struct cs_blob *
+csvnode_get_blob(struct vnode *vp, off_t offset)
+{
+	return ubc_cs_blob_get(vp, -1, offset);
+}
 
-	if (cs_debug > 10)
-		printf("sigpup found file: %s\n", buf);
+/*
+ * Function: csblob_get_teamid
+ *
+ * Description: This function returns a pointer to the
+ *		team id of csblob
+*/
+const char *
+csblob_get_teamid(struct cs_blob *csblob)
+{
+	return csblob->csb_teamid;
+}
 
-	/* make sure vnode is on the process's root volume */
-	if (rootvnode->v_mount != vp->v_mount) {
-		if (cs_debug) printf("sigpup csr no on root volume\n");
-		error = EPERM;
-		goto cleanup;
-	}
+/*
+ * Function: csblob_get_identity
+ *
+ * Description: This function returns a pointer to the
+ *		identity string
+ */
+const char *
+csblob_get_identity(struct cs_blob *csblob)
+{
+	const CS_CodeDirectory *cd;
 
-	/* make sure vnode is owned by "root" */
-	VATTR_INIT(&va);
-	VATTR_WANTED(&va, va_uid);
-	error = vnode_getattr(vp, &va, vfs);
-	if (error)
-		goto cleanup;
+	cd = (const CS_CodeDirectory *)csblob_find_blob(csblob, CSSLOT_CODEDIRECTORY, CSMAGIC_CODEDIRECTORY);
+	if (cd == NULL)
+		return NULL;
 
-	if (va.va_uid != 0) {
-		if (cs_debug) printf("sigpup: csr file not owned by root\n");
-		error = EPERM;
-		goto cleanup;
-	}
+	if (cd->identOffset == 0)
+		return NULL;
 
-	error = vnsize(vfs, vp, &size);
-	if (error)
-		goto cleanup;
+	return ((const char *)cd) + ntohl(cd->identOffset);
+}
 
-	control = ubc_getobject(vp, 0);
-	if (control == MEMORY_OBJECT_CONTROL_NULL) {
-		error = EINVAL;
-		goto cleanup;
-	}
+/*
+ * Function: csblob_get_cdhash
+ *
+ * Description: This function returns a pointer to the
+ *		cdhash of csblob (20 byte array)
+ */
+const uint8_t *
+csblob_get_cdhash(struct cs_blob *csblob)
+{
+	return csblob->csb_cdhash;
+}
 
-	csr_state.csr_map_size = mach_vm_round_page(size);
+/*
+ * Function: csproc_get_teamid 
+ *
+ * Description: This function returns a pointer to the
+ *		team id of the process p
+*/
+const char *
+csproc_get_teamid(struct proc *p)
+{
+	struct cs_blob *csblob;
 
-	if (cs_debug > 10)
-		printf("mmap!\n");
+	csblob = csproc_get_blob(p);
+	if (csblob == NULL)
+	    return NULL;
 
-	result = vm_map_enter_mem_object_control(kernel_map,
-						 &csr_state.csr_map_base,
-						 csr_state.csr_map_size,
-						 0, VM_FLAGS_ANYWHERE,
-						 control, 0 /* file offset */,
-						 0 /* cow */,
-						 VM_PROT_READ,
-						 VM_PROT_READ, 
-						 VM_INHERIT_DEFAULT);
-	if (result != KERN_SUCCESS) {
-		error = EINVAL;
-		goto cleanup;
-	}
+	return csblob_get_teamid(csblob);
+}
 
-	error = csr_state.funcs->csr_validate_header((const uint8_t *)csr_state.csr_map_base,
-	    csr_state.csr_map_size);
-	if (error) {
-		if (cs_debug > 10)
-			printf("sigpup header invalid, dropping mapping");
-		sigpup_drop();
-		goto cleanup;
-	}
+/*
+ * Function: csvnode_get_teamid 
+ *
+ * Description: This function returns a pointer to the
+ *		team id of the binary at the given offset in vnode vp
+*/
+const char *
+csvnode_get_teamid(struct vnode *vp, off_t offset)
+{
+	struct cs_blob *csblob;
 
-	if (cs_debug > 10)
-		printf("table loaded %ld bytes\n", (long)csr_state.csr_map_size);
+	if (vp == NULL)
+		return NULL;
 
-cleanup:
-	lck_rw_unlock_exclusive(SigPUPLock);
+	csblob = ubc_cs_blob_get(vp, -1, offset);
+	if (csblob == NULL)
+	    return NULL;
 
-        if (buf)
-                FREE(buf, M_TEMP);
-	if (vp)
-		(void)vnode_put(vp);
-	if (vfs)
-		(void)vfs_context_rele(vfs);
-        
-	if (error)
-		printf("sigpup: load failed with error: %d\n", error);
+	return csblob_get_teamid(csblob);
+}
 
+/*
+ * Function: csproc_get_platform_binary
+ *
+ * Description: This function returns the value
+ *		of the platform_binary field for proc p
+ */
+int
+csproc_get_platform_binary(struct proc *p)
+{
+	struct cs_blob *csblob;
 
-	return error;
+	csblob = csproc_get_blob(p);
+
+	/* If there is no csblob this returns 0 because
+	   it is true that it is not a platform binary */
+	return (csblob == NULL) ? 0 : csblob->csb_platform_binary;
 }
 
 int
-sigpup_drop(void)
+csproc_get_platform_path(struct proc *p)
 {
+	struct cs_blob *csblob = csproc_get_blob(p);
 
-	if (kauth_cred_issuser(kauth_cred_get()) == 0)
-		return EPERM;
+	return (csblob == NULL) ? 0 : csblob->csb_platform_path;
+}
 
-	lck_rw_lock_exclusive(SigPUPLock);
+/*
+ * Function: csfg_get_platform_binary
+ *
+ * Description: This function returns the 
+ *		platform binary field for the 
+ * 		fileglob fg
+ */
+int 
+csfg_get_platform_binary(struct fileglob *fg)
+{
+	int platform_binary = 0;
+	struct ubc_info *uip;
+	vnode_t vp;
 
-	if (csr_state.csr_map_base == 0 || csr_state.inuse) {
-		printf("failed to unload the sigpup database\n");
-		lck_rw_unlock_exclusive(SigPUPLock);
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE)
+		return 0;
+	
+	vp = (struct vnode *)fg->fg_data;
+	if (vp == NULL)
+		return 0;
+
+	vnode_lock(vp);
+	if (!UBCINFOEXISTS(vp))
+		goto out;
+	
+	uip = vp->v_ubcinfo;
+	if (uip == NULL)
+		goto out;
+	
+	if (uip->cs_blobs == NULL)
+		goto out;
+
+	/* It is OK to extract the teamid from the first blob
+	   because all blobs of a vnode must have the same teamid */	
+	platform_binary = uip->cs_blobs->csb_platform_binary;
+out:
+	vnode_unlock(vp);
+
+	return platform_binary;
+}
+
+uint8_t *
+csfg_get_cdhash(struct fileglob *fg, uint64_t offset, size_t *cdhash_size)
+{
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE)
+		return NULL;
+
+	vp = (struct vnode *)fg->fg_data;
+	if (vp == NULL)
+		return NULL;
+
+	struct cs_blob *csblob = NULL;
+	if ((csblob = ubc_cs_blob_get(vp, -1, offset)) == NULL) 
+		return NULL;
+
+	if (cdhash_size)
+		*cdhash_size = CS_CDHASH_LEN;
+
+	return csblob->csb_cdhash;
+}
+
+/*
+ * Function: csfg_get_teamid
+ *
+ * Description: This returns a pointer to
+ * 		the teamid for the fileglob fg
+ */
+const char *
+csfg_get_teamid(struct fileglob *fg)
+{
+	struct ubc_info *uip;
+	const char *str = NULL;
+	vnode_t vp;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE)
+		return NULL;
+	
+	vp = (struct vnode *)fg->fg_data;
+	if (vp == NULL)
+		return NULL;
+
+	vnode_lock(vp);
+	if (!UBCINFOEXISTS(vp))
+		goto out;
+	
+	uip = vp->v_ubcinfo;
+	if (uip == NULL)
+		goto out;
+	
+	if (uip->cs_blobs == NULL)
+		goto out;
+
+	/* It is OK to extract the teamid from the first blob
+	   because all blobs of a vnode must have the same teamid */	
+	str = uip->cs_blobs->csb_teamid;
+out:
+	vnode_unlock(vp);
+
+	return str;
+}
+
+uint32_t
+cs_entitlement_flags(struct proc *p)
+{
+	return (p->p_csflags & CS_ENTITLEMENT_FLAGS);
+}
+
+int
+cs_restricted(struct proc *p)
+{
+	return (p->p_csflags & CS_RESTRICT) ? 1 : 0;
+}
+
+/*
+ * Function: csfg_get_path
+ *
+ * Description: This populates the buffer passed in
+ *		with the path of the vnode
+ *		When calling this, the fileglob
+ *		cannot go away. The caller must have a
+ *		a reference on the fileglob or fileproc
+ */
+int
+csfg_get_path(struct fileglob *fg, char *path, int *len)
+{
+	vnode_t vp = NULL;
+
+	if (FILEGLOB_DTYPE(fg) != DTYPE_VNODE)
+		return -1;
+	
+	vp = (struct vnode *)fg->fg_data;
+
+	/* vn_getpath returns 0 for success,
+	   or an error code */
+	return vn_getpath(vp, path, len);
+}
+
+/* Retrieve the entitlements blob for a process.
+ * Returns:
+ *   EINVAL	no text vnode associated with the process
+ *   EBADEXEC   invalid code signing data
+ *   0		no error occurred
+ *
+ * On success, out_start and out_length will point to the
+ * entitlements blob if found; or will be set to NULL/zero
+ * if there were no entitlements.
+ */
+
+int
+cs_entitlements_blob_get(proc_t p, void **out_start, size_t *out_length)
+{
+	struct cs_blob *csblob;
+
+	*out_start = NULL;
+	*out_length = 0;
+
+	if (NULL == p->p_textvp)
 		return EINVAL;
-	}
 
-	if (cs_debug > 10)
-		printf("sigpup: unloading\n");
+	if ((csblob = ubc_cs_blob_get(p->p_textvp, -1, p->p_textoff)) == NULL)
+		return 0;
 
-	(void)mach_vm_deallocate(kernel_map,
-	    csr_state.csr_map_base, csr_state.csr_map_size);
+	return csblob_get_entitlements(csblob, out_start, out_length);
+}
 
-	csr_state.csr_map_base = 0;
-	csr_state.csr_map_size = 0;
+/* Retrieve the codesign identity for a process.
+ * Returns:
+ *   NULL	an error occured
+ *   string	the cs_identity
+ */
 
-	lck_rw_unlock_exclusive(SigPUPLock);
+const char *
+cs_identity_get(proc_t p)
+{
+	struct cs_blob *csblob;
+
+	if (NULL == p->p_textvp)
+		return NULL;
+
+	if ((csblob = ubc_cs_blob_get(p->p_textvp, -1, p->p_textoff)) == NULL)
+		return NULL;
+
+	return csblob_get_identity(csblob);
+}
+
+
+/* Retrieve the codesign blob for a process.
+ * Returns:
+ *   EINVAL	no text vnode associated with the process
+ *   0		no error occurred
+ *
+ * On success, out_start and out_length will point to the
+ * cms blob if found; or will be set to NULL/zero
+ * if there were no blob.
+ */
+
+int
+cs_blob_get(proc_t p, void **out_start, size_t *out_length)
+{
+	struct cs_blob *csblob;
+
+	*out_start = NULL;
+	*out_length = 0;
+
+	if (NULL == p->p_textvp)
+		return EINVAL;
+
+	if ((csblob = ubc_cs_blob_get(p->p_textvp, -1, p->p_textoff)) == NULL)
+		return 0;
+
+	*out_start = (void *)csblob->csb_mem_kaddr;
+	*out_length = csblob->csb_mem_size;
 
 	return 0;
 }
 
-void	sigpup_attach_vnode(vnode_t); /* XXX */
+/*
+ * return cshash of a process, cdhash is of size CS_CDHASH_LEN
+ */
 
-void
-sigpup_attach_vnode(vnode_t vp)
+uint8_t *
+cs_get_cdhash(struct proc *p)
 {
-	const void *csblob;
-	size_t cslen;
+	struct cs_blob *csblob;
 
-	if (!cs_enforcement_enable || csr_state.funcs == NULL || csr_state.csr_map_base == 0 || csr_state.disabled)
-		return;
+	if (NULL == p->p_textvp)
+		return NULL;
 
-	/* if the file is not on the root volumes or already been check, skip */
-	if (vp->v_mount != rootvnode->v_mount || (vp->v_flag & VNOCS))
-		return;
+	if ((csblob = ubc_cs_blob_get(p->p_textvp, -1, p->p_textoff)) == NULL)
+		return NULL;
 
-	csblob = csr_state.funcs->csr_find_file_codedirectory(vp, (const uint8_t *)csr_state.csr_map_base,
-	    (size_t)csr_state.csr_map_size, &cslen);
-	if (csblob) {
-		ubc_cs_sigpup_add(vp, (vm_address_t)csblob, (vm_size_t)cslen);
-		csr_state.inuse = 1;
-	}
-	vp->v_flag |= VNOCS;
-}
-
-void
-cs_register_cscsr(struct cscsr_functions *funcs)
-{
-	if (csr_state.funcs || funcs->csr_version < CSCSR_VERSION)
-		return;
-	csr_state.funcs = funcs;
+	return csblob->csb_cdhash;
 }

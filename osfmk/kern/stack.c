@@ -75,10 +75,10 @@ static unsigned int		stack_new_count;						/* total new stack allocations */
 
 static vm_offset_t		stack_addr_mask;
 
-unsigned int			kernel_stack_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
-vm_offset_t			kernel_stack_size = KERNEL_STACK_SIZE;
-vm_offset_t			kernel_stack_mask = -KERNEL_STACK_SIZE;
-vm_offset_t			kernel_stack_depth_max = 0;
+unsigned int			kernel_stack_pages;
+vm_offset_t			kernel_stack_size;
+vm_offset_t			kernel_stack_mask;
+vm_offset_t			kernel_stack_depth_max;
 
 static inline void
 STACK_ZINFO_PALLOC(thread_t thread)
@@ -158,6 +158,11 @@ stack_init(void)
 {
 	simple_lock_init(&stack_lock_data, 0);
 	
+	kernel_stack_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
+	kernel_stack_size = KERNEL_STACK_SIZE;
+	kernel_stack_mask = -KERNEL_STACK_SIZE;
+	kernel_stack_depth_max = 0;
+
 	if (PE_parse_boot_argn("kernel_stack_pages",
 			       &kernel_stack_pages,
 			       sizeof (kernel_stack_pages))) {
@@ -217,7 +222,8 @@ stack_alloc_internal(void)
 		if (kernel_memory_allocate(kernel_map, &stack,
 					   kernel_stack_size + (2*PAGE_SIZE),
 					   stack_addr_mask,
-					   KMA_KSTACK | KMA_KOBJECT | guard_flags)
+					   KMA_KSTACK | KMA_KOBJECT | guard_flags,
+					   VM_KERN_MEMORY_STACK)
 		    != KERN_SUCCESS)
 			panic("stack_alloc: kernel_memory_allocate");
 

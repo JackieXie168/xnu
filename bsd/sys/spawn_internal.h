@@ -41,11 +41,13 @@
 #define	_SYS_SPAWN_INTERNAL_H_
 
 #include <sys/_types.h>		/* __offsetof(), __darwin_size_t */
+#include <sys/param.h>
 #include <sys/syslimits.h>	/* PATH_MAX */
 #include <sys/spawn.h>
 #include <mach/machine.h>
 #include <mach/port.h>
 #include <mach/exception_types.h>
+#include <mach/coalition.h>	/* COALITION_NUM_TYPES */
 
 /*
  * Allowable posix_spawn() port action types
@@ -117,6 +119,17 @@ typedef struct _posix_spawn_mac_policy_extensions {
 
 #define PS_MAC_EXTENSIONS_INIT_COUNT	2
 
+/*
+ * Coalition posix spawn attributes
+ */
+struct _posix_spawn_coalition_info {
+	struct {
+		uint64_t psci_id;
+		uint32_t psci_role;
+		uint32_t psci_reserved1;
+		uint64_t psci_reserved2;
+	} psci_info[COALITION_NUM_TYPES];
+};
 
 /*
  * A posix_spawnattr structure contains all of the attribute elements that
@@ -124,6 +137,7 @@ typedef struct _posix_spawn_mac_policy_extensions {
  * presence of a bit in the flags field.  All fields are initialized to the
  * appropriate default values by posix_spawnattr_init().
  */
+
 typedef struct _posix_spawnattr {
 	short		psa_flags;		/* spawn attribute flags */
 	short 		flags_padding; 	/* get the flags to be int aligned */
@@ -135,32 +149,43 @@ typedef struct _posix_spawnattr {
 	int		psa_apptype;		/* app type and process spec behav */
 	uint64_t 	psa_cpumonitor_percent; /* CPU usage monitor percentage */
 	uint64_t 	psa_cpumonitor_interval; /* CPU usage monitor interval, in seconds */
-	/* 
-	 * TODO: cleanup - see <rdar://problem/12858307>. psa_ports is a pointer,
-	 * meaning that the fields following differ in alignment between 32 and 
-	 * 64-bit architectures. All pointers (existing and new) should therefore
-	 * be placed at the end; changing this now, however, would currently break 
-	 * some legacy dependencies. The radar will be used to track resolution when
-	 * appropriate.
-	 */
+	uint64_t	psa_reserved;
 
-	short       psa_jetsam_flags; /* jetsam flags */
-	short		short_padding;  /* Padding for alignment issues */
-	int         psa_priority;   /* jetsam relative importance */
-	int         psa_high_water_mark; /* jetsam resident page count limit */
-	int 		int_padding;	/* Padding for alignment issues */
-	/* MAC policy-specific extensions. */
+	short       psa_jetsam_flags;		/* jetsam flags */
+	short		short_padding;		/* Padding for alignment issues */
+	int         psa_priority;		/* jetsam relative importance */
+	int         psa_memlimit_active;	/* jetsam memory limit (in MB) when process is active */
+	int         psa_memlimit_inactive;	/* jetsam memory limit (in MB) when process is inactive */
+
+	uint64_t        psa_qos_clamp;          /* QoS Clamp to set on the new process */
+	uint64_t        psa_darwin_role;           /* PRIO_DARWIN_ROLE to set on the new process */
+
+	/*
+	 * NOTE: Extensions array pointers must stay at the end so that
+	 * everything above this point stays the same size on different bitnesses
+	 * see <rdar://problem/12858307>
+	 */
 	 _posix_spawn_port_actions_t	psa_ports; /* special/exception ports */
-	_posix_spawn_mac_policy_extensions_t psa_mac_extensions;
+	_posix_spawn_mac_policy_extensions_t psa_mac_extensions; /* MAC policy-specific extensions. */
+	struct _posix_spawn_coalition_info *psa_coalition_info;  /* coalition info */
+	void		*reserved;
 } *_posix_spawnattr_t;
 
 /*
- * Jetsam flags
+ * Jetsam flags  eg: psa_jetsam_flags
  */
 #define	POSIX_SPAWN_JETSAM_SET                      0x8000
 
-#define	POSIX_SPAWN_JETSAM_USE_EFFECTIVE_PRIORITY   0x1
-#define	POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND       0x2
+#define	POSIX_SPAWN_JETSAM_USE_EFFECTIVE_PRIORITY	0x01
+#define	POSIX_SPAWN_JETSAM_HIWATER_BACKGROUND		0x02
+#define	POSIX_SPAWN_JETSAM_MEMLIMIT_FATAL		0x04  /* to be deprecated */
+
+/*
+ * Additional flags available for use with
+ * the posix_spawnattr_setjetsam_ext() call
+ */
+#define	POSIX_SPAWN_JETSAM_MEMLIMIT_ACTIVE_FATAL	0x04  /* if set, limit is fatal when the process is active   */
+#define	POSIX_SPAWN_JETSAM_MEMLIMIT_INACTIVE_FATAL	0x08  /* if set, limit is fatal when the process is inactive */
 
 /*
  * Deprecated posix_spawn psa_flags values
@@ -207,6 +232,16 @@ typedef struct _posix_spawnattr {
 #define POSIX_SPAWN_PROC_TYPE_DAEMON_INTERACTIVE    0x00000400
 #define POSIX_SPAWN_PROC_TYPE_DAEMON_BACKGROUND     0x00000500
 #define POSIX_SPAWN_PROC_TYPE_DAEMON_ADAPTIVE       0x00000600
+
+#define POSIX_SPAWN_PROC_CLAMP_NONE                 0x00000000
+#define POSIX_SPAWN_PROC_CLAMP_UTILITY              0x00000001
+#define POSIX_SPAWN_PROC_CLAMP_BACKGROUND           0x00000002
+#define POSIX_SPAWN_PROC_CLAMP_MAINTENANCE          0x00000003
+#define POSIX_SPAWN_PROC_CLAMP_LAST                 0x00000004
+
+/* Setting to indicate no change to darwin role */
+#define POSIX_SPAWN_DARWIN_ROLE_NONE                0x00000000
+/* Other possible values are specified by PRIO_DARWIN_ROLE in sys/resource.h */
 
 /*
  * Allowable posix_spawn() file actions
@@ -301,7 +336,11 @@ struct _posix_spawn_args_desc {
 	_posix_spawn_mac_policy_extensions_t
 				mac_extensions;	/* pointer to policy-specific
 						 * attributes */
+	__darwin_size_t coal_info_size;
+	struct _posix_spawn_coalition_info *coal_info;	/* pointer to coalition info */
 
+	__darwin_size_t reserved_size;
+	void *reserved;
 };
 
 #ifdef KERNEL
@@ -321,6 +360,10 @@ struct user32__posix_spawn_args_desc {
 	uint32_t		port_actions;	/* pointer to block */
 	uint32_t	mac_extensions_size;
 	uint32_t	mac_extensions;
+	uint32_t	coal_info_size;
+	uint32_t	coal_info;
+	uint32_t	reserved_size;
+	uint32_t	reserved;
 };
 
 struct user__posix_spawn_args_desc {
@@ -332,6 +375,10 @@ struct user__posix_spawn_args_desc {
 	user_addr_t		port_actions;	/* pointer to block */
 	user_size_t	mac_extensions_size;	/* size of MAC-specific attrs. */
 	user_addr_t	mac_extensions;		/* pointer to block */
+	user_size_t	coal_info_size;
+	user_addr_t	coal_info;
+	user_size_t	reserved_size;
+	user_addr_t	reserved;
 };
 
 

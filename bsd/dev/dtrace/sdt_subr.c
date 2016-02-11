@@ -172,14 +172,14 @@ sdt_argdesc_t sdt_args[] = {
 	{ "io", "wait-done", 0, 0, "struct buf *", "bufinfo_t *" },
 	{ "io", "wait-done", 1, 0, "struct buf *", "devinfo_t *" },
 	{ "io", "wait-done", 2, 0, "struct buf *", "fileinfo_t *" },
-#if defined(__APPLE__)
+
+	/* APPLE NOTE: add vfs journaling support */
 	{ "io", "journal-start", 0, 0, "struct buf *", "bufinfo_t *" },
 	{ "io", "journal-start", 1, 0, "struct buf *", "devinfo_t *" },
 	{ "io", "journal-start", 2, 0, "struct buf *", "fileinfo_t *" },
 	{ "io", "journal-done", 0, 0, "struct buf *", "bufinfo_t *" },
 	{ "io", "journal-done", 1, 0, "struct buf *", "devinfo_t *" },
 	{ "io", "journal-done", 2, 0, "struct buf *", "fileinfo_t *" },
-#endif /* __APPLE__ */
 
 	{ "mib", NULL, 0, 0, "int", NULL },
 
@@ -948,15 +948,15 @@ sdt_argdesc_t sdt_args[] = {
 	{ "mptcp", "timer", 1, 1, "struct mptcb *", "mptsinfo_t *" },
 	{ "mptcp", "error", 0, 0, "struct mptcb *", "mptsinfo_t *" },
 	{ "mptcp", "connectx", 0, 0, "struct mptses *", "mptsesinfo_t *" },
-	{ "mptcp", "connectx", 1, 1, "associd_t", "associd_t" },
+	{ "mptcp", "connectx", 1, 1, "sae_associd_t", "sae_associd_t" },
 	{ "mptcp", "connectx", 2, 2, "struct socket *", "socketinfo_t *" },
 	{ "mptcp", "disconnectx", 0, 0, "struct mptses *", "mptsesinfo_t *" },
-	{ "mptcp", "disconnectx", 1, 1, "associd_t", "associd_t" },
-	{ "mptcp", "disconnectx", 2, 2, "connid_t", "connid_t" },
+	{ "mptcp", "disconnectx", 1, 1, "sae_associd_t", "sae_associd_t" },
+	{ "mptcp", "disconnectx", 2, 2, "sae_connid_t", "sae_connid_t" },
 	{ "mptcp", "disconnectx", 3, 3, "struct socket *", "sockinfo_t *" },
 	{ "mptcp", "disconnectx", 4, 4, "struct mptcb *", "mptsinfo_t *" },
 	{ "mptcp", "peeloff", 0, 0, "struct mptses *", "mptsesinfo_t *" },
-	{ "mptcp", "peeloff", 1, 1, "associd_t", "associd_t" },
+	{ "mptcp", "peeloff", 1, 1, "sae_associd_t", "sae_associd_t" },
 	{ "mptcp", "peeloff", 2, 2, "struct socket *", "sockinfo_t *" },
 	{ NULL, NULL, 0, 0, NULL, NULL }
 };

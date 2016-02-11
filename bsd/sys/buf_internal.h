@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -79,6 +79,10 @@
 #include <sys/buf.h>
 #include <sys/lock.h>
 
+#if CONFIG_PROTECT
+#include <sys/cprotect.h>
+#endif
+
 #define NOLIST ((struct buf *)0x87654321)
 
 /*
@@ -86,8 +90,8 @@
  */
 struct bufattr {
 #if CONFIG_PROTECT
-	struct cprotect *ba_cpentry;	/* address of cp_entry */
-	uint64_t ba_cp_file_off;	/* rounded file offset. See buf_setcpoff() for more comments */
+	struct cpx *ba_cpx;
+	uint64_t ba_cp_file_off;
 #endif
 	uint64_t ba_flags;	/* flags. Some are only in-use on embedded devices */
 };
@@ -256,13 +260,26 @@ extern vm_offset_t buf_kernel_addrperm;
 #define BA_DELAYIDLESLEEP       0x00000004	/* Process is marked to delay idle sleep on disk IO */
 #define BA_NOCACHE		0x00000008
 #define BA_META			0x00000010
-#define BA_IO_TIER_MASK		0x00000f00
-#define BA_IO_TIER_SHIFT	8
 #define BA_GREEDY_MODE		0x00000020	/* High speed writes that consume more storage */
 #define BA_QUICK_COMPLETE	0x00000040	/* Request quick completion at expense of storage efficiency */
+#define BA_PASSIVE 		0x00000080
+
+/*
+ * Note: IO_TIERs consume 0x0100, 0x0200, 0x0400, 0x0800
+ * These are now in-use by the I/O tiering system.
+ */ 
+#define BA_IO_TIER_MASK		0x00000f00
+#define BA_IO_TIER_SHIFT	8
+
+#define BA_ISOCHRONOUS  	0x00001000 /* device specific isochronous throughput to media */
+
 
 #define GET_BUFATTR_IO_TIER(bap)	((bap->ba_flags & BA_IO_TIER_MASK) >> BA_IO_TIER_SHIFT)
-#define SET_BUFATTR_IO_TIER(bap, tier)	(bap->ba_flags |= ((tier << BA_IO_TIER_SHIFT) & BA_IO_TIER_MASK))
+#define SET_BUFATTR_IO_TIER(bap, tier)						\
+do {										\
+	(bap)->ba_flags &= (~BA_IO_TIER_MASK); 					\
+	(bap)->ba_flags |= (((tier) << BA_IO_TIER_SHIFT) & BA_IO_TIER_MASK);	\
+} while(0)
 
 extern int niobuf_headers;		/* The number of IO buffer headers for cluster IO */
 extern int nbuf_headers;		/* The number of buffer headers */
@@ -320,7 +337,6 @@ errno_t	buf_make_private(buf_t bp);
 #endif
 
 #ifdef CONFIG_PROTECT
-void buf_setcpaddr(buf_t, struct cprotect *);
 void buf_setcpoff (buf_t, uint64_t);
 #endif
 

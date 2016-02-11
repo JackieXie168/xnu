@@ -129,7 +129,7 @@ static struct protosw inetsw[] = {
 	.pr_type =		SOCK_DGRAM,
 	.pr_protocol =		IPPROTO_UDP,
 	.pr_flags =		PR_ATOMIC|PR_ADDR|PR_PROTOLOCK|PR_PCBLOCK|
-				PR_EVCONNINFO,
+				PR_EVCONNINFO|PR_PRECONN_WRITE,
 	.pr_input =		udp_input,
 	.pr_ctlinput =		udp_ctlinput,
 	.pr_ctloutput =		udp_ctloutput,
@@ -143,7 +143,8 @@ static struct protosw inetsw[] = {
 	.pr_type =		SOCK_STREAM,
 	.pr_protocol =		IPPROTO_TCP,
 	.pr_flags =		PR_CONNREQUIRED|PR_WANTRCVD|PR_PCBLOCK|
-				PR_PROTOLOCK|PR_DISPOSE|PR_EVCONNINFO,
+				PR_PROTOLOCK|PR_DISPOSE|PR_EVCONNINFO|
+				PR_PRECONN_WRITE|PR_DATA_IDEMPOTENT,
 	.pr_input =		tcp_input,
 	.pr_ctlinput =		tcp_ctlinput,
 	.pr_ctloutput =		tcp_ctloutput,
@@ -192,17 +193,6 @@ static struct protosw inetsw[] = {
 	.pr_usrreqs =		&rip_usrreqs,
 	.pr_unlock =		rip_unlock,
 },
-#if MROUTING
-{
-	.pr_type =		SOCK_RAW,
-	.pr_protocol =		IPPROTO_RSVP,
-	.pr_flags =		PR_ATOMIC|PR_ADDR|PR_LASTHDR,
-	.pr_input =		rsvp_input,
-	.pr_ctloutput =		rip_ctloutput,
-	.pr_usrreqs =		&rip_usrreqs,
-	.pr_unlock =		rip_unlock,
-},
-#endif /* MROUTING */
 {
 	.pr_type =		SOCK_RAW,
 	.pr_protocol =		IPPROTO_GRE,
@@ -336,15 +326,15 @@ static void
 ip_proto_input(protocol_family_t protocol, mbuf_t packet_list)
 {
 #pragma unused(protocol)
-	mbuf_t	packet;
-	int how_many = 0 ;
 
-	/* ip_input should handle a list of packets but does not yet */
-	for (packet = packet_list; packet; packet = packet_list) {
-		how_many++;
-		packet_list = mbuf_nextpkt(packet);
-		mbuf_setnextpkt(packet, NULL);
-		ip_input(packet);
+	if (packet_list->m_nextpkt != NULL) {
+		ip_input_process_list(packet_list);
+	} else {
+		/*
+		 * XXX remove this path if ip_input_process_list is proven
+		 * to be stable and has minimum overhead on most platforms.
+		 */
+		ip_input(packet_list);
 	}
 }
 

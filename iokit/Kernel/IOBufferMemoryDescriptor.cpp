@@ -84,7 +84,7 @@ static uintptr_t IOBMDPageProc(iopa_t * a)
     int           options = 0; // KMA_LOMEM;
 
     kr = kernel_memory_allocate(kernel_map, &vmaddr,
-				page_size, 0, options);
+				page_size, 0, options, VM_KERN_MEMORY_IOKIT);
 
     if (KERN_SUCCESS != kr) vmaddr = 0;
     else 		    bzero((void *) vmaddr, page_size);
@@ -113,7 +113,6 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 				mach_vm_address_t alignment,
 				mach_vm_address_t physicalMask)
 {
-    kern_return_t 	  kr;
     task_t		  mapTask = NULL;
     vm_map_t 		  vmmap = NULL;
     mach_vm_address_t     highestMask = 0;
@@ -122,8 +121,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     bool                  mapped = false;
     bool                  needZero;
 
-    if (!capacity)
-        return false;
+    if (!capacity) return false;
 
     _options   	      = options;
     _capacity         = capacity;
@@ -147,7 +145,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 	IOMapper::checkForSystemMapper();
 	mapped = (0 != IOMapper::gSystem);
     }
-    needZero = mapped;
+    needZero = (mapped || (0 != (kIOMemorySharingTypeMask & options)));
 
     if (physicalMask && (alignment <= 1))
     {
@@ -169,6 +167,8 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 
     _alignment = alignment;
 
+    if ((capacity + alignment) < _capacity) return (false);
+
     if ((inTask != kernel_task) && !(options & kIOMemoryPageable))
 	return false;
 
@@ -184,53 +184,15 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 	highestMask = 0;
     }
 
-    // set flags for entry + object create
-    vm_prot_t memEntryCacheMode = VM_PROT_READ | VM_PROT_WRITE;
-
-    // set memory entry cache mode
-    switch (options & kIOMapCacheMask)
-    {
-	case kIOMapInhibitCache:
-	    SET_MAP_MEM(MAP_MEM_IO, memEntryCacheMode);
-	    break;
-
-	case kIOMapWriteThruCache:
-	    SET_MAP_MEM(MAP_MEM_WTHRU, memEntryCacheMode);
-	    break;
-
-	case kIOMapWriteCombineCache:
-	    SET_MAP_MEM(MAP_MEM_WCOMB, memEntryCacheMode);
-	    break;
-
-	case kIOMapCopybackCache:
-	    SET_MAP_MEM(MAP_MEM_COPYBACK, memEntryCacheMode);
-	    break;
-
-	case kIOMapCopybackInnerCache:
-	    SET_MAP_MEM(MAP_MEM_INNERWBACK, memEntryCacheMode);
-	    break;
-
-	case kIOMapDefaultCache:
-	default:
-	    SET_MAP_MEM(MAP_MEM_NOOP, memEntryCacheMode);
-	    break;
-    }
-
+    // set memory entry cache mode, pageable, purgeable
+    iomdOptions |= ((options & kIOMapCacheMask) >> kIOMapCacheShift) << kIOMemoryBufferCacheShift;
     if (options & kIOMemoryPageable)
     {
 	iomdOptions |= kIOMemoryBufferPageable;
-
-	// must create the entry before any pages are allocated
-
-	// set flags for entry + object create
-	memEntryCacheMode |= MAP_MEM_NAMED_CREATE;
-
-	if (options & kIOMemoryPurgeable)
-	    memEntryCacheMode |= MAP_MEM_PURGABLE;
+	if (options & kIOMemoryPurgeable) iomdOptions |= kIOMemoryBufferPurgeable;
     }
     else
     {
-	memEntryCacheMode |= MAP_MEM_NAMED_REUSE;
 	vmmap = kernel_map;
 
 	// Buffer shouldn't auto prepare they should be prepared explicitly
@@ -263,7 +225,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
             				capacity, highestMask, alignment, contig);
 	}
 	else if (needZero
-		  && ((capacity + alignment) <= (page_size - kIOPageAllocChunkBytes)))
+		  && ((capacity + alignment) <= (page_size - gIOPageAllocChunkBytes)))
 	{
             _internalFlags |= kInternalFlagPageAllocated;
             needZero        = false;
@@ -272,7 +234,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 	    {
 		IOStatisticsAlloc(kIOStatisticsMallocAligned, capacity);
 #if IOALLOCDEBUG
-		debug_iomalloc_size += capacity;
+		OSAddAtomic(capacity, &debug_iomalloc_size);
 #endif
 	    }
 	}
@@ -292,26 +254,14 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
     }
 
     if( (options & (kIOMemoryPageable | kIOMapCacheMask))) {
-	ipc_port_t	sharedMem;
 	vm_size_t	size = round_page(capacity);
 
-	kr = mach_make_memory_entry(vmmap,
-				    &size, (vm_offset_t)_buffer,
-				    memEntryCacheMode, &sharedMem,
-				    NULL );
-
-	if( (KERN_SUCCESS == kr) && (size != round_page(capacity))) {
-	    ipc_port_release_send( sharedMem );
-	    kr = kIOReturnVMError;
-	}
-	if( KERN_SUCCESS != kr)
-	    return( false );
-
-	_memEntry = (void *) sharedMem;
+	// initWithOptions will create memory entry
+	iomdOptions |= kIOMemoryPersistent;
 
 	if( options & kIOMemoryPageable) {
 #if IOALLOCDEBUG
-	    debug_iomallocpageable_size += size;
+	    OSAddAtomicLong(size, &debug_iomallocpageable_size);
 #endif
 	    mapTask = inTask;
 	    if (NULL == inTask)
@@ -352,7 +302,7 @@ bool IOBufferMemoryDescriptor::initWithPhysicalMask(
 		return( false );
 	}
 	reserved->map = createMappingInTask(mapTask, 0, 
-			    kIOMapAnywhere | (options & kIOMapCacheMask), 0, 0);
+			    kIOMapAnywhere | (options & kIOMapPrefault) | (options & kIOMapCacheMask), 0, 0);
 	if (!reserved->map)
 	{
 	    _buffer = 0;
@@ -544,7 +494,7 @@ void IOBufferMemoryDescriptor::free()
     if (options & kIOMemoryPageable)
     {
 #if IOALLOCDEBUG
-	debug_iomallocpageable_size -= round_page(size);
+	OSAddAtomicLong(-(round_page(size)), &debug_iomallocpageable_size);
 #endif
     }
     else if (buffer)
@@ -564,7 +514,7 @@ void IOBufferMemoryDescriptor::free()
 		kmem_free(kernel_map, page, page_size);
 	    }
 #if IOALLOCDEBUG
-	    debug_iomalloc_size -= size;
+		OSAddAtomic(-size, &debug_iomalloc_size);
 #endif
 	    IOStatisticsAlloc(kIOStatisticsFreeAligned, size);
 	}

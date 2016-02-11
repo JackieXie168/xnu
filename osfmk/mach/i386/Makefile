@@ -13,9 +13,14 @@ DATAFILES = \
 	processor_info.h kern_return.h ndr_def.h syscall_sw.h \
 	thread_status.h thread_state.h vm_param.h \
 	vm_types.h rpc.h \
-	machine_types.defs  _structs.h sdt_isa.h
+	_structs.h sdt_isa.h
+
+PRIVATE_DATAFILES = \
+	syscall_sw.h
 
 INSTALL_MD_LIST = ${DATAFILES}
+
+INSTALL_MD_LCL_LIST = ${PRIVATE_DATAFILES}
 
 INSTALL_MD_GEN_LIST = \
 	asm.h 

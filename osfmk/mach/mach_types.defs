@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2010 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2010, 2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -210,11 +210,12 @@ type vm_sync_t = int;
 		 * policy_timeshare_info_t (5 ints)
 		 * policy_fifo_info_t (4 ints)
 		 * policy_rr_info_t (5 ints)
+		 * thread_extended_info (12 ints + 64 chars)
 		 * if other thread_info flavors are added, this
 		 * definition may need to be changed. (See
 		 * mach/thread_info.h and mach/policy.h) */
 type thread_flavor_t		= int;
-type thread_info_t		= array[*:12] of integer_t;
+type thread_info_t		= array[*:32] of integer_t;
 
 type thread_policy_flavor_t	= natural_t;
 type thread_policy_t		= array[*:16] of integer_t;
@@ -495,7 +496,6 @@ type semaphore_consume_ref_t = mach_port_move_send_t
 #if	KERNEL_SERVER
 		intran: semaphore_t convert_port_to_semaphore(mach_port_t)
 		outtran: mach_port_t convert_semaphore_to_port(semaphore_t)
-		destructor: semaphore_dereference(semaphore_t)
 #endif	/* KERNEL_SERVER */
 		;
 
@@ -514,6 +514,56 @@ type task_suspension_token_t = mach_port_move_send_once_t
 #endif	/* KERNEL_SERVER */
 		;
 
+
+/* public voucher types */
+
+/* Mach voucher object */
+type mach_voucher_t = mach_port_t;
+type mach_voucher_name_t = mach_port_name_t;
+
+type mach_voucher_attr_manager_t = mach_port_t;
+type mach_voucher_attr_control_t = mach_port_t;
+
+/* IPC voucher internal object */
+type ipc_voucher_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: ipc_voucher_t convert_port_to_voucher(mach_port_t)
+		outtran: mach_port_t convert_voucher_to_port(ipc_voucher_t)
+		destructor: ipc_voucher_release(ipc_voucher_t)
+#endif	/* KERNEL_SERVER */
+	        ;
+
+/* IPC voucher attribute control internal object */
+type ipc_voucher_attr_control_t = mach_port_t
+#if	KERNEL_SERVER
+		intran: ipc_voucher_attr_control_t convert_port_to_voucher_attr_control(mach_port_t)
+		outtran: mach_port_t convert_voucher_attr_control_to_port(ipc_voucher_attr_control_t)
+		destructor: ipc_voucher_attr_control_release(ipc_voucher_attr_control_t)
+#endif	/* KERNEL_SERVER */
+                ;
+
+type mach_voucher_attr_key_t = uint32_t;
+
+type mach_voucher_attr_command_t = uint32_t;
+type mach_voucher_attr_recipe_command_t = uint32_t;
+
+type mach_voucher_attr_content_size_t = uint32_t;
+type mach_voucher_attr_content_t = array[*:4096] of uint8_t;
+type mach_voucher_attr_content_array_t = array[*:5120] of uint8_t;
+
+type mach_voucher_attr_raw_recipe_size_t = uint32_t;
+type mach_voucher_attr_raw_recipe_t = array[*:4096] of uint8_t;
+type mach_voucher_attr_raw_recipe_array_t = array[*:5120] of uint8_t;
+
+type mach_voucher_selector_t = uint32_t;
+
+type mach_voucher_attr_value_handle_t = uint64_t;
+type mach_voucher_attr_value_handle_array_t = array[*:4] of mach_voucher_attr_value_handle_t;
+type mach_voucher_attr_value_reference_t = uint32_t;
+
+type task_inspect_flavor_t = natural_t;
+type task_inspect_data_t = array[] of char;
+
 /* kernel module loader */
 type kmod_t = int;
 type kmod_control_flavor_t = int;
@@ -526,6 +576,7 @@ type UNDServerRef = mach_port_t;
 
 #if KERNEL_SERVER
 #ifdef	MACH_KERNEL_PRIVATE
+simport <ipc/ipc_voucher.h>;	/* for voucher conversions */
 simport <kern/ipc_kobject.h>;	/* for null conversion */
 simport <kern/ipc_tt.h>;	/* for task/thread conversion */
 simport <kern/ipc_host.h>;	/* for host/processor/pset conversions */

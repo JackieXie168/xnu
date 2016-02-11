@@ -9,9 +9,9 @@ _mac_label_set
 _mac_audit_text
 
 _mac_iokit_check_hid_control
-
-_mac_thread_get_threadlabel
-_mac_thread_get_uthreadlabel
+_mac_iokit_check_nvram_delete
+_mac_iokit_check_nvram_get
+_mac_iokit_check_nvram_set
 
 _sbuf_cat
 _sbuf_data
@@ -21,6 +21,6 @@ _sbuf_new
 _sbuf_printf
 _sbuf_putc
 _strsep
-
+_sysctl__security_mac_children
 _VNOP_SETXATTR
 _VNOP_GETXATTR

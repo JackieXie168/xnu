@@ -62,8 +62,6 @@
  *	External memory management interface control functions.
  */
 
-#include <advisory_pageout.h>
-
 /*
  *	Interface dependencies:
  */
@@ -106,7 +104,6 @@
 #include <vm/vm_external.h>
 
 #include <vm/vm_protos.h>
-
 
 memory_object_default_t	memory_manager_default = MEMORY_OBJECT_DEFAULT_NULL;
 decl_lck_mtx_data(,	memory_manager_default_lock)
@@ -540,10 +537,12 @@ vm_object_update_extent(
 	struct vm_page_delayed_work	*dwp;
 	int		dw_count;
 	int		dw_limit;
+	int 		dirty_count;
 
         dwp = &dw_array[0];
         dw_count = 0;
 	dw_limit = DELAYED_WORK_LIMIT(DEFAULT_DELAYED_WORK_LIMIT);
+	dirty_count = 0;
 
 	for (;
 	     offset < offset_end && object->resident_page_count;
@@ -551,13 +550,13 @@ vm_object_update_extent(
 
 	        /*
 		 * Limit the number of pages to be cleaned at once to a contiguous
-		 * run, or at most MAX_UPL_TRANSFER size
+		 * run, or at most MAX_UPL_TRANSFER_BYTES
 		 */
 		if (data_cnt) {
-			if ((data_cnt >= PAGE_SIZE * MAX_UPL_TRANSFER) || (next_offset != offset)) {
+			if ((data_cnt >= MAX_UPL_TRANSFER_BYTES) || (next_offset != offset)) {
 
 				if (dw_count) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -577,7 +576,7 @@ vm_object_update_extent(
 				 *	End of a run of dirty/precious pages.
 				 */
 				if (dw_count) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -598,6 +597,8 @@ vm_object_update_extent(
 				break;
 
 			case MEMORY_OBJECT_LOCK_RESULT_MUST_FREE:
+				if (m->dirty == TRUE)
+					dirty_count++;
 				dwp->dw_mask |= DW_vm_page_free;
 				break;
 
@@ -641,7 +642,7 @@ vm_object_update_extent(
 				VM_PAGE_ADD_DELAYED_WORK(dwp, m, dw_count);
 
 				if (dw_count >= dw_limit) {
-					vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+					vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 					dwp = &dw_array[0];
 					dw_count = 0;
 				}
@@ -649,12 +650,16 @@ vm_object_update_extent(
 			break;
 		}
 	}
+	
+	if (dirty_count) {
+		task_update_logical_writes(current_task(), (dirty_count * PAGE_SIZE), TASK_WRITE_INVALIDATED);
+	}
 	/*
 	 *	We have completed the scan for applicable pages.
 	 *	Clean any pages that have been saved.
 	 */
 	if (dw_count)
-		vm_page_do_delayed_work(object, &dw_array[0], dw_count);
+		vm_page_do_delayed_work(object, VM_KERN_MEMORY_NONE, &dw_array[0], dw_count);
 
 	if (data_cnt) {
 	        LIST_REQ_PAGEOUT_PAGES(object, data_cnt,
@@ -804,6 +809,7 @@ vm_object_update(
 		fault_info.interruptible = THREAD_UNINT;
 		fault_info.behavior  = VM_BEHAVIOR_SEQUENTIAL;
 		fault_info.user_tag  = 0;
+		fault_info.pmap_options = 0;
 		fault_info.lo_offset = copy_offset;
 		fault_info.hi_offset = copy_size;
 		fault_info.no_cache   = FALSE;
@@ -1128,11 +1134,6 @@ vm_object_set_attributes_common(
 			return(KERN_INVALID_ARGUMENT);
 	}
 
-#if	!ADVISORY_PAGEOUT
-	if (silent_overwrite || advisory_pageout)
-		return(KERN_INVALID_ARGUMENT);
-
-#endif	/* !ADVISORY_PAGEOUT */
 	if (may_cache)
 		may_cache = TRUE;
 	if (temporary)
@@ -1458,11 +1459,11 @@ memory_object_iopl_request(
 	upl_t			*upl_ptr,
 	upl_page_info_array_t	user_page_list,
 	unsigned int		*page_list_count,
-	int			*flags)
+	upl_control_flags_t	*flags)
 {
 	vm_object_t		object;
 	kern_return_t		ret;
-	int			caller_flags;
+	upl_control_flags_t	caller_flags;
 
 	caller_flags = *flags;
 
@@ -1566,8 +1567,6 @@ memory_object_iopl_request(
 		return (KERN_INVALID_ARGUMENT);
 
 	if (!object->private) {
-		if (*upl_size > (MAX_UPL_TRANSFER*PAGE_SIZE))
-			*upl_size = (MAX_UPL_TRANSFER*PAGE_SIZE);
 		if (object->phys_contiguous) {
 			*flags = UPL_PHYS_CONTIG;
 		} else {
@@ -1619,7 +1618,7 @@ memory_object_upl_request(
 				     upl_ptr,
 				     user_page_list,
 				     page_list_count,
-				     cntrl_flags);
+				     (upl_control_flags_t)(unsigned int) cntrl_flags);
 }
 
 /*  
@@ -1657,7 +1656,7 @@ memory_object_super_upl_request(
 					   upl,
 					   user_page_list,
 					   page_list_count,
-					   cntrl_flags);
+					   (upl_control_flags_t)(unsigned int) cntrl_flags);
 }
 
 kern_return_t
@@ -1723,6 +1722,14 @@ host_default_memory_manager(
 		returned_manager = current_manager;
 		memory_object_default_reference(returned_manager);
 	} else {
+		/*
+		 *	Only allow the kernel to change the value.
+		 */
+		extern task_t kernel_task;
+		if (current_task() != kernel_task) {
+			result = KERN_NO_ACCESS;
+			goto out;
+		}
 
 		/*
 		 *	If this is the first non-null manager, start
@@ -1926,6 +1933,22 @@ memory_object_mark_unused(
 		vm_object_cache_add(object);
 }
 
+void
+memory_object_mark_io_tracking(
+	memory_object_control_t control)
+{
+	vm_object_t             object;
+
+	if (control == NULL)
+		return;
+	object = memory_object_control_to_vm_object(control);
+
+	if (object != VM_OBJECT_NULL) {
+		vm_object_lock(object);
+		object->io_tracking = TRUE;
+		vm_object_unlock(object);
+	}
+}
 
 kern_return_t
 memory_object_pages_resident(

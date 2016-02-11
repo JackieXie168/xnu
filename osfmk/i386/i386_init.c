@@ -2,7 +2,7 @@
  * Copyright (c) 2003-2012 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
- *
+ * 
  * This file contains Original Code and/or Modifications of Original Code
  * as defined in and that are subject to the Apple Public Source License
  * Version 2.0 (the 'License'). You may not use this file except in
@@ -11,10 +11,10 @@
  * unlawful or unlicensed copies of an Apple operating system, or to
  * circumvent, violate, or enable the circumvention or violation of, any
  * terms of an Apple operating system software license agreement.
- *
+ * 
  * Please obtain a copy of the License at
  * http://www.opensource.apple.com/apsl/ and read it before using this file.
- *
+ * 
  * The Original Code and all software distributed under the License are
  * distributed on an 'AS IS' basis, WITHOUT WARRANTY OF ANY KIND, EITHER
  * EXPRESS OR IMPLIED, AND APPLE HEREBY DISCLAIMS ALL SUCH WARRANTIES,
@@ -22,39 +22,38 @@
  * FITNESS FOR A PARTICULAR PURPOSE, QUIET ENJOYMENT OR NON-INFRINGEMENT.
  * Please see the License for the specific language governing rights and
  * limitations under the License.
- *
+ * 
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 /*
  * @OSF_COPYRIGHT@
  */
-/*
+/* 
  * Mach Operating System
  * Copyright (c) 1991,1990,1989, 1988 Carnegie Mellon University
  * All Rights Reserved.
- *
+ * 
  * Permission to use, copy, modify and distribute this software and its
  * documentation is hereby granted, provided that both the copyright
  * notice and this permission notice appear in all copies of the
  * software, derivative works or modified versions, and any portions
  * thereof, and that both notices appear in supporting documentation.
- *
+ * 
  * CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS"
  * CONDITION.  CARNEGIE MELLON DISCLAIMS ANY LIABILITY OF ANY KIND FOR
  * ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
- *
+ * 
  * Carnegie Mellon requests users of this software to return to
- *
+ * 
  *  Software Distribution Coordinator  or  Software.Distribution@CS.CMU.EDU
  *  School of Computer Science
  *  Carnegie Mellon University
  *  Pittsburgh PA 15213-3890
- *
+ * 
  * any improvements or extensions that they make and grant Carnegie Mellon
  * the rights to redistribute these changes.
  */
 
-#include <platforms.h>
 
 #include <mach/i386/vm_param.h>
 
@@ -73,6 +72,7 @@
 #include <kern/xpr.h>
 #include <kern/cpu_data.h>
 #include <kern/processor.h>
+#include <sys/kdebug.h>
 #include <console/serial_protos.h>
 #include <vm/vm_page.h>
 #include <vm/pmap.h>
@@ -99,7 +99,6 @@
 #include <i386/pmCPU.h>
 #include <i386/tsc.h>
 #include <i386/locks.h> /* LcksOpts */
-#include <i386/rtclock_protos.h>
 #if DEBUG
 #include <machine/pal_routines.h>
 #endif
@@ -108,7 +107,6 @@
 #else
 #define DBG(x...)
 #endif
-#include "lapic_irq_remap.c"
 
 int			debug_task;
 
@@ -194,12 +192,19 @@ physmap_init(void)
 	} * physmapL2 = ALLOCPAGES(NPHYSMAP);
 
 	uint64_t i;
-	uint8_t phys_random_L3 = ml_early_random() & 0xFF;
+	uint8_t phys_random_L3 = early_random() & 0xFF;
 
 	/* We assume NX support. Mark all levels of the PHYSMAP NX
 	 * to avoid granting executability via a single bit flip.
 	 */
-	assert(cpuid_extfeatures() & CPUID_EXTFEATURE_XD);
+#if DEVELOPMENT || DEBUG
+	uint32_t reg[4];
+	do_cpuid(0x80000000, reg);
+	if (reg[eax] >= 0x80000001) {
+		do_cpuid(0x80000001, reg);
+		assert(reg[edx] & CPUID_EXTFEATURE_XD);
+	}
+#endif /* DEVELOPMENT || DEBUG */
 
 	for(i = 0; i < NPHYSMAP; i++) {
 		physmapL3[i + phys_random_L3] =
@@ -214,7 +219,7 @@ physmap_init(void)
 			    ((i * PTE_PER_PAGE + j) << PDSHIFT)
 							| INTEL_PTE_PS
 							| INTEL_PTE_VALID
-			    				| INTEL_PTE_NX
+							| INTEL_PTE_NX
 							| INTEL_PTE_WRITE;
 		}
 	}
@@ -247,7 +252,7 @@ descriptor_alias_init()
 	master_idt_phys       = (vm_offset_t) ID_MAP_VTOP(master_idt64);
 	master_gdt_alias_phys = (vm_offset_t) ID_MAP_VTOP(MASTER_GDT_ALIAS);
 	master_idt_alias_phys = (vm_offset_t) ID_MAP_VTOP(MASTER_IDT_ALIAS);
-
+	
 	DBG("master_gdt_phys:       %p\n", (void *) master_gdt_phys);
 	DBG("master_idt_phys:       %p\n", (void *) master_idt_phys);
 	DBG("master_gdt_alias_phys: %p\n", (void *) master_gdt_alias_phys);
@@ -283,7 +288,7 @@ Idle_PTs_init(void)
 	// IdlePML4 single entry for kernel space.
 	fillkpt(IdlePML4 + KERNEL_PML4_INDEX,
 		INTEL_PTE_WRITE, (uintptr_t)ID_MAP_VTOP(IdlePDPT), 0, 1);
-
+	
 	postcode(VSTART_PHYSMAP_INIT);
 
 	physmap_init();
@@ -302,10 +307,10 @@ Idle_PTs_init(void)
 
 /*
  * vstart() is called in the natural mode (64bit for K64, 32 for K32)
- * on a set of bootstrap pagetables which use large, 2MB pages to map
+ * on a set of bootstrap pagetables which use large, 2MB pages to map 
  * all of physical memory in both. See idle_pt.c for details.
  *
- * In K64 this identity mapping is mirrored the top and bottom 512GB
+ * In K64 this identity mapping is mirrored the top and bottom 512GB 
  * slots of PML4.
  *
  * The bootstrap processor called with argument boot_args_start pointing to
@@ -331,7 +336,8 @@ vstart(vm_offset_t boot_args_start)
 		kernelBootArgs = (boot_args *)boot_args_start;
 		lphysfree = kernelBootArgs->kaddr + kernelBootArgs->ksize;
 		physfree = (void *)(uintptr_t)((lphysfree + PAGE_SIZE - 1) &~ (PAGE_SIZE - 1));
-#if DEBUG
+
+#if DEVELOPMENT || DEBUG
 		pal_serial_init();
 #endif
 		DBG("revision      0x%x\n", kernelBootArgs->Revision);
@@ -343,30 +349,31 @@ vstart(vm_offset_t boot_args_start)
 		DBG("ksize         0x%x\n", kernelBootArgs->ksize);
 		DBG("physfree      %p\n", physfree);
 		DBG("bootargs: %p, &ksize: %p &kaddr: %p\n",
-			kernelBootArgs,
+			kernelBootArgs, 
 			&kernelBootArgs->ksize,
 			&kernelBootArgs->kaddr);
-
-		postcode(VSTART_IDLE_PTS_INIT);
-
-		Idle_PTs_init();
-
-		first_avail = (vm_offset_t)ID_MAP_VTOP(physfree);
-
-		cpu = 0;
-		cpu_data_alloc(TRUE);
-
+		DBG("SMBIOS mem sz 0x%llx\n", kernelBootArgs->PhysicalMemorySize);
 
 		/*
 		 * Setup boot args given the physical start address.
+		 * Note: PE_init_platform needs to be called before Idle_PTs_init
+		 * because access to the DeviceTree is required to read the
+		 * random seed before generating a random physical map slide.
 		 */
 		kernelBootArgs = (boot_args *)
 		    ml_static_ptovirt(boot_args_start);
 		DBG("i386_init(0x%lx) kernelBootArgs=%p\n",
 		    (unsigned long)boot_args_start, kernelBootArgs);
-
 		PE_init_platform(FALSE, kernelBootArgs);
 		postcode(PE_INIT_PLATFORM_D);
+
+		Idle_PTs_init();
+		postcode(VSTART_IDLE_PTS_INIT);
+
+		first_avail = (vm_offset_t)ID_MAP_VTOP(physfree);
+
+		cpu = 0;
+		cpu_data_alloc(TRUE);
 	} else {
 		/* Switch to kernel's page tables (from the Boot PTs) */
 		set_cr3_raw((uintptr_t)ID_MAP_VTOP(IdlePML4));
@@ -375,7 +382,6 @@ vstart(vm_offset_t boot_args_start)
 		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, rdmsr64(MSR_IA32_GS_BASE));
 	}
 
-    _lapic_irq_remap();
 	postcode(VSTART_CPU_DESC_INIT);
 	if(is_boot_cpu)
 		cpu_desc_init64(cpu_datap(cpu));
@@ -390,6 +396,11 @@ vstart(vm_offset_t boot_args_start)
 	x86_init_wrapper(is_boot_cpu ? (uintptr_t) i386_init
 				     : (uintptr_t) i386_init_slave,
 			 cpu_datap(cpu)->cpu_int_stack_top);
+}
+
+void
+pstate_trace(void)
+{
 }
 
 /*
@@ -408,6 +419,11 @@ i386_init(void)
 	postcode(I386_INIT_ENTRY);
 
 	pal_i386_init();
+	tsc_init();
+	rtclock_early_init();	/* mach_absolute_time() now functionsl */
+
+	kernel_debug_string_simple("i386_init");
+	pstate_trace();
 
 #if CONFIG_MCA
 	/* Initialize machine-check handling */
@@ -423,8 +439,10 @@ i386_init(void)
 	panic_init();			/* Init this in case we need debugger */
 
 	/* setup debugging output if one has been chosen */
+	kernel_debug_string_simple("PE_init_kprintf");
 	PE_init_kprintf(FALSE);
 
+	kernel_debug_string_simple("kernel_early_bootstrap");
 	kernel_early_bootstrap();
 
 	if (!PE_parse_boot_argn("diag", &dgWork.dgFlags, sizeof (dgWork.dgFlags)))
@@ -441,11 +459,12 @@ i386_init(void)
 	}
 
 	/* setup console output */
+	kernel_debug_string_simple("PE_init_printf");
 	PE_init_printf(FALSE);
 
 	kprintf("version_variant = %s\n", version_variant);
 	kprintf("version         = %s\n", version);
-
+	
 	if (!PE_parse_boot_argn("maxmem", &maxmem, sizeof (maxmem)))
 		maxmemtouse = 0;
 	else
@@ -459,8 +478,9 @@ i386_init(void)
 	/*
 	 * debug support for > 4G systems
 	 */
-	if (!PE_parse_boot_argn("himemory_mode", &vm_himemory_mode, sizeof (vm_himemory_mode)))
-	        vm_himemory_mode = 0;
+	PE_parse_boot_argn("himemory_mode", &vm_himemory_mode, sizeof (vm_himemory_mode));
+	if (vm_himemory_mode != 0)
+		kprintf("himemory_mode: %d\n", vm_himemory_mode);
 
 	if (!PE_parse_boot_argn("immediate_NMI", &fidn, sizeof (fidn)))
 		force_immediate_debugger_NMI = FALSE;
@@ -477,10 +497,11 @@ i386_init(void)
 	if (!(cpuid_extfeatures() & CPUID_EXTFEATURE_XD))
 		nx_enabled = 0;
 
-	/*
+	/*   
 	 * VM initialization, after this we're using page tables...
-	 * The maximum number of cpus must be set beforehand.
+	 * Thn maximum number of cpus must be set beforehand.
 	 */
+	kernel_debug_string_simple("i386_vm_init");
 	i386_vm_init(maxmemtouse, IA32e, kernelBootArgs);
 
 	/* create the console for verbose or pretty mode */
@@ -488,12 +509,15 @@ i386_init(void)
 	PE_init_platform(TRUE, kernelBootArgs);
 	PE_create_console();
 
-	tsc_init();
+	kernel_debug_string_simple("power_management_init");
 	power_management_init();
 	processor_bootstrap();
 	thread_bootstrap();
 
+	pstate_trace();
+	kernel_debug_string_simple("machine_startup");
 	machine_startup();
+	pstate_trace();
 }
 
 static void
@@ -506,26 +530,26 @@ do_init_slave(boolean_t fast_restart)
 	if (!fast_restart) {
 		/* Ensure that caching and write-through are enabled */
 		set_cr0(get_cr0() & ~(CR0_NW|CR0_CD));
-
+  
 		DBG("i386_init_slave() CPU%d: phys (%d) active.\n",
 		    get_cpu_number(), get_cpu_phys_number());
-
+  
 		assert(!ml_get_interrupts_enabled());
-
+  
 		cpu_mode_init(current_cpu_datap());
 		pmap_cpu_init();
-
+  
 #if CONFIG_MCA
 		mca_cpu_init();
 #endif
-
+  
 		LAPIC_INIT();
 		lapic_configure();
 		LAPIC_DUMP();
 		LAPIC_CPU_MAP_DUMP();
-
+  
 		init_fpu();
-
+  
 #if CONFIG_MTRR
 		mtrr_update_cpu();
 #endif
@@ -548,7 +572,7 @@ do_init_slave(boolean_t fast_restart)
 
 	cpu_init();	/* Sets cpu_running which starter cpu waits for */
  	slave_main(init_param);
-
+  
  	panic("do_init_slave() returned from slave_main()");
 }
 
@@ -575,3 +599,5 @@ i386_init_slave_fast(void)
 {
     	do_init_slave(TRUE);
 }
+
+

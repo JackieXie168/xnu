@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -221,6 +221,13 @@ struct	ipstat {
 	u_int32_t ips_snd_swcsum_bytes;	/* ip hdr swcksum (outbound), bytes */
 	u_int32_t ips_adj;		/* total packets trimmed/adjusted */
 	u_int32_t ips_adj_hwcsum_clr;	/* hwcksum discarded during adj */
+	u_int32_t ips_rxc_collisions;	/* rx chaining collisions */
+	u_int32_t ips_rxc_chained;	/* rx chains */
+	u_int32_t ips_rxc_notchain;	/* rx bypassed chaining */
+	u_int32_t ips_rxc_chainsz_gt2;	/* rx chain size greater than 2 */
+	u_int32_t ips_rxc_chainsz_gt4;  /* rx chain size greater than 4 */
+	u_int32_t ips_rxc_notlist;	/* count of pkts through ip_input */
+
 };
 
 struct ip_linklocal_stat {
@@ -284,6 +291,9 @@ struct ip_out_args {
 #define	IPOAF_BOUND_IF		0x00000002	/* boundif value is valid */
 #define	IPOAF_BOUND_SRCADDR	0x00000004	/* bound to src address */
 #define	IPOAF_NO_CELLULAR	0x00000010	/* skip IFT_CELLULAR */
+#define	IPOAF_NO_EXPENSIVE	0x00000020	/* skip IFT_EXPENSIVE */
+#define	IPOAF_AWDL_UNRESTRICTED	0x00000040	/* can send over 
+						   AWDL_RESTRICTED */
 	u_int32_t	ipoa_retflags;	/* IPOARF return flags (see below) */
 #define	IPOARF_IFDENIED	0x00000001	/* denied access to interface */
 };
@@ -296,24 +306,6 @@ extern int ipforwarding;		/* ip forwarding */
 extern struct protosw *ip_protox[];
 extern struct pr_usrreqs rip_usrreqs;
 extern int ip_doscopedroute;
-
-#if MROUTING
-extern int (*legal_vif_num)(int);
-extern u_int32_t (*ip_mcast_src)(int);
-extern int rsvp_on;
-extern struct socket *ip_rsvpd;	/* reservation protocol daemon */
-extern struct socket *ip_mrouter; /* multicast routing daemon */
-
-extern void rsvp_input(struct mbuf *, int);
-extern int ip_rsvp_init(struct socket *);
-extern int ip_rsvp_done(void);
-extern int ip_rsvp_vif_init(struct socket *, struct sockopt *);
-extern int ip_rsvp_vif_done(struct socket *, struct sockopt *);
-extern void ip_rsvp_force_done(struct socket *);
-extern void ipip_input(struct mbuf *, int);
-extern int (*ip_mforward)(struct ip *, struct ifnet *, struct mbuf *,
-    struct ip_moptions *);
-#endif /* MROUTING */
 
 extern void ip_moptions_init(void);
 extern struct ip_moptions *ip_allocmoptions(int);

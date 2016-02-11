@@ -85,7 +85,6 @@
 #include <kern/ipc_mig.h>
 #include <kern/task.h>
 #include <kern/thread.h>
-#include <kern/lock.h>
 #include <kern/sched_prim.h>
 #include <kern/exception.h>
 #include <kern/misc_protos.h>
@@ -104,6 +103,7 @@
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_entry.h>
+#include <ipc/ipc_importance.h>
 
 #include <machine/machine_routines.h>
 #include <security/mac_mach_internal.h>
@@ -312,76 +312,35 @@ mach_msg_receive_results(void)
 	      if (copyout((char *) &self->ith_msize,
 			  msg_addr + offsetof(mach_msg_user_header_t, msgh_size),
 			  sizeof(mach_msg_size_t)))
-		mr = MACH_RCV_INVALID_DATA;
-	      goto out;
+	      	mr = MACH_RCV_INVALID_DATA;
+	    } else {
+
+	    	/* discard importance in message */
+	    	ipc_importance_clean(kmsg);
+
+		if (msg_receive_error(kmsg, msg_addr, option, seqno, space)
+		    == MACH_RCV_INVALID_DATA)
+		    mr = MACH_RCV_INVALID_DATA;
 	    }
-		  
-	    if (msg_receive_error(kmsg, msg_addr, option, seqno, space)
-		== MACH_RCV_INVALID_DATA)
-	      mr = MACH_RCV_INVALID_DATA;
 	  }
-	  goto out;
+	  return mr;
 	}
 
 #if IMPORTANCE_INHERITANCE
-	if ((kmsg->ikm_header->msgh_bits & MACH_MSGH_BITS_RAISEIMP) != 0) {
-		__unused int impresult;
-		int sender_pid = -1;
-#if IMPORTANCE_DEBUG
-		sender_pid = ((mach_msg_max_trailer_t *)
-			((vm_offset_t)kmsg->ikm_header + round_msg(kmsg->ikm_header->msgh_size)))->msgh_audit.val[5];
-#endif /* IMPORTANCE_DEBUG */
-		ipc_port_t port = kmsg->ikm_header->msgh_remote_port;
-		task_t task_self = current_task();
 
-		ip_lock(port);
-		assert(port->ip_impcount > 0);
-		port->ip_impcount--;
-		ip_unlock(port);
+	/* adopt/transform any importance attributes carried in the message */
+	ipc_importance_receive(kmsg, option);
 
-		if (task_self->imp_receiver == 0) {
-			/*
-			 * The task was never ready to receive importance boost, remove msghbit.
-			 * This can happen when a receive right (which has donor messages) is copied
-			 * out to a non-imp_receiver task (we don't clear the bits on the messages,
-			 * but we did't transfer any boost counts either).
-			 */
-			kmsg->ikm_header->msgh_bits &= ~MACH_MSGH_BITS_RAISEIMP;
-			impresult = 0;
-		} else {
-			/* user will accept responsibility for the importance boost */
-			task_importance_externalize_assertion(task_self, 1, sender_pid);
-			impresult = 1;
-		}
-
-#if IMPORTANCE_DEBUG
-		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_TRACE, (IMPORTANCE_CODE(IMP_MSG, IMP_MSG_DELV)) | DBG_FUNC_NONE,
-			sender_pid, audit_token_pid_from_task(task_self),
-			kmsg->ikm_header->msgh_id, impresult, 0);
-#endif /* IMPORTANCE_DEBUG */
-	}
 #endif  /* IMPORTANCE_INHERITANCE */
 
 	trailer_size = ipc_kmsg_add_trailer(kmsg, space, option, self, seqno, FALSE, 
 			kmsg->ikm_header->msgh_remote_port->ip_context);
-	/*
-	 * If MACH_RCV_OVERWRITE was specified, try to get the scatter
-	 * list and verify it against the contents of the message.  If
-	 * there is any problem with it, we will continue without it as
-	 * normal.
-	 */
-	if (option & MACH_RCV_OVERWRITE) {
-		mach_msg_size_t slist_size = self->ith_scatter_list_size;
-		mach_msg_body_t *slist;
-
-		slist = ipc_kmsg_get_scatter(msg_addr, slist_size, kmsg);
-		mr = ipc_kmsg_copyout(kmsg, space, map, slist);
-		ipc_kmsg_free_scatter(slist, slist_size);
-	} else {
-		mr = ipc_kmsg_copyout(kmsg, space, map, MACH_MSG_BODY_NULL);
-	}
+	mr = ipc_kmsg_copyout(kmsg, space, map, MACH_MSG_BODY_NULL, option);
 
 	if (mr != MACH_MSG_SUCCESS) {
+		/* already received importance, so have to undo that here */
+		ipc_importance_unreceive(kmsg, option);
+
 		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR) {
 			if (ipc_kmsg_put(msg_addr, kmsg, kmsg->ikm_header->msgh_size +
 			   trailer_size) == MACH_RCV_INVALID_DATA)
@@ -392,13 +351,13 @@ mach_msg_receive_results(void)
 						== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
-		goto out;
+	} else {
+		mr = ipc_kmsg_put(msg_addr,
+				  kmsg,
+				  kmsg->ikm_header->msgh_size + 
+				  trailer_size);
 	}
-	mr = ipc_kmsg_put(msg_addr,
-			  kmsg,
-			  kmsg->ikm_header->msgh_size + 
-			  trailer_size);
- out:
+
 	return mr;
 }
 
@@ -427,7 +386,7 @@ mach_msg_receive(
 	mach_port_name_t	rcv_name,
 	mach_msg_timeout_t	rcv_timeout,
 	void			(*continuation)(mach_msg_return_t),
-	mach_msg_size_t		slist_size)
+	__unused mach_msg_size_t slist_size)
 {
 	thread_t self = current_thread();
 	ipc_space_t space = current_space();
@@ -445,7 +404,6 @@ mach_msg_receive(
 	self->ith_object = object;
 	self->ith_msize = rcv_size;
 	self->ith_option = option;
-	self->ith_scatter_list_size = slist_size;
 	self->ith_continuation = continuation;
 
 	ipc_mqueue_receive(mqueue, option, rcv_size, rcv_timeout, THREAD_ABORTSAFE);
@@ -485,7 +443,6 @@ mach_msg_overwrite_trap(
 	mach_msg_timeout_t	msg_timeout = args->timeout;
 	__unused mach_port_name_t notify = args->notify;
 	mach_vm_address_t	rcv_msg_addr = args->rcv_msg;
-        mach_msg_size_t		scatter_list_size = 0; /* NOT INITIALIZED - but not used in pactice */
 	__unused mach_port_seqno_t temp_seqno = 0;
 
 	mach_msg_return_t  mr = MACH_MSG_SUCCESS;
@@ -532,22 +489,13 @@ mach_msg_overwrite_trap(
 		}
 		/* hold ref for object */
 
-		/*
-		 * 1. MACH_RCV_OVERWRITE is on, and rcv_msg is our scatter list
-		 *    and receive buffer
-		 * 2. MACH_RCV_OVERWRITE is off, and rcv_msg might be the
-		 *    alternate receive buffer (separate send and receive buffers).
-		 */
-		if (option & MACH_RCV_OVERWRITE) 
-			self->ith_msg_addr = rcv_msg_addr;
-		else if (rcv_msg_addr != (mach_vm_address_t)0)
+		if (rcv_msg_addr != (mach_vm_address_t)0)
 			self->ith_msg_addr = rcv_msg_addr;
 		else
 			self->ith_msg_addr = msg_addr;
 		self->ith_object = object;
 		self->ith_msize = rcv_size;
 		self->ith_option = option;
-		self->ith_scatter_list_size = scatter_list_size;
 		self->ith_receiver_name = MACH_PORT_NULL;
 		self->ith_continuation = thread_syscall_return;
 

@@ -6,20 +6,26 @@ export MakeInc_dir=${SRCROOT}/makedefs/MakeInc.dir
 include $(MakeInc_cmd)
 include $(MakeInc_def)
 
-DATAFILES =
+DATAFILES = \
+	exc_resource.h \
+	kern_cdata.h
 
-PRIVATE_DATAFILES = exc_resource.h
+PRIVATE_DATAFILES = \
+	debug.h \
+	ecc.h
 
-EXPORT_ONLY_FILES = \
+EXPORT_FILES = \
 	affinity.h \
 	assert.h \
 	audit_sessionport.h \
 	call_entry.h \
 	clock.h \
+	coalition.h \
 	cpu_number.h \
 	cpu_data.h \
-	debug.h \
+	energy_perf.h \
 	extmod_statistics.h \
+	hv_support.h \
 	ipc_mig.h \
 	ipc_misc.h \
 	kalloc.h \
@@ -37,6 +43,7 @@ EXPORT_ONLY_FILES = \
 	processor.h \
 	queue.h \
 	sched_prim.h \
+	sfi.h \
 	simple_lock.h \
 	startup.h \
 	task.h \
@@ -44,14 +51,18 @@ EXPORT_ONLY_FILES = \
 	thread.h \
 	thread_call.h \
 	timer_call.h \
-	wait_queue.h \
+	waitq.h \
 	zalloc.h
 
-INSTALL_MI_LIST = ${DATAFILES} ${PRIVATE_DATAFILES}
+INSTALL_MI_LIST = ${DATAFILES}
+
+INSTALL_MI_LCL_LIST = ${PRIVATE_DATAFILES}
+
+INSTALL_KF_MI_LCL_LIST = ${DATAFILES} ${PRIVATE_DATAFILES} ${EXPORT_FILES}
 
 INSTALL_MI_DIR = kern
 
-EXPORT_MI_LIST = ${DATAFILES} ${EXPORT_ONLY_FILES}
+EXPORT_MI_LIST = ${DATAFILES} ${PRIVATE_DATAFILES} ${EXPORT_FILES}
 
 EXPORT_MI_DIR = kern
 

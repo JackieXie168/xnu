@@ -76,8 +76,7 @@ extern mach_msg_return_t mach_msg_send(mach_msg_header_t *msg,
 		mach_msg_option_t option, mach_msg_size_t send_size,
 		mach_msg_timeout_t send_timeout, mach_port_name_t notify);
 extern thread_t convert_port_to_thread(ipc_port_t port);
-extern void ipc_port_release(ipc_port_t);
-
+extern void ipc_port_release_send(ipc_port_t port);
 
 
 
@@ -90,7 +89,7 @@ static void	ux_exception(int exception, mach_exception_code_t code,
 				mach_exception_subcode_t subcode,
 				int *ux_signal, mach_exception_code_t *ux_code);
 
-#if defined(__x86_64__)
+#if defined(__x86_64__) || defined(__arm64__)
 mach_port_t			ux_exception_port;
 #else
 mach_port_name_t		ux_exception_port;
@@ -256,7 +255,7 @@ catch_mach_exception_raise(
 		       (void *) &thread_port) == MACH_MSG_SUCCESS)) {
         if (IPC_PORT_VALID(thread_port)) {
 	   th_act = convert_port_to_thread(thread_port);
-	   ipc_port_release(thread_port);
+	   ipc_port_release_send(thread_port);
 	} else {
 	   th_act = THREAD_NULL;
 	}

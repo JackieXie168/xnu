@@ -144,11 +144,6 @@ bool IOWorkLoop::init()
         workToDo = false;
     }
 
-    if (!reserved) {
-        reserved = IONew(ExpansionData, 1);
-        reserved->options = 0;
-    }
-	
     IOStatisticsRegisterCounter();
 
     if ( controlG == NULL ) {
@@ -260,6 +255,7 @@ void IOWorkLoop::free()
 	// Either way clean up all of our resources and return.
 	
 	if (controlG) {
+	    controlG->workLoop = 0;
 	    controlG->release();
 	    controlG = 0;
 	}
@@ -564,10 +560,10 @@ IOReturn IOWorkLoop::_maintRequest(void *inC, void *inD, void *, void *)
 				if (eventChain == inEvent)
 					eventChain = inEvent->getNext();
 				else {
-					IOEventSource *event, *next;
+					IOEventSource *event, *next = 0;
 		
 					event = eventChain;
-					while ((next = event->getNext()) && next != inEvent)
+					if (event) while ((next = event->getNext()) && (next != inEvent))
 						event = next;
 		
 					if (!next) {
@@ -581,10 +577,10 @@ IOReturn IOWorkLoop::_maintRequest(void *inC, void *inD, void *, void *)
 				if (passiveEventChain == inEvent)
 					passiveEventChain = inEvent->getNext();
 				else {
-					IOEventSource *event, *next;
+					IOEventSource *event, *next = 0;
 		
 					event = passiveEventChain;
-					while ((next = event->getNext()) && next != inEvent)
+					if (event) while ((next = event->getNext()) && (next != inEvent))
 						event = next;
 		
 					if (!next) {

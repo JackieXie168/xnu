@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -43,6 +43,8 @@
 #define HFS_CHECK_LOCK_ORDER 1
 #endif
 
+#define HFS_TMPDBG 0
+
 #include <sys/appleapiopts.h>
 
 #ifdef KERNEL
@@ -67,10 +69,13 @@
 #include <hfs/hfs_macos_defs.h>
 #include <hfs/hfs_encodings.h>
 #include <hfs/hfs_hotfiles.h>
+#include <hfs/hfs_fsctl.h>
 
 #if CONFIG_PROTECT
 /* Forward declare the cprotect struct */
 struct cprotect;
+
+
 #endif
 
 /*
@@ -104,6 +109,9 @@ extern struct timezone gTimeZone;
 
 /* How many free extents to cache per volume */
 #define kMaxFreeExtents		10
+
+/* The maximum time hfs locks can be held while performing hfs statistics gathering */
+#define HFS_FSINFO_MAX_LOCKHELD_TIME	20 * 1000000ULL	/* at most 20 milliseconds. */
 
 /*
  * HFS_MINFREE gives the minimum acceptable percentage
@@ -145,9 +153,20 @@ typedef struct hfsmount {
 
 	/* Physical Description */
 	u_int32_t     hfs_logical_block_size;	/* Logical block size of the disk as reported by ioctl(DKIOCGETBLOCKSIZE), always a multiple of 512 */
-	daddr64_t     hfs_logical_block_count;  /* Number of logical blocks on the disk */
+	daddr64_t     hfs_logical_block_count;  /* Number of logical blocks on the disk, as reported by ioctl(DKIOCGETBLOCKCOUNT) */
 	u_int64_t     hfs_logical_bytes;	/* Number of bytes on the disk device this HFS is mounted on (blockcount * blocksize) */
-	daddr64_t     hfs_alt_id_sector;      	/* location of alternate VH/MDB */
+	/*
+	 * Regarding the two AVH sector fields below: 
+	 * Under normal circumstances, the filesystem's notion of the "right" location for the AVH is such that
+	 * the partition and filesystem's are in sync.  However, during a filesystem resize, HFS proactively
+	 * writes a new AVH at the end of the filesystem, assuming that the partition will be resized accordingly.
+	 *
+	 * However, it is not technically a corruption if the partition size is never modified.  As a result, we need
+	 * to keep two copies of the AVH around "just in case" the partition size is not modified.
+	 */
+	daddr64_t	hfs_partition_avh_sector;	/* location of Alt VH w.r.t partition size */
+	daddr64_t	hfs_fs_avh_sector;	/* location of Alt VH w.r.t filesystem size */
+
 	u_int32_t     hfs_physical_block_size;	/* Physical block size of the disk as reported by ioctl(DKIOCGETPHYSICALBLOCKSIZE) */ 
 	u_int32_t     hfs_log_per_phys;		/* Number of logical blocks per physical block size */
 
@@ -179,7 +198,9 @@ typedef struct hfsmount {
 	time_t        hfs_mtime;          /* file system last modification time */
 	u_int32_t     hfs_filecount;      /* number of files in file system */
 	u_int32_t     hfs_dircount;       /* number of directories in file system */
-	u_int32_t     freeBlocks;	  /* free allocation blocks */
+	u_int32_t     freeBlocks;	  	  /* free allocation blocks */
+	u_int32_t	  reclaimBlocks;	  /* number of blocks we are reclaiming during resize */
+	u_int32_t	  tentativeBlocks;	  /* tentative allocation blocks -- see note below */
 	u_int32_t     nextAllocation;	  /* start of next allocation search */
 	u_int32_t     sparseAllocation;   /* start of allocations for sparse devices */
 	u_int32_t     vcbNxtCNID;         /* next unused catalog node ID - protected by catalog lock */
@@ -190,7 +211,13 @@ typedef struct hfsmount {
 
 	/* Persistent fields (on disk, static) */
 	u_int16_t 			vcbSigWord;
-	int16_t				vcbFlags; /* Runtime flag to indicate if volume is dirty/clean */
+
+	// Volume will be inconsistent if header is not flushed
+	bool				hfs_header_dirty;
+
+	// Volume header is dirty, but won't be inconsistent if not flushed
+	bool				hfs_header_minor_change;
+
 	u_int32_t 			vcbAtrb;
 	u_int32_t 			vcbJinfoBlock;
 	u_int32_t 			localCreateDate;/* volume create time from volume header (For HFS+, value is in local time) */
@@ -232,7 +259,7 @@ typedef struct hfsmount {
 
 	u_int32_t		reserveBlocks;		/* free block reserve */
 	u_int32_t		loanedBlocks;		/* blocks on loan for delayed allocations */
-	
+	u_int32_t		lockedBlocks;		/* blocks reserved and locked */
 
 	/*
 	 * HFS+ Private system directories (two). Any access
@@ -250,16 +277,16 @@ typedef struct hfsmount {
 	struct quotafile	hfs_qfiles[MAXQUOTAS];    /* quota files */
 
 	/* Journaling variables: */
-	void                *jnl;           // the journal for this volume (if one exists)
+	struct journal      *jnl;           // the journal for this volume (if one exists)
 	struct vnode        *jvp;           // device where the journal lives (may be equal to devvp)
 	u_int32_t            jnl_start;     // start block of the journal file (so we don't delete it)
 	u_int32_t            jnl_size;
 	u_int32_t            hfs_jnlfileid;
 	u_int32_t            hfs_jnlinfoblkid;
-	lck_rw_t	     	hfs_global_lock;
-	u_int32_t            hfs_global_lock_nesting;
-	void*				hfs_global_lockowner;
-	
+	lck_rw_t	     	 hfs_global_lock;
+	thread_t			 hfs_global_lockowner;
+	u_int32_t            hfs_transaction_nesting;
+
 	/* Notification variables: */
 	u_int32_t		hfs_notification_conditions;
 	u_int32_t		hfs_freespace_notify_dangerlimit;
@@ -277,7 +304,9 @@ typedef struct hfsmount {
 	u_int32_t	hfs_hotfile_end;
         u_int32_t       hfs_min_alloc_start;
 	u_int32_t       hfs_freed_block_count;
+	u_int64_t       hfs_cs_hotfile_size;     // in bytes
 	int		hfs_hotfile_freeblks;
+	int             hfs_hotfile_blk_adjust;
 	int		hfs_hotfile_maxblks;
 	int		hfs_overflow_maxblks;
 	int		hfs_catalog_maxblks;
@@ -288,33 +317,64 @@ typedef struct hfsmount {
 	time_t		hfc_timebase;   /* recording period start time */
 	time_t		hfc_timeout;    /* recording period stop time */
 	void *		hfc_recdata;    /* recording data (opaque) */
-	int		hfc_maxfiles;   /* maximum files to track */
+	uint32_t	hfc_maxfiles;   /* maximum files to track */
 	struct vnode *  hfc_filevp;
 
 #if HFS_SPARSE_DEV
 	/* Sparse device variables: */
 	struct vnode * hfs_backingfs_rootvp;
 	u_int32_t      hfs_last_backingstatfs;
-	int            hfs_sparsebandblks;
+	u_int32_t      hfs_sparsebandblks;
 	u_int64_t      hfs_backingfs_maxblocks;
 #endif
 	size_t         hfs_max_inline_attrsize;
 
 	lck_mtx_t      hfs_mutex;      /* protects access to hfsmount data */
-	void          *hfs_freezing_proc;  /* who froze the fs */
-	void          *hfs_downgrading_proc; /* process who's downgrading to rdonly */
-	lck_rw_t       hfs_insync;     /* protects sync/freeze interaction */
+
+	uint32_t       hfs_syncers;	// Count of the number of syncers running
+	enum {
+		HFS_THAWED,
+		HFS_WANT_TO_FREEZE,	// This state stops hfs_sync from starting
+		HFS_FREEZING,		// We're in this state whilst we're flushing
+		HFS_FROZEN			// Everything gets blocked in hfs_lock_global
+	} hfs_freeze_state;
+	union {
+		/*
+		 * When we're freezing (HFS_FREEZING) but not yet
+		 * frozen (HFS_FROZEN), we record the freezing thread
+		 * so that we stop other threads from taking locks,
+		 * but allow the freezing thread. 
+		 */
+		const struct thread *hfs_freezing_thread;
+		/*
+		 * Once we have frozen (HFS_FROZEN), we record the
+		 * process so that if it dies, we can automatically
+		 * unfreeze. 
+		 */
+		proc_t hfs_freezing_proc;
+	};
+
+	thread_t		hfs_downgrading_thread; /* thread who's downgrading to rdonly */
 
 	/* Resize variables: */
 	u_int32_t		hfs_resize_blocksmoved;
 	u_int32_t		hfs_resize_totalblocks;
 	u_int32_t		hfs_resize_progress;
 #if CONFIG_PROTECT
-	struct cprotect *hfs_resize_cpentry;
+	/* Data Protection fields */
+	cpx_t			hfs_resize_cpx;
 	u_int16_t		hfs_running_cp_major_vers;
-	uint32_t		default_cp_class;
+	uint32_t		default_cp_class; /* default effective class value */
+	uint64_t		cproot_flags;
+	uint8_t			cp_crypto_generation; 
+	uint8_t			hfs_cp_lock_state;  /* per-mount device lock state info */ 
+#if HFS_TMPDBG
+#if !SECURE_KERNEL
+	boolean_t		hfs_cp_verbose;
+#endif
 #endif
 
+#endif
 
 	/* Per mount cnode hash variables: */
 	lck_mtx_t      hfs_chash_mutex;	/* protects access to cnode hash table */
@@ -339,6 +399,19 @@ typedef struct hfsmount {
 
     // Not currently used except for debugging purposes
 	uint32_t        hfs_active_threads;
+
+	enum {
+		// These are indices into the array below
+
+		// Tentative ranges can be claimed back at any time
+		HFS_TENTATIVE_BLOCKS	= 0,
+
+		// Locked ranges cannot be claimed back, but the allocation
+		// won't have been written to disk yet
+		HFS_LOCKED_BLOCKS		= 1,
+	};
+	// These lists are not sorted like a range list usually is
+	struct rl_head hfs_reserved_ranges[2];
 } hfsmount_t;
 
 /*
@@ -364,28 +437,40 @@ typedef hfsmount_t  ExtendedVCB;
 #define vcbFilCnt          hfs_filecount
 #define vcbDirCnt          hfs_dircount
 
-/* Inline functions to set/reset vcbFlags.  Upper 8 bits indicate if the volume 
- * header/VCB is clean/dirty --- if set, volume header is dirty, and 
- * if clear, volume header is clean.  This value is checked to determine
- * if the in-memory copy of volume header should be flushed to the disk
- * or not. 
- */
-/* Set runtime flag to indicate that volume is dirty */
-static __inline__ void MarkVCBDirty(ExtendedVCB *vcb)
+static inline void MarkVCBDirty(hfsmount_t *hfsmp)
 { 
-	vcb->vcbFlags |= 0xFF00;
+	hfsmp->hfs_header_dirty = true;
 }
 
-/* Clear runtime flag to indicate that volume is dirty */
-static __inline__ void MarkVCBClean(ExtendedVCB *vcb)
+static inline void MarkVCBClean(hfsmount_t *hfsmp)
 {
-	vcb->vcbFlags &= 0x00FF;
+	hfsmp->hfs_header_dirty = false;
+	hfsmp->hfs_header_minor_change = false;
 }
 
-/* Check runtime flag to determine if the volume is dirty or not */
-static __inline__ Boolean IsVCBDirty(ExtendedVCB *vcb)
+static inline bool IsVCBDirty(ExtendedVCB *vcb)
 {
-	return (vcb->vcbFlags & 0xFF00 ? true  : false);
+	return vcb->hfs_header_minor_change || vcb->hfs_header_dirty;
+}
+
+// Header is changed but won't be inconsistent if we don't write it
+static inline void hfs_note_header_minor_change(hfsmount_t *hfsmp)
+{
+	hfsmp->hfs_header_minor_change = true;
+}
+
+// Must header be flushed for volume to be consistent?
+static inline bool hfs_header_needs_flushing(hfsmount_t *hfsmp)
+{
+	return (hfsmp->hfs_header_dirty
+			|| ISSET(hfsmp->hfs_catalog_cp->c_flag, C_MODIFIED)
+			|| ISSET(hfsmp->hfs_extents_cp->c_flag, C_MODIFIED)
+			|| (hfsmp->hfs_attribute_cp
+				&& ISSET(hfsmp->hfs_attribute_cp->c_flag, C_MODIFIED))
+			|| (hfsmp->hfs_allocation_cp
+				&& ISSET(hfsmp->hfs_allocation_cp->c_flag, C_MODIFIED))
+			|| (hfsmp->hfs_startup_cp
+				&& ISSET(hfsmp->hfs_startup_cp->c_flag, C_MODIFIED)));
 }
 
 /*
@@ -397,6 +482,7 @@ static __inline__ Boolean IsVCBDirty(ExtendedVCB *vcb)
 enum privdirtype {FILE_HARDLINKS, DIR_HARDLINKS};
 
 #define HFS_ALLOCATOR_SCAN_INFLIGHT	0x0001  	/* scan started */
+#define HFS_ALLOCATOR_SCAN_COMPLETED 0x0002		/* initial scan was completed */
 
 /* HFS mount point flags */
 #define HFS_READ_ONLY             0x00001
@@ -428,10 +514,13 @@ enum privdirtype {FILE_HARDLINKS, DIR_HARDLINKS};
 #define HFS_RDONLY_DOWNGRADE      0x80000
 #define HFS_DID_CONTIG_SCAN      0x100000
 #define HFS_UNMAP                0x200000
-#define HFS_SSD					 0x400000
-#define HFS_SUMMARY_TABLE		 0x800000
-#define HFS_CS		 0x1000000
-
+#define HFS_SSD                  0x400000
+#define HFS_SUMMARY_TABLE        0x800000
+#define HFS_CS                  0x1000000
+#define HFS_CS_METADATA_PIN     0x2000000
+#define HFS_CS_HOTFILE_PIN      0x4000000	/* cooperative fusion (enables a hotfile variant) */
+#define HFS_FEATURE_BARRIER     0x8000000	/* device supports barrier-only flush */
+#define HFS_CS_SWAPFILE_PIN    0x10000000
 
 /* Macro to update next allocation block in the HFS mount structure.  If 
  * the HFS_SKIP_UPDATE_NEXT_ALLOCATION is set, do not update 
@@ -554,6 +643,29 @@ enum { kHFSPlusMaxFileNameBytes = kHFSPlusMaxFileNameChars * 3 };
  */
 #define MAC_GMT_FACTOR		2082844800UL
 
+static inline __attribute__((const))
+off_t hfs_blk_to_bytes(uint32_t blk, uint32_t blk_size)
+{
+	return (off_t)blk * blk_size; 		// Avoid the overflow
+}
+
+/*
+ * For now, we use EIO to indicate consistency issues.  It is safe to
+ * return or assign an error value to HFS_EINCONSISTENT but it is
+ * *not* safe to compare against it because EIO can be generated for
+ * other reasons.  We take advantage of the fact that == has
+ * left-to-right associativity and so any uses of:
+ *
+ *    if (error == HFS_EINCONSISTENT)
+ *
+ * will produce a compiler warning: "comparison between pointer and
+ * integer".
+ *
+ * Note that not everwhere is consistent with the use of
+ * HFS_EINCONSISTENT.  Some places return EINVAL, EIO directly or
+ * other error codes.
+ */
+#define HFS_EINCONSISTENT		(void *)0 == (void *)0 ? EIO : EIO
 
 /*****************************************************************************
 	FUNCTION PROTOTYPES 
@@ -563,6 +675,7 @@ enum { kHFSPlusMaxFileNameBytes = kHFSPlusMaxFileNameChars * 3 };
 	hfs_vnop_xxx functions from different files 
 ******************************************************************************/
 int hfs_vnop_readdirattr(struct vnop_readdirattr_args *);  /* in hfs_attrlist.c */
+int hfs_vnop_getattrlistbulk(struct vnop_getattrlistbulk_args *);  /* in hfs_attrlist.c */
 
 int hfs_vnop_inactive(struct vnop_inactive_args *);        /* in hfs_cnode.c */
 int hfs_vnop_reclaim(struct vnop_reclaim_args *);          /* in hfs_cnode.c */
@@ -588,6 +701,7 @@ int hfs_vnop_bwrite(struct vnop_bwrite_args *);       /* in hfs_readwrite.c */
 int hfs_vnop_blktooff(struct vnop_blktooff_args *);   /* in hfs_readwrite.c */
 int hfs_vnop_offtoblk(struct vnop_offtoblk_args *);   /* in hfs_readwrite.c */
 int hfs_vnop_blockmap(struct vnop_blockmap_args *);   /* in hfs_readwrite.c */
+errno_t hfs_flush_invalid_ranges(vnode_t vp);		  /* in hfs_readwrite.c */
 
 int hfs_vnop_getxattr(struct vnop_getxattr_args *);        /* in hfs_xattr.c */
 int hfs_vnop_setxattr(struct vnop_setxattr_args *);        /* in hfs_xattr.c */
@@ -656,11 +770,33 @@ void hfs_generate_volume_notifications(struct hfsmount *hfsmp);
 ******************************************************************************/
 extern int  hfs_relocate(struct  vnode *, u_int32_t, kauth_cred_t, struct  proc *);
 
-/* Flags for HFS truncate */
-#define HFS_TRUNCATE_SKIPUPDATE 0x00000001
-#define HFS_TRUNCATE_SKIPTIMES 0x00000002 /* implied by skipupdate; it is a subset */
+/* flags for hfs_pin_block_range() and hfs_pin_vnode() */
+#define HFS_PIN_IT       0x0001
+#define HFS_UNPIN_IT     0x0002
+#define HFS_TEMP_PIN     0x0004
+#define HFS_EVICT_PIN    0x0008
+#define HFS_DATALESS_PIN 0x0010
 
-extern int hfs_truncate(struct vnode *, off_t, int, int, int, vfs_context_t);
+//
+// pin/un-pin an explicit range of blocks to the "fast" (usually ssd) device
+//
+int hfs_pin_block_range(struct hfsmount *hfsmp, int pin_state, uint32_t start_block, uint32_t nblocks, vfs_context_t ctx);
+
+//
+// pin/un-pin all the extents belonging to a vnode.
+// also, if it is non-null, "num_blocks_pinned" returns the number of blocks pin/unpinned by the function
+//
+int hfs_pin_vnode(struct hfsmount *hfsmp, struct vnode *vp, int pin_state, uint32_t *num_blocks_pinned, vfs_context_t ctx);
+
+
+int hfs_pin_overflow_extents (struct hfsmount *hfsmp, uint32_t fileid, uint8_t forktype, uint32_t *pinned);
+                                     
+
+/* Flags for HFS truncate */
+#define HFS_TRUNCATE_SKIPTIMES  	0x00000002 /* implied by skipupdate; it is a subset */
+											
+
+extern int hfs_truncate(struct vnode *, off_t, int, int, vfs_context_t);
 
 extern int hfs_release_storage (struct hfsmount *hfsmp, struct filefork *datafork, 
 								struct filefork *rsrcfork,  u_int32_t fileid);
@@ -669,20 +805,14 @@ extern int hfs_prepare_release_storage (struct hfsmount *hfsmp, struct vnode *vp
 
 extern int hfs_bmap(struct vnode *, daddr_t, struct vnode **, daddr64_t *, unsigned int *);
 
-extern int hfs_fsync(struct vnode *, int, int, struct proc *);
+extern errno_t hfs_ubc_setsize(vnode_t vp, off_t len, bool have_cnode_lock);
 
-extern int hfs_access(struct vnode *, mode_t, kauth_cred_t, struct proc *);
 
-extern int hfs_removeallattr(struct hfsmount *hfsmp, u_int32_t fileid);
-
-extern int hfs_set_volxattr(struct hfsmount *hfsmp, unsigned int xattrtype, int state);
-
-extern int hfs_isallocated(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int32_t numBlocks);
-
-extern int hfs_count_allocated(struct hfsmount *hfsmp, u_int32_t startBlock, 
-		u_int32_t numBlocks, u_int32_t *alloc_count);
-
-extern int hfs_isrbtree_active (struct hfsmount *hfsmp);
+/*****************************************************************************
+	Functions from hfs_resize.c 
+******************************************************************************/
+int hfs_extendfs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context);
+int hfs_truncatefs(struct hfsmount *hfsmp, u_int64_t newsize, vfs_context_t context);
 
 
 /*****************************************************************************
@@ -700,8 +830,13 @@ extern void hfs_setencodingbits(struct hfsmount *hfsmp, u_int32_t encoding);
 enum volop {VOL_UPDATE, VOL_MKDIR, VOL_RMDIR, VOL_MKFILE, VOL_RMFILE};
 extern int hfs_volupdate(struct hfsmount *hfsmp, enum volop op, int inroot);
 
-int hfs_flushvolumeheader(struct hfsmount *hfsmp, int waitfor, int altflush);
-#define HFS_ALTFLUSH	1
+enum {
+	HFS_FVH_WAIT					= 0x0001,
+	HFS_FVH_WRITE_ALT				= 0x0002,
+	HFS_FVH_FLUSH_IF_DIRTY			= 0x0004,
+};
+typedef uint32_t hfs_flush_volume_header_options_t;
+int hfs_flushvolumeheader(struct hfsmount *hfsmp, hfs_flush_volume_header_options_t);
 
 extern int  hfs_extendfs(struct hfsmount *, u_int64_t, vfs_context_t);
 extern int  hfs_truncatefs(struct hfsmount *, u_int64_t, vfs_context_t);
@@ -710,7 +845,22 @@ extern int  hfs_resize_progress(struct hfsmount *, u_int32_t *);
 /* If a runtime corruption is detected, mark the volume inconsistent 
  * bit in the volume attributes.
  */
-void hfs_mark_volume_inconsistent(struct hfsmount *hfsmp);
+
+typedef enum {
+	HFS_INCONSISTENCY_DETECTED,
+
+	// Used when unable to rollback an operation that failed
+	HFS_ROLLBACK_FAILED,
+
+	// Used when the latter part of an operation failed, but we chose not to roll back
+	HFS_OP_INCOMPLETE,
+
+	// Used when someone told us to force an fsck on next mount
+	HFS_FSCK_FORCED,
+} hfs_inconsistency_reason_t;
+
+void hfs_mark_inconsistent(struct hfsmount *hfsmp,
+						   hfs_inconsistency_reason_t reason);
 
 void hfs_scan_blocks (struct hfsmount *hfsmp);
 
@@ -728,9 +878,11 @@ OSErr	hfs_MountHFSVolume(struct hfsmount *hfsmp, HFSMasterDirectoryBlock *mdb,
 OSErr	hfs_MountHFSPlusVolume(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp,
 		off_t embeddedOffset, u_int64_t disksize, struct proc *p, void *args, kauth_cred_t cred);
 
+OSErr hfs_ValidateHFSPlusVolumeHeader(struct hfsmount *hfsmp, HFSPlusVolumeHeader *vhp);
+
 extern int hfsUnmount(struct hfsmount *hfsmp, struct proc *p);
 
-extern int overflow_extents(struct filefork *fp);
+extern bool overflow_extents(struct filefork *fp);
 
 extern int hfs_owner_rights(struct hfsmount *hfsmp, uid_t cnode_uid, kauth_cred_t cred,
 		struct proc *p, int invokesuperuserstatus);
@@ -738,7 +890,10 @@ extern int hfs_owner_rights(struct hfsmount *hfsmp, uid_t cnode_uid, kauth_cred_
 extern int check_for_tracked_file(struct vnode *vp, time_t ctime, uint64_t op_type, void *arg);
 extern int check_for_dataless_file(struct vnode *vp, uint64_t op_type);
 extern int hfs_generate_document_id(struct hfsmount *hfsmp, uint32_t *docid);
+extern void hfs_pin_fs_metadata(struct hfsmount *hfsmp);
 
+/* Return information about number of metadata blocks for volume */
+extern int hfs_getinfo_metadata_blocks(struct hfsmount *hfsmp, struct hfsinfo_metadata *hinfo);
 
 /*
  * Journal lock function prototypes
@@ -757,10 +912,8 @@ void hfs_unlock_mount (struct hfsmount *hfsmp);
 #define SFL_BITMAP      0x0004
 #define SFL_ATTRIBUTE   0x0008
 #define SFL_STARTUP	0x0010
-#define SFL_VALIDMASK   (SFL_CATALOG | SFL_EXTENTS | SFL_BITMAP | SFL_ATTRIBUTE | SFL_STARTUP)
-
-extern int  hfs_systemfile_lock(struct hfsmount *, int, enum hfs_locktype);
-extern void hfs_systemfile_unlock(struct hfsmount *, int);
+#define SFL_VM_PRIV	0x0020
+#define SFL_VALIDMASK   (SFL_CATALOG | SFL_EXTENTS | SFL_BITMAP | SFL_ATTRIBUTE | SFL_STARTUP | SFL_VM_PRIV)
 
 extern u_int32_t  GetFileInfo(ExtendedVCB *vcb, u_int32_t dirid, const char *name,
 						   struct cat_attr *fattr, struct cat_fork *forkinfo);
@@ -791,7 +944,8 @@ extern int  hfs_virtualmetafile(struct cnode *);
 
 extern int hfs_start_transaction(struct hfsmount *hfsmp);
 extern int hfs_end_transaction(struct hfsmount *hfsmp);
-extern int hfs_journal_flush(struct hfsmount *hfsmp, boolean_t wait_for_IO);
+extern void hfs_journal_lock(struct hfsmount *hfsmp);
+extern void hfs_journal_unlock(struct hfsmount *hfsmp);
 extern void hfs_syncer_lock(struct hfsmount *hfsmp);
 extern void hfs_syncer_unlock(struct hfsmount *hfsmp);
 extern void hfs_syncer_wait(struct hfsmount *hfsmp);
@@ -799,12 +953,26 @@ extern void hfs_syncer_wakeup(struct hfsmount *hfsmp);
 extern void hfs_syncer_queue(thread_call_t syncer);
 extern void hfs_sync_ejectable(struct hfsmount *hfsmp);
 
+typedef enum hfs_flush_mode {
+	HFS_FLUSH_JOURNAL,              // Flush journal
+	HFS_FLUSH_JOURNAL_META,         // Flush journal and metadata blocks
+	HFS_FLUSH_FULL,                 // Flush journal and does a cache flush
+	HFS_FLUSH_CACHE,                // Flush track cache to media
+	HFS_FLUSH_BARRIER,              // Barrier-only flush to ensure write order
+	HFS_FLUSH_JOURNAL_BARRIER       // Flush journal with barrier
+} hfs_flush_mode_t;
+
+extern errno_t hfs_flush(struct hfsmount *hfsmp, hfs_flush_mode_t mode);
+
 extern void hfs_trim_callback(void *arg, uint32_t extent_count, const dk_extent_t *extents);
 
 /* Erase unused Catalog nodes due to <rdar://problem/6947811>. */
 extern int hfs_erase_unused_nodes(struct hfsmount *hfsmp);
 
 extern uint64_t hfs_usecs_to_deadline(uint64_t usecs);
+
+extern int hfs_freeze(struct hfsmount *hfsmp);
+extern int hfs_thaw(struct hfsmount *hfsmp, const struct proc *process);
 
 
 /*****************************************************************************
@@ -823,10 +991,28 @@ extern int hfs_btsync(struct vnode *vp, int sync_transaction);
 extern void replace_desc(struct cnode *cp, struct cat_desc *cdp);
 
 extern int hfs_vgetrsrc(struct hfsmount *hfsmp, struct vnode *vp,
-			struct vnode **rvpp, int can_drop_lock, int error_on_unlink);
+						struct vnode **rvpp);
 
-extern int hfs_update(struct vnode *, int);
+typedef enum {
+	// Push all modifications to disk (including minor ones)
+	HFS_UPDATE_FORCE = 0x01,
+} hfs_update_options_t;
 
+extern int hfs_update(struct vnode *, int options);
+
+typedef enum hfs_sync_mode {
+	HFS_FSYNC,
+	HFS_FSYNC_FULL,
+	HFS_FSYNC_BARRIER
+} hfs_fsync_mode_t;
+
+extern int hfs_fsync(struct vnode *, int, hfs_fsync_mode_t, struct proc *);
+
+const struct cat_fork *
+hfs_prepare_fork_for_update(filefork_t *ff,
+							const struct cat_fork *cf,
+							struct cat_fork *cf_buf,
+							uint32_t block_size);
 
 /*****************************************************************************
 	Functions from hfs_xattr.c
@@ -846,10 +1032,15 @@ int  hfs_buildattrkey(u_int32_t fileID, const char *attrname, HFSPlusAttrKey *ke
 void hfs_xattr_init(struct hfsmount * hfsmp);
 int file_attribute_exist(struct hfsmount *hfsmp, uint32_t fileID);
 int init_attrdata_vnode(struct hfsmount *hfsmp);
-int hfs_getxattr_internal(struct cnode *, struct vnop_getxattr_args *,
-							struct hfsmount *, u_int32_t);
-int hfs_setxattr_internal(struct cnode *, caddr_t, size_t, 
-						  struct vnop_setxattr_args *, struct hfsmount *, u_int32_t);
+int hfs_xattr_read(vnode_t vp, const char *name, void *data, size_t *size);
+int hfs_getxattr_internal(cnode_t *, struct vnop_getxattr_args *,
+                          struct hfsmount *, u_int32_t);
+int hfs_xattr_write(vnode_t vp, const char *name, const void *data, size_t size);
+int hfs_setxattr_internal(struct cnode *, const void *, size_t, 
+                          struct vnop_setxattr_args *, struct hfsmount *, u_int32_t);
+extern int hfs_removeallattr(struct hfsmount *hfsmp, u_int32_t fileid, 
+							 bool *open_transaction);
+extern int hfs_set_volxattr(struct hfsmount *hfsmp, unsigned int xattrtype, int state);
 
 
 
@@ -869,9 +1060,26 @@ extern void  hfs_savelinkorigin(cnode_t *cp, cnid_t parentcnid);
 extern void  hfs_relorigins(struct cnode *cp);
 extern void  hfs_relorigin(struct cnode *cp, cnid_t parentcnid);
 extern int   hfs_haslinkorigin(cnode_t *cp);
-extern cnid_t  hfs_currentparent(cnode_t *cp);
+extern cnid_t  hfs_currentparent(cnode_t *cp, bool have_lock);
 extern cnid_t  hfs_currentcnid(cnode_t *cp);
+errno_t hfs_first_link(hfsmount_t *hfsmp, cnode_t *cp, cnid_t *link_id);
 
+
+/*****************************************************************************
+	Functions from VolumeAllocation.c
+ ******************************************************************************/
+extern int hfs_isallocated(struct hfsmount *hfsmp, u_int32_t startingBlock, u_int32_t numBlocks);
+
+extern int hfs_count_allocated(struct hfsmount *hfsmp, u_int32_t startBlock, 
+		u_int32_t numBlocks, u_int32_t *alloc_count);
+
+extern int hfs_isrbtree_active (struct hfsmount *hfsmp);
+
+/*****************************************************************************
+	Functions from hfs_fsinfo.c
+ ******************************************************************************/
+extern errno_t hfs_get_fsinfo(struct hfsmount *hfsmp, void *a_data);
+extern void hfs_fsinfo_data_add(struct hfs_fsinfo_data *fsinfo, uint64_t entry);
 
 #endif /* __APPLE_API_PRIVATE */
 #endif /* KERNEL */

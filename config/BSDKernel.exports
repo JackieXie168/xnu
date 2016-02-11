@@ -6,8 +6,8 @@ _VNOP_STRATEGY
 _VNOP_WRITE
 __FREE
 __FREE_ZONE
-__MALLOC
-__MALLOC_ZONE
+__MALLOC:__MALLOC_external
+__MALLOC_ZONE:__MALLOC_ZONE_external
 _advisory_read
 _advisory_read_ext
 _bcd2bin_data
@@ -468,6 +468,7 @@ _nop_write
 _nulldev
 _nullop
 _physio
+_proc_chrooted
 _proc_exiting
 _proc_find
 _proc_forcequota
@@ -488,13 +489,11 @@ _proc_selfppid
 _proc_selfpgrpid
 _proc_signal
 _proc_suser
-_proc_tbe
 _proto_inject
 _proto_input
 _proto_register_plumber
 _proto_unregister_plumber
 _random
-_read_random
 _selrecord
 _selthreadclear
 _seltrue
@@ -566,21 +565,9 @@ _sysctl_handle_long
 _sysctl_handle_opaque
 _sysctl_handle_quad
 _sysctl_handle_string
-_sysctl_int
-_sysctl_mib_init
-_sysctl_quad
-_sysctl_rdint
-_sysctl_rdquad
-_sysctl_rdstring
-_sysctl_rdstruct
-_sysctl_register_all
 _sysctl_register_fixed
 _sysctl_register_oid
-_sysctl_register_set
-_sysctl_string
-_sysctl_struct
 _sysctl_unregister_oid
-_sysctl_unregister_set
 _thread_issignal
 _timevaladd
 _timevalfix
@@ -639,6 +626,7 @@ _vcount
 _vflush
 _vfs_64bitready
 _vfs_addname
+_vfs_attr_pack
 _vfs_authcache_ttl
 _vfs_authopaque
 _vfs_authopaqueaccess
@@ -663,6 +651,7 @@ _vfs_flags
 _vfs_fsadd
 _vfs_fsprivate
 _vfs_fsremove
+_vfs_get_notify_attributes
 _vfs_getnewfsid
 _vfs_getvfs
 _vfs_init_io_attributes
@@ -689,6 +678,7 @@ _vfs_setflags
 _vfs_setfsprivate
 _vfs_setioattr
 _vfs_setlocklocal
+_vfs_setup_vattr_from_attrlist
 _vfs_setmaxsymlen
 _vfs_statfs
 _vfs_sysctl
@@ -740,6 +730,7 @@ _vnode_iterate
 _vnode_lookup
 _vnode_mount
 _vnode_mountedhere
+_vnode_notify
 _vnode_open
 _vnode_put
 _vnode_putname
@@ -797,6 +788,7 @@ _vnop_pathconf_desc
 _vnop_read_desc
 _vnop_readdir_desc
 _vnop_readdirattr_desc
+_vnop_getattrlistbulk_desc
 _vnop_readlink_desc
 _vnop_reclaim_desc
 _vnop_remove_desc

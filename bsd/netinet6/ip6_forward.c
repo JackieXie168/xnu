@@ -198,8 +198,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 #endif /*IPSEC*/
 
 	/*
-	 * Do not forward packets to multicast destination (should be handled
-	 * by ip6_mforward().
+	 * Do not forward packets to multicast destination.
 	 * Do not forward packets with unspecified source.  It was discussed
 	 * in July 2000, on ipngwg mailing list.
 	 */
@@ -224,8 +223,8 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 
 	if (ip6->ip6_hlim <= IPV6_HLIMDEC) {
 		/* XXX in6_ifstat_inc(rt->rt_ifp, ifs6_in_discard) */
-		icmp6_error(m, ICMP6_TIME_EXCEEDED,
-				ICMP6_TIME_EXCEED_TRANSIT, 0);
+		icmp6_error_flag(m, ICMP6_TIME_EXCEEDED,
+				ICMP6_TIME_EXCEED_TRANSIT, 0, 0);
 		return (NULL);
 	}
 
@@ -654,7 +653,7 @@ ip6_forward(struct mbuf *m, struct route_in6 *ip6forward_rt,
 		 *	rthdr. (itojun)
 		 */
 #if 1
-		if (0)
+		if ((0))
 #else
 		if ((rt->rt_flags & (RTF_BLACKHOLE|RTF_REJECT)) == 0)
 #endif

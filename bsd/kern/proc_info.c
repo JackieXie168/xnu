@@ -56,7 +56,6 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <kern/task.h>
-#include <kern/lock.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
 #include <vm/vm_kern.h>
@@ -82,6 +81,15 @@
 
 #include <vm/vm_protos.h>
 
+/* Needed by proc_pidnoteexit() */
+#include <sys/event.h>
+#include <sys/codesign.h>
+
+/* Needed by proc_listcoalitions() */
+#ifdef CONFIG_COALITIONS
+#include <sys/coalition.h>
+#endif
+
 struct pshmnode;
 struct psemnode;
 struct pipe;
@@ -92,52 +100,88 @@ uint64_t get_dispatchqueue_offset_from_proc(void *);
 uint64_t get_dispatchqueue_serialno_offset_from_proc(void *);
 int proc_info_internal(int callnum, int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
 
+/*
+ * TODO: Replace the noinline attribute below.  Currently, it serves
+ * to avoid stack bloat caused by inlining multiple functions that
+ * have large stack footprints; when the functions are independent
+ * of each other (will not both be called in any given call to the
+ * caller), this only serves to bloat the stack, as we allocate
+ * space for both functions, despite the fact that we only need a
+ * fraction of that space.
+ *
+ * Long term, these functions should not be allocating everything on
+ * the stack, and should move large allocations (the huge structs
+ * that proc info deals in) to the heap, or eliminate them if
+ * possible.
+ *
+ * The functions that most desperately need to improve stack usage
+ * (starting with the worst offenders):
+ *   proc_pidvnodepathinfo
+ *   proc_pidinfo
+ *   proc_pidregionpathinfo
+ *   pid_vnodeinfopath
+ *   pid_pshminfo
+ *   pid_pseminfo
+ *   pid_socketinfo
+ *   proc_pid_rusage
+ *   proc_pidoriginatorinfo
+ */
+
 /* protos for proc_info calls */
-int proc_listpids(uint32_t type, uint32_t tyoneinfo, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
-int proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
-int proc_pidfdinfo(int pid, int flavor,int fd, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
-int proc_kernmsgbuf(user_addr_t buffer, uint32_t buffersize, int32_t * retval);
-int proc_setcontrol(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
-int proc_pidfileportinfo(int pid, int flavor, mach_port_name_t name, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_dirtycontrol(int pid, int flavor, uint64_t arg, int32_t * retval);
-int proc_terminate(int pid, int32_t * retval);
-int proc_pid_rusage(int pid, int flavor, user_addr_t buffer, int32_t * retval);
+int __attribute__ ((noinline)) proc_listpids(uint32_t type, uint32_t tyoneinfo, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_pidfdinfo(int pid, int flavor,int fd, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_kernmsgbuf(user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_setcontrol(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_pidfileportinfo(int pid, int flavor, mach_port_name_t name, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_dirtycontrol(int pid, int flavor, uint64_t arg, int32_t * retval);
+int __attribute__ ((noinline)) proc_terminate(int pid, int32_t * retval);
+int __attribute__ ((noinline)) proc_pid_rusage(int pid, int flavor, user_addr_t buffer, int32_t * retval);
+int __attribute__ ((noinline)) proc_pidoriginatorinfo(int pid, int flavor, user_addr_t buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) proc_listcoalitions(int flavor, int coaltype, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_can_use_foreground_hw(int pid, user_addr_t reason, uint32_t resonsize, int32_t *retval);
 
 /* protos for procpidinfo calls */
-int proc_pidfdlist(proc_t p, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidbsdinfo(proc_t p, struct proc_bsdinfo *pbsd, int zombie);
-int proc_pidshortbsdinfo(proc_t p, struct proc_bsdshortinfo *pbsd_shortp, int zombie);
-int proc_pidtaskinfo(proc_t p, struct proc_taskinfo *ptinfo);
-int proc_pidallinfo(proc_t p, int flavor, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidthreadinfo(proc_t p, uint64_t arg,  int thuniqueid, struct proc_threadinfo *pthinfo);
-int proc_pidthreadpathinfo(proc_t p, uint64_t arg,  struct proc_threadwithpathinfo *pinfo);
-int proc_pidlistthreads(proc_t p,  user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidregioninfo(proc_t p, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidregionpathinfo(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidvnodepathinfo(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidpathinfo(proc_t p, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-int proc_pidworkqueueinfo(proc_t p, struct proc_workqueueinfo *pwqinfo);
-int proc_pidfileportlist(proc_t p, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
-void proc_piduniqidentifierinfo(proc_t p, struct proc_uniqidentifierinfo *p_uniqidinfo);
+int __attribute__ ((noinline)) proc_pidfdlist(proc_t p, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidbsdinfo(proc_t p, struct proc_bsdinfo *pbsd, int zombie);
+int __attribute__ ((noinline)) proc_pidshortbsdinfo(proc_t p, struct proc_bsdshortinfo *pbsd_shortp, int zombie);
+int __attribute__ ((noinline)) proc_pidtaskinfo(proc_t p, struct proc_taskinfo *ptinfo);
+int __attribute__ ((noinline)) proc_pidthreadinfo(proc_t p, uint64_t arg,  int thuniqueid, struct proc_threadinfo *pthinfo);
+int __attribute__ ((noinline)) proc_pidthreadpathinfo(proc_t p, uint64_t arg,  struct proc_threadwithpathinfo *pinfo);
+int __attribute__ ((noinline)) proc_pidlistthreads(proc_t p,  user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidregioninfo(proc_t p, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidregionpathinfo(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidregionpathinfo2(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidregionpathinfo3(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidvnodepathinfo(proc_t p,  uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidpathinfo(proc_t p, uint64_t arg, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+int __attribute__ ((noinline)) proc_pidworkqueueinfo(proc_t p, struct proc_workqueueinfo *pwqinfo);
+int __attribute__ ((noinline)) proc_pidfileportlist(proc_t p, user_addr_t buffer, uint32_t buffersize, int32_t *retval);
+void __attribute__ ((noinline)) proc_piduniqidentifierinfo(proc_t p, struct proc_uniqidentifierinfo *p_uniqidinfo);
+void __attribute__ ((noinline)) proc_archinfo(proc_t p, struct proc_archinfo *pai);
+void __attribute__ ((noinline)) proc_pidcoalitioninfo(proc_t p, struct proc_pidcoalitioninfo *pci);
+int __attribute__ ((noinline)) proc_pidnoteexit(proc_t p, uint64_t arg,  uint32_t *data);
+int __attribute__ ((noinline)) proc_pidoriginatorpid_uuid(uuid_t uuid, uint32_t buffersize, pid_t *pid);
 
 
 /* protos for proc_pidfdinfo calls */
-int pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_socketinfo(socket_t  so, struct fileproc *fp, int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_pseminfo(struct psemnode * psem, struct fileproc * fp,  int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_pshminfo(struct pshmnode * pshm, struct fileproc * fp,  int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_pipeinfo(struct pipe * p, struct fileproc * fp,  int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_kqueueinfo(struct kqueue * kq, struct fileproc * fp,  int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
-int pid_atalkinfo(struct atalk  * at, struct fileproc * fp,  int closeonexec, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp,proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp,proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_socketinfo(socket_t  so, struct fileproc *fp,proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_pseminfo(struct psemnode * psem, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_pshminfo(struct pshmnode * pshm, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_pipeinfo(struct pipe * p, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_kqueueinfo(struct kqueue * kq, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
+int __attribute__ ((noinline)) pid_atalkinfo(struct atalk  * at, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, uint32_t buffersize, int32_t * retval);
 
 
 /* protos for misc */
 
 int fill_vnodeinfo(vnode_t vp, struct vnode_info *vinfo);
-void  fill_fileinfo(struct fileproc * fp, int closeonexec, struct proc_fileinfo * finfo);
+void  fill_fileinfo(struct fileproc * fp, proc_t proc, int fd, struct proc_fileinfo * finfo);
 int proc_security_policy(proc_t targetp, int callnum, int flavor, boolean_t check_same_user);
 static void munge_vinfo_stat(struct stat64 *sbp, struct vinfo_stat *vsbp);
+static int proc_piduuidinfo(pid_t pid, uuid_t uuid_buf, uint32_t buffersize);
 
 extern int cansignal(struct proc *, kauth_cred_t, struct proc *, int, int);
 extern int proc_get_rusage(proc_t proc, int flavor, user_addr_t buffer, int is_zombie);
@@ -198,6 +242,13 @@ proc_info_internal(int callnum, int pid, int flavor, uint64_t arg, user_addr_t b
 			return(proc_dirtycontrol(pid, flavor, arg, retval));
 		case PROC_INFO_CALL_PIDRUSAGE:
 			return (proc_pid_rusage(pid, flavor, buffer, retval));
+		case PROC_INFO_CALL_PIDORIGINATORINFO:
+			return (proc_pidoriginatorinfo(pid, flavor, buffer, buffersize, retval));
+		case PROC_INFO_CALL_LISTCOALITIONS:
+			return proc_listcoalitions(pid /* flavor */, flavor /* coaltype */, buffer,
+						   buffersize, retval);
+		case PROC_INFO_CALL_CANUSEFGHW:
+			return proc_can_use_foreground_hw(pid, buffer, buffersize, retval);
 		default:
 				return(EINVAL);
 	}
@@ -329,7 +380,7 @@ proc_loop:
 }
 
 
-/********************************** proc_pidinfo routines ********************************/
+/********************************** proc_pidfdlist routines ********************************/
 
 int 
 proc_pidfdlist(proc_t p, user_addr_t buffer, uint32_t  buffersize, int32_t *retval)
@@ -849,6 +900,105 @@ proc_pidregionpathinfo(proc_t p, uint64_t arg, user_addr_t buffer, __unused uint
 	return(error);
 }
 
+int
+proc_pidregionpathinfo2(proc_t p,  uint64_t arg, user_addr_t buffer, __unused uint32_t buffersize, int32_t *retval)
+{
+	struct proc_regionwithpathinfo preginfo;
+	int ret, error = 0;
+	uintptr_t vnodeaddr= 0;
+	uint32_t vnodeid= 0;
+	vnode_t vp;
+	int count;
+
+	bzero(&preginfo, sizeof(struct proc_regionwithpathinfo));
+
+	ret = fill_procregioninfo_onlymappedvnodes( p->task, arg, (struct proc_regioninfo_internal *)&preginfo.prp_prinfo, (uintptr_t *)&vnodeaddr, (uint32_t *)&vnodeid);
+	if (ret == 0)
+		return(EINVAL);
+	if (!vnodeaddr)
+		return(EINVAL);
+
+	vp = (vnode_t)vnodeaddr;
+	if ((vnode_getwithvid(vp, vnodeid)) == 0) {
+		/* FILL THE VNODEINFO */
+		error = fill_vnodeinfo(vp, &preginfo.prp_vip.vip_vi);
+		count = MAXPATHLEN;
+		vn_getpath(vp, &preginfo.prp_vip.vip_path[0], &count);
+		/* Always make sure it is null terminated */
+		preginfo.prp_vip.vip_path[MAXPATHLEN-1] = 0;
+		vnode_put(vp);
+	} else {
+		return(EINVAL);
+	}
+
+	error = copyout(&preginfo, buffer, sizeof(struct proc_regionwithpathinfo));
+	if (error == 0)
+		*retval = sizeof(struct proc_regionwithpathinfo);
+	return(error);
+}
+
+int
+proc_pidregionpathinfo3(proc_t p,  uint64_t arg, user_addr_t buffer, __unused uint32_t buffersize, int32_t *retval)
+{
+	struct proc_regionwithpathinfo preginfo;
+	int ret, error = 0;
+	uintptr_t vnodeaddr;
+	uint32_t vnodeid;
+	vnode_t vp;
+	int count;
+	uint64_t addr = 0;
+
+	/* Loop while looking for vnodes that match dev_t filter */
+	do {
+		bzero(&preginfo, sizeof(struct proc_regionwithpathinfo));
+		vnodeaddr = 0;
+		vnodeid = 0;
+
+		ret = fill_procregioninfo_onlymappedvnodes( p->task, addr, (struct proc_regioninfo_internal *)&preginfo.prp_prinfo, (uintptr_t *)&vnodeaddr, (uint32_t *)&vnodeid);
+		if (ret == 0)
+			return(EINVAL);
+		if (!vnodeaddr)
+			return(EINVAL);
+
+		vp = (vnode_t)vnodeaddr;
+		if ((vnode_getwithvid(vp, vnodeid)) == 0) {
+			/* Check if the vnode matches the filter, otherwise loop looking for the next memory region backed by a vnode */
+			struct vnode_attr va;
+			
+			memset(&va, 0, sizeof(va));
+			VATTR_INIT(&va);
+			VATTR_WANTED(&va, va_fsid);
+
+			ret = vnode_getattr(vp, &va, vfs_context_current());
+			if (ret) {
+				vnode_put(vp);
+				return(EINVAL);
+			}
+
+			if (va.va_fsid == arg) {
+				/* FILL THE VNODEINFO */
+				error = fill_vnodeinfo(vp, &preginfo.prp_vip.vip_vi);
+				count = MAXPATHLEN;
+				vn_getpath(vp, &preginfo.prp_vip.vip_path[0], &count);
+				/* Always make sure it is null terminated */
+				preginfo.prp_vip.vip_path[MAXPATHLEN-1] = 0;
+				vnode_put(vp);
+				break;
+			}
+			vnode_put(vp);
+		} else {
+			return(EINVAL);
+		}
+
+		addr = preginfo.prp_prinfo.pri_address + preginfo.prp_prinfo.pri_size;
+	} while (1);
+
+	error = copyout(&preginfo, buffer, sizeof(struct proc_regionwithpathinfo));
+	if (error == 0)
+		*retval = sizeof(struct proc_regionwithpathinfo);
+	return(error);
+}
+
 /*
  * Path is relative to current process directory; may different from current
  * thread directory.
@@ -980,6 +1130,422 @@ proc_piduniqidentifierinfo(proc_t p, struct proc_uniqidentifierinfo *p_uniqidinf
 	p_uniqidinfo->p_reserve4 = 0;
 }
 
+
+static int
+proc_piduuidinfo(pid_t pid, uuid_t uuid_buf, uint32_t buffersize)
+{
+	struct proc * p = PROC_NULL;
+	int zombref = 0;
+
+	if (buffersize < sizeof(uuid_t))
+		return EINVAL;
+
+	if ((p = proc_find(pid)) == PROC_NULL) {
+		p = proc_find_zombref(pid);
+		zombref = 1;
+	}
+	if (p == PROC_NULL) {
+		return ESRCH;
+	}
+
+	proc_getexecutableuuid(p, (unsigned char *)uuid_buf, buffersize);
+
+	if (zombref)
+		proc_drop_zombref(p);
+	else
+		proc_rele(p);
+
+	return 0;
+}
+
+/*
+ * Function to get the uuid and pid of the originator of the voucher.
+ */
+int
+proc_pidoriginatorpid_uuid(uuid_t uuid, uint32_t buffersize, pid_t *pid)
+{
+	pid_t originator_pid;
+	kern_return_t kr;
+	int error;
+
+	/* 
+	 * Get the current voucher origin pid. The pid returned here 
+	 * might not be valid or may have been recycled.
+	 */
+	kr = thread_get_current_voucher_origin_pid(&originator_pid);
+	/* If errors, convert errors to appropriate format */
+	if (kr) {
+		if (kr == KERN_INVALID_TASK)
+			error = ESRCH;
+		else if (kr == KERN_INVALID_VALUE)
+			error = ENOATTR;
+		else
+			error = EINVAL;
+		return error;
+	}
+
+	*pid = originator_pid;
+	error = proc_piduuidinfo(originator_pid, uuid, buffersize);
+	return error;
+}
+
+/*
+ * Function to get the uuid of the originator of the voucher.
+ */
+int
+proc_pidoriginatoruuid(uuid_t uuid, uint32_t buffersize)
+{
+	pid_t originator_pid;
+	return (proc_pidoriginatorpid_uuid(uuid, buffersize, &originator_pid));
+}
+
+/***************************** proc_pidoriginatorinfo ***************************/
+
+int
+proc_pidoriginatorinfo(int pid, int flavor, user_addr_t buffer, uint32_t  buffersize, int32_t * retval)
+{
+	int error = ENOTSUP;
+	uint32_t size;
+
+	switch (flavor) {
+		case PROC_PIDORIGINATOR_UUID:
+			size = PROC_PIDORIGINATOR_UUID_SIZE;
+			break;
+		case PROC_PIDORIGINATOR_BGSTATE:
+			size = PROC_PIDORIGINATOR_BGSTATE_SIZE;
+			break;
+		case PROC_PIDORIGINATOR_PID_UUID:
+			size = PROC_PIDORIGINATOR_PID_UUID_SIZE;
+			break;
+		default:
+			return(EINVAL);
+	}
+
+	if (buffersize < size) 
+		return(ENOMEM);
+
+	if (pid != 0 && pid != proc_selfpid())
+		return (EINVAL);
+
+	switch (flavor) {
+		case PROC_PIDORIGINATOR_UUID: {
+			uuid_t uuid;
+
+			error = proc_pidoriginatoruuid(uuid, sizeof(uuid));
+			if (error != 0)
+				goto out;
+
+			error = copyout(uuid, buffer, size);
+			if (error == 0)
+				*retval = size;
+		}
+		break;
+
+		case PROC_PIDORIGINATOR_PID_UUID: {
+			struct proc_originatorinfo originator_info;
+
+			error = proc_pidoriginatorpid_uuid(originator_info.originator_uuid,
+						sizeof(uuid_t), &originator_info.originator_pid);
+			if (error != 0)
+				goto out;
+
+			originator_info.p_reserve2 = 0;
+			originator_info.p_reserve3 = 0;
+			originator_info.p_reserve4 = 0;
+
+			error = copyout(&originator_info, buffer, size);
+			if (error == 0)
+				*retval = size;
+		}
+		break;
+
+		case PROC_PIDORIGINATOR_BGSTATE: {
+			uint32_t is_backgrounded;
+			error = proc_get_originatorbgstate(&is_backgrounded);
+			if (error)
+				goto out;
+
+			error = copyout(&is_backgrounded, buffer, size);
+			if (error == 0)
+				*retval = size;
+		}
+		break;
+
+		default:
+			error = ENOTSUP;
+	}
+out:
+	return error;
+}
+
+/***************************** proc_listcoalitions ***************************/
+int proc_listcoalitions(int flavor, int type, user_addr_t buffer,
+			uint32_t buffersize, int32_t *retval)
+{
+#if CONFIG_COALITIONS
+	int error = ENOTSUP;
+	int coal_type;
+	uint32_t elem_size;
+	void *coalinfo = NULL;
+	uint32_t k_buffersize = 0, copyout_sz = 0;
+	int ncoals = 0, ncoals_ = 0;
+
+	/* struct procinfo_coalinfo; */
+
+	switch (flavor) {
+	case LISTCOALITIONS_ALL_COALS:
+		elem_size = LISTCOALITIONS_ALL_COALS_SIZE;
+		coal_type = -1;
+		break;
+	case LISTCOALITIONS_SINGLE_TYPE:
+		elem_size = LISTCOALITIONS_SINGLE_TYPE_SIZE;
+		coal_type = type;
+		break;
+	default:
+		return EINVAL;
+	}
+
+	/* find the total number of coalitions */
+	ncoals = coalitions_get_list(coal_type, NULL, 0);
+
+	if (ncoals == 0 || buffer == 0 || buffersize == 0) {
+		/*
+		 * user just wants buffer size
+		 * or there are no coalitions
+		 */
+		error = 0;
+		*retval = (int)(ncoals * elem_size);
+		goto out;
+	}
+
+	k_buffersize = ncoals * elem_size;
+	coalinfo = kalloc((vm_size_t)k_buffersize);
+	if (!coalinfo) {
+		error = ENOMEM;
+		goto out;
+	}
+	bzero(coalinfo, k_buffersize);
+
+	switch (flavor) {
+	case LISTCOALITIONS_ALL_COALS:
+	case LISTCOALITIONS_SINGLE_TYPE:
+		ncoals_ = coalitions_get_list(coal_type, coalinfo, ncoals);
+		break;
+	default:
+		panic("memory corruption?!");
+	}
+
+	if (ncoals_ == 0) {
+		/* all the coalitions disappeared... weird but valid */
+		error = 0;
+		*retval = 0;
+		goto out;
+	}
+
+	/*
+	 * Some coalitions may have disappeared between our initial check,
+	 * and the the actual list acquisition.
+	 * Only copy out what we really need.
+	 */
+	copyout_sz = k_buffersize;
+	if (ncoals_ < ncoals)
+		copyout_sz = ncoals_ * elem_size;
+
+	/*
+	 * copy the list up to user space
+	 * (we're guaranteed to have a non-null pointer/size here)
+	 */
+	error = copyout(coalinfo, buffer,
+			copyout_sz < buffersize ? copyout_sz : buffersize);
+
+	if (error == 0)
+		*retval = (int)copyout_sz;
+
+out:
+	if (coalinfo)
+		kfree(coalinfo, k_buffersize);
+
+	return error;
+#else
+	/* no coalition support */
+	(void)flavor;
+	(void)type;
+	(void)buffer;
+	(void)buffersize;
+	(void)retval;
+	return ENOTSUP;
+#endif
+}
+
+
+/*************************** proc_can_use_forgeound_hw **************************/
+int proc_can_use_foreground_hw(int pid, user_addr_t u_reason, uint32_t reasonsize, int32_t *retval)
+{
+	proc_t p = PROC_NULL;
+	int error = 0;
+	uint32_t reason = PROC_FGHW_ERROR;
+	uint32_t isBG = 0;
+	task_t task = TASK_NULL;
+#if CONFIG_COALITIONS
+	coalition_t coal = COALITION_NULL;
+#endif
+
+	*retval = 0;
+
+	if (pid <= 0) {
+		error = EINVAL;
+		reason = PROC_FGHW_ERROR;
+		goto out;
+	}
+
+	p = proc_find(pid);
+	if (p == PROC_NULL) {
+		error = ESRCH;
+		reason = PROC_FGHW_ERROR;
+		goto out;
+	}
+
+#if CONFIG_COALITIONS
+	if (p != current_proc() &&
+	    !kauth_cred_issuser(kauth_cred_get())) {
+		error = EPERM;
+		reason = PROC_FGHW_ERROR;
+		goto out;
+	}
+
+	task = p->task;
+	task_reference(task);
+	if (coalition_is_leader(task, COALITION_TYPE_JETSAM, &coal) == FALSE) {
+		/* current task is not a coalition leader: find the leader */
+		task_deallocate(task);
+		task = coalition_get_leader(coal);
+	}
+
+	if (task != TASK_NULL) {
+		/*
+		 * If task is non-null, then it is the coalition leader of the
+		 * current process' coalition. This could be the same task as
+		 * the current_task, and that's OK.
+		 */
+		uint32_t flags = 0;
+		int role;
+
+		proc_get_darwinbgstate(task, &flags);
+		if ((flags & PROC_FLAG_APPLICATION) != PROC_FLAG_APPLICATION) {
+			/*
+			 * Coalition leader is not an application, continue
+			 * searching for other ways this task could gain
+			 * access to HW
+			 */
+			reason = PROC_FGHW_DAEMON_LEADER;
+			goto no_leader;
+		}
+
+		if (proc_get_effective_task_policy(task, TASK_POLICY_DARWIN_BG)) {
+			/*
+			 * If the leader of the current process' coalition has
+			 * been marked as DARWIN_BG, then it definitely should
+			 * not be using foreground hardware resources.
+			 */
+			reason = PROC_FGHW_LEADER_BACKGROUND;
+			goto out;
+		}
+
+		role = proc_get_effective_task_policy(task, TASK_POLICY_ROLE);
+		switch (role) {
+		case TASK_FOREGROUND_APPLICATION: /* DARWIN_ROLE_UI_FOCAL */
+		case TASK_BACKGROUND_APPLICATION: /* DARWIN_ROLE_UI */
+			/*
+			 * The leader of this coalition is a focal, UI app:
+			 * access granted
+			 * TODO: should extensions/plugins be allowed to use
+			 *       this hardware?
+			 */
+			*retval = 1;
+			reason = PROC_FGHW_OK;
+			goto out;
+		case TASK_DEFAULT_APPLICATION: /* DARWIN_ROLE_UI_NON_FOCAL */
+		case TASK_NONUI_APPLICATION: /* DARWIN_ROLE_NON_UI */
+		case TASK_THROTTLE_APPLICATION:
+		case TASK_UNSPECIFIED:
+		default:
+			/* non-focal, non-ui apps don't get access */
+			reason = PROC_FGHW_LEADER_NONUI;
+			goto out;
+		}
+	}
+
+no_leader:
+	if (task != TASK_NULL) {
+		task_deallocate(task);
+		task = TASK_NULL;
+	}
+#endif /* CONFIG_COALITIONS */
+
+	/*
+	 * There is no reasonable semantic to investigate the currently
+	 * adopted voucher of an arbitrary thread in a non-current process.
+	 * We return '0'
+	 */
+	if (p != current_proc()) {
+		error = EINVAL;
+		goto out;
+	}
+
+	/*
+	 * In the absence of coalitions, fall back to a voucher-based lookup
+	 * where a daemon can used foreground HW if it's operating on behalf
+	 * of a foreground application.
+	 * NOTE: this is equivalent to a call to
+	 *       proc_pidoriginatorinfo(PROC_PIDORIGINATOR_BGSTATE, &isBG, sizeof(isBG))
+	 */
+	isBG = 1;
+	error = proc_get_originatorbgstate(&isBG);
+	switch (error) {
+	case 0:
+		break;
+	case ESRCH:
+		reason = PROC_FGHW_NO_ORIGINATOR;
+		error = 0;
+		goto out;
+	case ENOATTR:
+		reason = PROC_FGHW_NO_VOUCHER_ATTR;
+		error = 0;
+		goto out;
+	case EINVAL:
+		reason = PROC_FGHW_DAEMON_NO_VOUCHER;
+		error = 0;
+		goto out;
+	default:
+		/* some other error occurred: report that to the caller */
+		reason = PROC_FGHW_VOUCHER_ERROR;
+		goto out;
+	}
+
+	if (isBG) {
+		reason = PROC_FGHW_ORIGINATOR_BACKGROUND;
+		error = 0;
+	} else {
+		/*
+		 * The process itself is either a foreground app, or has
+		 * adopted a voucher originating from an app that's still in
+		 * the foreground
+		 */
+		reason = PROC_FGHW_DAEMON_OK;
+		*retval = 1;
+	}
+
+out:
+	if (task != TASK_NULL)
+		task_deallocate(task);
+	if (p != PROC_NULL)
+		proc_rele(p);
+	if (reasonsize >= sizeof(reason) && u_reason != (user_addr_t)0)
+		(void)copyout(&reason, u_reason, sizeof(reason));
+	return error;
+}
+
+
 /********************************** proc_pidinfo ********************************/
 
 
@@ -1057,6 +1623,26 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 		case PROC_PIDT_BSDINFOWITHUNIQID:
 			size = PROC_PIDT_BSDINFOWITHUNIQID_SIZE;
 			break;
+		case PROC_PIDARCHINFO:
+			size = PROC_PIDARCHINFO_SIZE;
+			break;
+		case PROC_PIDCOALITIONINFO:
+			size = PROC_PIDCOALITIONINFO_SIZE;
+			break;
+		case PROC_PIDNOTEEXIT:
+			/* 
+			 * Set findzomb explicitly because arg passed
+			 * in is used as note exit status bits.
+			 */
+			size = PROC_PIDNOTEEXIT_SIZE;
+			findzomb = 1;
+			break;
+		case PROC_PIDREGIONPATHINFO2:
+			size = PROC_PIDREGIONPATHINFO2_SIZE;
+			break;
+		case PROC_PIDREGIONPATHINFO3:
+			size = PROC_PIDREGIONPATHINFO3_SIZE;
+			break;
 		default:
 			return(EINVAL);
 	}
@@ -1070,7 +1656,7 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 
 	/* Check if we need to look for zombies */
 	if ((flavor == PROC_PIDTBSDINFO) || (flavor == PROC_PIDT_SHORTBSDINFO) || (flavor == PROC_PIDT_BSDINFOWITHUNIQID) 
-			|| (flavor == PROC_PIDUNIQIDENTIFIERINFO)) {
+	    || (flavor == PROC_PIDUNIQIDENTIFIERINFO)) {
 		if (arg)
 			findzomb = 1;
 	}
@@ -1092,6 +1678,7 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 		case PROC_PIDT_SHORTBSDINFO:
 		case PROC_PIDUNIQIDENTIFIERINFO:
 		case PROC_PIDPATHINFO:
+		case PROC_PIDCOALITIONINFO:
 			check_same_user = NO_CHECK_SAME_USER;
 			break;
 		default:
@@ -1213,6 +1800,16 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 		}
 		break;
 
+		case PROC_PIDREGIONPATHINFO2:{
+			error =  proc_pidregionpathinfo2(p, arg, buffer, buffersize, retval);
+		}
+		break;
+
+		case PROC_PIDREGIONPATHINFO3:{
+			error =  proc_pidregionpathinfo3(p, arg, buffer, buffersize, retval);
+		}
+		break;
+
 		case PROC_PIDVNODEPATHINFO:{
 			error =  proc_pidvnodepathinfo(p, arg, buffer, buffersize, retval);
 		}
@@ -1255,6 +1852,38 @@ proc_pidinfo(int pid, int flavor, uint64_t arg, user_addr_t buffer, uint32_t  bu
 		}
 		break;
 
+		case PROC_PIDARCHINFO: {	
+			struct proc_archinfo pai;
+			proc_archinfo(p, &pai);
+			error = copyout(&pai, buffer, sizeof(struct proc_archinfo));
+			if (error == 0) {
+				*retval = sizeof(struct proc_archinfo);
+			}
+		}
+		break;
+
+		case PROC_PIDCOALITIONINFO: {
+			struct proc_pidcoalitioninfo pci;
+			proc_pidcoalitioninfo(p, &pci);
+			error = copyout(&pci, buffer, sizeof(struct proc_pidcoalitioninfo));
+			if (error == 0) {
+				*retval = sizeof(struct proc_pidcoalitioninfo);
+			}
+		}
+		break;
+
+		case PROC_PIDNOTEEXIT: {
+			uint32_t data;
+			error = proc_pidnoteexit(p, arg, &data);
+			if (error == 0) {
+				error = copyout(&data, buffer, sizeof(data));
+				if (error == 0) {
+					*retval = sizeof(data);
+				}
+			}
+		}
+		break;
+
 		default:
 			error = ENOTSUP;
 	}
@@ -1268,8 +1897,8 @@ out:
 }
 
 
-int 
-pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval) 
+int
+pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct vnode_fdinfo vfi;
 	int error= 0;
@@ -1278,7 +1907,7 @@ pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, u
 		return(error);
 	}
 	bzero(&vfi, sizeof(struct vnode_fdinfo));
-	fill_fileinfo(fp, closeonexec, &vfi.pfi);
+	fill_fileinfo(fp, proc, fd, &vfi.pfi);
 	error = fill_vnodeinfo(vp, &vfi.pvi);
 	vnode_put(vp);
 	if (error == 0) {
@@ -1289,8 +1918,8 @@ pid_vnodeinfo(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, u
 	return(error);
 }
 
-int 
-pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval) 
+int
+pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct vnode_fdinfowithpath vfip;
 	int count, error= 0;
@@ -1299,7 +1928,7 @@ pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexe
 		return(error);
 	}
 	bzero(&vfip, sizeof(struct vnode_fdinfowithpath));
-	fill_fileinfo(fp, closeonexec, &vfip.pfi);
+	fill_fileinfo(fp, proc, fd, &vfip.pfi);
 	error = fill_vnodeinfo(vp, &vfip.pvip.vip_vi) ;
 	if (error == 0) {
 		count = MAXPATHLEN;
@@ -1314,8 +1943,8 @@ pid_vnodeinfopath(vnode_t vp, uint32_t vid, struct fileproc * fp, int closeonexe
 	return(error);
 }
 
-void  
-fill_fileinfo(struct fileproc * fp, int closeonexec, struct proc_fileinfo * fproc)
+void
+fill_fileinfo(struct fileproc * fp, proc_t proc, int fd, struct proc_fileinfo * fproc)
 {
 	fproc->fi_openflags = fp->f_fglob->fg_flag;
 	fproc->fi_status = 0;
@@ -1323,9 +1952,12 @@ fill_fileinfo(struct fileproc * fp, int closeonexec, struct proc_fileinfo * fpro
 	fproc->fi_type = FILEGLOB_DTYPE(fp->f_fglob);
 	if (fp->f_fglob->fg_count > 1)
 		fproc->fi_status |= PROC_FP_SHARED;
-	if (closeonexec != 0)
-		fproc->fi_status |= PROC_FP_CLEXEC;
-
+	if (proc != PROC_NULL) {
+		if ((FDFLAGS_GET(proc, fd) & UF_EXCLOSE) != 0)
+			fproc->fi_status |= PROC_FP_CLEXEC;
+		if ((FDFLAGS_GET(proc, fd) & UF_FORKCLOSE) != 0)
+			fproc->fi_status |= PROC_FP_CLFORK;
+	}
 	if (FILEPROC_TYPE(fp) == FTYPE_GUARDED) {
 		fproc->fi_status |= PROC_FP_GUARDED;
 		fproc->fi_guardflags = 0;
@@ -1349,6 +1981,7 @@ fill_vnodeinfo(vnode_t vp, struct vnode_info *vinfo)
 		struct stat64 sb;
 		int error = 0;
 
+		bzero(&sb, sizeof(struct stat64));
 		context = vfs_context_create((vfs_context_t)0);
 		error = vn_stat(vp, &sb, NULL, 1, context);
 		(void)vfs_context_rele(context);
@@ -1370,34 +2003,34 @@ out:
 }
 
 int
-pid_socketinfo(socket_t so, struct fileproc *fp, int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
+pid_socketinfo(socket_t so, struct fileproc *fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 #if SOCKETS
 	struct socket_fdinfo s;
 	int error = 0;
 
 	bzero(&s, sizeof(struct socket_fdinfo));
-	fill_fileinfo(fp, closeonexec, &s.pfi);
+	fill_fileinfo(fp, proc, fd, &s.pfi);
 	if ((error = fill_socketinfo(so, &s.psi)) == 0) {
 		if ((error = copyout(&s, buffer, sizeof(struct socket_fdinfo))) == 0)
 				*retval = sizeof(struct socket_fdinfo);
 	}
 	return (error);
 #else
-#pragma unused(so, fp, closeonexec, buffer)
+#pragma unused(so, fp, proc, fd, buffer)
 	*retval = 0;
 	return (ENOTSUP);
 #endif
 }
 
 int
-pid_pseminfo(struct psemnode *psem, struct fileproc *fp,  int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
+pid_pseminfo(struct psemnode *psem, struct fileproc *fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct psem_fdinfo pseminfo;
 	int error = 0;
- 
+
 	bzero(&pseminfo, sizeof(struct psem_fdinfo));
-	fill_fileinfo(fp, closeonexec, &pseminfo.pfi);
+	fill_fileinfo(fp, proc, fd, &pseminfo.pfi);
 
 	if ((error = fill_pseminfo(psem, &pseminfo.pseminfo)) == 0) {
 		if ((error = copyout(&pseminfo, buffer, sizeof(struct psem_fdinfo))) == 0)
@@ -1408,13 +2041,13 @@ pid_pseminfo(struct psemnode *psem, struct fileproc *fp,  int closeonexec, user_
 }
 
 int
-pid_pshminfo(struct pshmnode *pshm, struct fileproc *fp,  int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
+pid_pshminfo(struct pshmnode *pshm, struct fileproc *fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct pshm_fdinfo pshminfo;
 	int error = 0;
- 
+
 	bzero(&pshminfo, sizeof(struct pshm_fdinfo));
-	fill_fileinfo(fp, closeonexec, &pshminfo.pfi);
+	fill_fileinfo(fp, proc, fd, &pshminfo.pfi);
 
 	if ((error = fill_pshminfo(pshm, &pshminfo.pshminfo)) == 0) {
 		if ((error = copyout(&pshminfo, buffer, sizeof(struct pshm_fdinfo))) == 0)
@@ -1425,13 +2058,13 @@ pid_pshminfo(struct pshmnode *pshm, struct fileproc *fp,  int closeonexec, user_
 }
 
 int
-pid_pipeinfo(struct pipe *  p, struct fileproc *fp,  int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
+pid_pipeinfo(struct pipe *  p, struct fileproc *fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct pipe_fdinfo pipeinfo;
 	int error = 0;
 
 	bzero(&pipeinfo, sizeof(struct pipe_fdinfo));
-	fill_fileinfo(fp, closeonexec, &pipeinfo.pfi);
+	fill_fileinfo(fp, proc, fd, &pipeinfo.pfi);
 	if ((error = fill_pipeinfo(p, &pipeinfo.pipeinfo)) == 0) {
 		if ((error = copyout(&pipeinfo, buffer, sizeof(struct pipe_fdinfo))) == 0)
 				*retval = sizeof(struct pipe_fdinfo);
@@ -1441,14 +2074,18 @@ pid_pipeinfo(struct pipe *  p, struct fileproc *fp,  int closeonexec, user_addr_
 }
 
 int
-pid_kqueueinfo(struct kqueue * kq, struct fileproc *fp,  int closeonexec, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
+pid_kqueueinfo(struct kqueue * kq, struct fileproc *fp, proc_t proc, int fd, user_addr_t  buffer, __unused uint32_t buffersize, int32_t * retval)
 {
 	struct kqueue_fdinfo kqinfo;
 	int error = 0;
-	
+
 	bzero(&kqinfo, sizeof(struct kqueue_fdinfo));
- 
-	fill_fileinfo(fp, closeonexec, &kqinfo.pfi);
+
+	/* not all kq's are associated with a file (e.g. workqkq) */
+	if (fp) {
+		assert(fd >= 0);
+		fill_fileinfo(fp, proc, fd, &kqinfo.pfi);
+	}
 
 	if ((error = fill_kqueueinfo(kq, &kqinfo.kqueueinfo)) == 0) {
 		if ((error = copyout(&kqinfo, buffer, sizeof(struct kqueue_fdinfo))) == 0)
@@ -1459,7 +2096,7 @@ pid_kqueueinfo(struct kqueue * kq, struct fileproc *fp,  int closeonexec, user_a
 }
 
 int
-pid_atalkinfo(__unused struct atalk * at, __unused struct fileproc *fp,  __unused int closeonexec, __unused user_addr_t  buffer, __unused uint32_t buffersize, __unused int32_t * retval)
+pid_atalkinfo(__unused struct atalk * at, __unused struct fileproc *fp,  __unused proc_t proc, __unused int fd, __unused user_addr_t  buffer, __unused uint32_t buffersize, __unused int32_t * retval)
 {
 	return ENOTSUP;
 }
@@ -1472,9 +2109,8 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 {
 	proc_t p;
 	int error = ENOTSUP;
-	struct fileproc * fp;
+	struct fileproc * fp = NULL;
 	uint32_t size;
-	int closeonexec = 0;
 
 	switch (flavor) {
 		case PROC_PIDFDVNODEINFO:
@@ -1497,6 +2133,11 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 			break;
 		case PROC_PIDFDKQUEUEINFO:
 			size = PROC_PIDFDKQUEUEINFO_SIZE;
+			break;
+		case PROC_PIDFDKQUEUE_EXTINFO:
+			size = PROC_PIDFDKQUEUE_EXTINFO_SIZE;
+			if (buffer == (user_addr_t)0)
+				size = 0;
 			break;
 		case PROC_PIDFDATALKINFO:
 			size = PROC_PIDFDATALKINFO_SIZE;
@@ -1528,8 +2169,7 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 				goto out1;
 			}
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_vnodeinfo(vp, vid, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_vnodeinfo(vp, vid, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1542,8 +2182,7 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 			}
 
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_vnodeinfopath(vp, vid, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_vnodeinfopath(vp, vid, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1554,8 +2193,7 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 				goto out1;
 			}
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_socketinfo(so, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_socketinfo(so, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1566,8 +2204,7 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 				goto out1;
 			}
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_pseminfo(psem, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_pseminfo(psem, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1578,8 +2215,7 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 				goto out1;
 			}
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_pshminfo(pshm, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_pshminfo(pshm, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1590,20 +2226,41 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 				goto out1;
 			}
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_pipeinfo(cpipe, fp, closeonexec, buffer, buffersize, retval);
+			error =  pid_pipeinfo(cpipe, fp, p, fd, buffer, buffersize, retval);
 		}
 		break;
 
 		case PROC_PIDFDKQUEUEINFO: {
 			struct kqueue * kq;
 
-			if ((error = fp_getfkq(p, fd, &fp,  &kq)) !=0) {
+			if (fd == -1) {
+				if ((kq = p->p_wqkqueue) == NULL) {
+					/* wqkqueue is initialized on-demand */
+					error = 0;
+					break;
+				}
+			} else if ((error = fp_getfkq(p, fd, &fp,  &kq)) != 0) {
 				goto out1;
 			}
+
 			/* no need to be under the fdlock */
-			closeonexec = p->p_fd->fd_ofileflags[fd] & UF_EXCLOSE;
-			error =  pid_kqueueinfo(kq, fp, closeonexec, buffer, buffersize, retval);
+			error = pid_kqueueinfo(kq, fp, p, fd, buffer, buffersize, retval);
+		}
+		break;
+
+		case PROC_PIDFDKQUEUE_EXTINFO: {
+			struct kqueue * kq;
+
+			if (fd == -1) {
+				if ((kq = p->p_wqkqueue) == NULL) {
+					/* wqkqueue is initialized on-demand */
+					error = 0;
+					break;
+				}
+			} else if ((error = fp_getfkq(p, fd, &fp, &kq)) != 0) {
+				goto out1;
+			}
+			error = pid_kqueue_extinfo(p, kq, buffer, buffersize, retval);
 		}
 		break;
 
@@ -1613,7 +2270,9 @@ proc_pidfdinfo(int pid, int flavor,  int fd, user_addr_t buffer, uint32_t buffer
 		}
 	}
 
-	fp_drop(p, fd, fp , 0); 	
+	if (fp) {
+		fp_drop(p, fd, fp , 0);
+	}
 out1 :
 	proc_rele(p);
 out:
@@ -1651,7 +2310,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			break;
 		}
 		vp = (struct vnode *)fg->fg_data;
-		error = pid_vnodeinfopath(vp, vnode_vid(vp), fp, 0,
+		error = pid_vnodeinfopath(vp, vnode_vid(vp), fp, PROC_NULL, 0,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}	break;
 
@@ -1663,7 +2322,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			break;
 		}
 		so = (socket_t)fg->fg_data;
-		error = pid_socketinfo(so, fp, 0,
+		error = pid_socketinfo(so, fp, PROC_NULL, 0,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}	break;
 
@@ -1675,7 +2334,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			break;
 		}
 		pshm = (struct pshmnode *)fg->fg_data;
-		error = pid_pshminfo(pshm, fp, 0,
+		error = pid_pshminfo(pshm, fp, PROC_NULL, 0,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}	break;
 
@@ -1687,7 +2346,7 @@ proc_fileport_info(__unused mach_port_name_t name,
 			break;
 		}
 		cpipe = (struct pipe *)fg->fg_data;
-		error = pid_pipeinfo(cpipe, fp, 0,
+		error = pid_pipeinfo(cpipe, fp, PROC_NULL, 0,
 		    fia->fia_buffer, fia->fia_buffersize, fia->fia_retval);
 	}	break;
 
@@ -1709,7 +2368,7 @@ proc_pidfileportinfo(int pid, int flavor, mach_port_name_t name,
 	uint32_t size;
 	struct fileport_info_args fia;
 
-	/* fileport types are restricted by filetype_issendable() */
+	/* fileport types are restricted by file_issendable() */
 
 	switch (flavor) {
 	case PROC_PIDFILEPORTVNODEPATHINFO:
@@ -1951,6 +2610,17 @@ proc_dirtycontrol(int pid, int flavor, uint64_t arg, int32_t *retval) {
 			}
 		}
 		break;
+		
+		case PROC_DIRTYCONTROL_CLEAR: {			
+			/* Check privileges; use cansignal() here since the process could be terminated */
+			if (!cansignal(current_proc(), my_cred, target_p, SIGKILL, 0)) {
+				error = EPERM;
+				goto out;
+			}
+			
+			error = memorystatus_dirty_clear(target_p, pcontrol);	
+		}
+		break;
 	}
 
 out:
@@ -2095,5 +2765,106 @@ out:
 		proc_rele(p);
 
 	return (error);
+}
+
+void 
+proc_archinfo(proc_t p, struct proc_archinfo *pai)
+{
+	proc_lock(p);
+	pai->p_cputype = p->p_cputype;
+	pai->p_cpusubtype = p->p_cpusubtype;
+	proc_unlock(p);
+}
+
+void
+proc_pidcoalitioninfo(proc_t p, struct proc_pidcoalitioninfo *ppci)
+{
+	bzero(ppci, sizeof(*ppci));
+	proc_coalitionids(p, ppci->coalition_id);
+}
+
+
+
+/* 
+ * Wrapper to provide NOTE_EXIT_DETAIL and NOTE_EXITSTATUS
+ * It mimics the data that is typically captured by the 
+ * EVFILT_PROC, NOTE_EXIT event mechanism.
+ * See filt_proc() in kern_event.c.
+ */
+int
+proc_pidnoteexit(proc_t p, uint64_t flags, uint32_t *data)
+{
+	uint32_t exit_data = 0;
+	uint32_t exit_flags = (uint32_t)flags;
+
+	proc_lock(p);
+
+	/*
+	 * Allow access to the parent of the exiting
+	 * child or the parent debugger only.
+	 */
+	do {
+		pid_t selfpid = proc_selfpid();
+
+		if (p->p_ppid == selfpid)
+			break;  /* parent => ok */
+	
+		if ((p->p_lflag & P_LTRACED) != 0 &&
+		    (p->p_oppid == selfpid))
+			break;  /* parent-in-waiting => ok */
+
+		proc_unlock(p);
+		return (EACCES);
+	} while (0);
+	
+	if ((exit_flags & NOTE_EXITSTATUS) != 0) {
+		/* The signal and exit status */
+		exit_data |= (p->p_xstat & NOTE_PDATAMASK);
+	}
+
+	if ((exit_flags & NOTE_EXIT_DETAIL) != 0) {
+		/* The exit detail */
+		if ((p->p_lflag & P_LTERM_DECRYPTFAIL) != 0) {
+			exit_data |= NOTE_EXIT_DECRYPTFAIL;
+		}
+
+		if ((p->p_lflag & P_LTERM_JETSAM) != 0) {
+			exit_data |= NOTE_EXIT_MEMORY;
+
+			switch (p->p_lflag & P_JETSAM_MASK) {
+			case P_JETSAM_VMPAGESHORTAGE:
+				exit_data |= NOTE_EXIT_MEMORY_VMPAGESHORTAGE;
+				break;
+			case P_JETSAM_VMTHRASHING:
+				exit_data |= NOTE_EXIT_MEMORY_VMTHRASHING;
+				break;
+			case P_JETSAM_FCTHRASHING:
+				exit_data |= NOTE_EXIT_MEMORY_FCTHRASHING;
+				break;
+			case P_JETSAM_VNODE:
+				exit_data |= NOTE_EXIT_MEMORY_VNODE;
+				break;
+			case P_JETSAM_HIWAT:
+				exit_data |= NOTE_EXIT_MEMORY_HIWAT;
+				break;
+			case P_JETSAM_PID:
+				exit_data |= NOTE_EXIT_MEMORY_PID;
+				break;
+			case P_JETSAM_IDLEEXIT:
+				exit_data |= NOTE_EXIT_MEMORY_IDLE;
+				break;
+			}
+		}
+
+		if ((p->p_csflags & CS_KILLED) != 0) {
+			exit_data |= NOTE_EXIT_CSERROR;
+		}
+	}
+
+	proc_unlock(p);
+
+	*data = exit_data;
+
+	return (0);
 }
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  *
@@ -126,6 +126,15 @@ struct kev_in_collision {
 	u_char hw_addr[0];		/* variable length hardware address */
 };
 
+struct kev_in_arpfailure {
+	struct net_event_data link_data; /* link where ARP is being sent */
+};
+
+struct kev_in_arpalive {
+	struct net_event_data link_data; /* link where ARP was received */
+};
+
+
 #ifdef __APPLE_API_PRIVATE
 struct kev_in_portinuse {
 	u_int16_t port;		/* conflicting port number in host order */
@@ -149,8 +158,12 @@ struct kev_in_portinuse {
 #ifdef __APPLE_API_PRIVATE
 #define	KEV_INET_PORTINUSE		8 /* use ken_in_portinuse */
 #endif
+#define	KEV_INET_ARPRTRFAILURE		9 /* ARP resolution failed for router */
+#define	KEV_INET_ARPRTRALIVE		10 /* ARP resolution succeeded for 
+					      router */
 
 #ifdef BSD_KERNEL_PRIVATE
+#include <net/if.h>
 #include <net/if_var.h>
 #include <kern/locks.h>
 #include <sys/tree.h>
@@ -461,6 +474,15 @@ struct inpcb;
 #define	MCAST_NOTSMEMBER	2	/* This host excluded source */
 #define	MCAST_MUTED		3	/* [deprecated] */
 
+/*
+ * Per-interface IPv4 structures.
+ */
+struct in_ifextra {
+	uint32_t		netsig_len;
+	u_int8_t		netsig[IFNET_SIGNATURELEN];
+};
+#define	IN_IFEXTRA(_ifp)	((struct in_ifextra *)(_ifp->if_inetdata))
+
 extern u_int32_t ipv4_ll_arp_aware;
 
 extern void in_ifaddr_init(void);
@@ -488,6 +510,7 @@ extern int in_inithead(void **, int);
 extern void in_rtqdrain(void);
 extern struct radix_node *in_validate(struct radix_node *);
 extern void ip_input(struct mbuf *);
+extern void ip_input_process_list(struct mbuf *);
 extern int in_ifadown(struct ifaddr *ifa, int);
 extern void in_ifscrub(struct ifnet *, struct in_ifaddr *, int);
 extern u_int32_t inaddr_hashval(u_int32_t);

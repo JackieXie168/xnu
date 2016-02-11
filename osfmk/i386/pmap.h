@@ -70,7 +70,6 @@
 
 #ifndef	ASSEMBLER
 
-#include <platforms.h>
 
 #include <mach/kern_return.h>
 #include <mach/machine/vm_types.h>
@@ -79,7 +78,7 @@
 #include <mach/machine/vm_param.h>
 #include <kern/kern_types.h>
 #include <kern/thread.h>
-#include <kern/lock.h>
+#include <kern/simple_lock.h>
 #include <mach/branch_predicates.h>
 
 #include <i386/mp.h>
@@ -298,8 +297,8 @@ pmap_store_pte(pt_entry_t *entryp, pt_entry_t value)
 #define INTEL_PTE_PS		0x00000080ULL
 #define INTEL_PTE_PTA		0x00000080ULL
 #define INTEL_PTE_GLOBAL	0x00000100ULL
-#define INTEL_PTE_WIRED		0x00000200ULL
-#define INTEL_PDPTE_NESTED	0x00000400ULL
+#define INTEL_PTE_WIRED		0x00000400ULL
+#define INTEL_PDPTE_NESTED	0x00000800ULL
 #define INTEL_PTE_PFN		PG_FRAME
 
 #define INTEL_PTE_NX		(1ULL << 63)
@@ -308,7 +307,7 @@ pmap_store_pte(pt_entry_t *entryp, pt_entry_t value)
 /* This is conservative, but suffices */
 #define INTEL_PTE_RSVD		((1ULL << 10) | (1ULL << 11) | (0x1FFULL << 54))
 
-#define INTEL_PTE_COMPRESSED	INTEL_PTE_REF /* marker, for invalid PTE only */
+#define INTEL_COMPRESSED	(1ULL << 62) /* marker, for invalid PTE only -- ignored by hardware for both regular/EPT entries*/
 
 #define	pa_to_pte(a)		((a) & INTEL_PTE_PFN) /* XXX */
 #define	pte_to_pa(p)		((p) & INTEL_PTE_PFN) /* XXX */
@@ -316,15 +315,111 @@ pmap_store_pte(pt_entry_t *entryp, pt_entry_t value)
 
 #define pte_kernel_rw(p)          ((pt_entry_t)(pa_to_pte(p) | INTEL_PTE_VALID|INTEL_PTE_RW))
 #define pte_kernel_ro(p)          ((pt_entry_t)(pa_to_pte(p) | INTEL_PTE_VALID))
-#define pte_user_rw(p)            ((pt_entry)t)(pa_to_pte(p) | INTEL_PTE_VALID|INTEL_PTE_USER|INTEL_PTE_RW))
+#define pte_user_rw(p)            ((pt_entry_t)(pa_to_pte(p) | INTEL_PTE_VALID|INTEL_PTE_USER|INTEL_PTE_RW))
 #define pte_user_ro(p)            ((pt_entry_t)(pa_to_pte(p) | INTEL_PTE_VALID|INTEL_PTE_USER))
+
+#define PMAP_INVEPT_SINGLE_CONTEXT	1
+
+
+#define INTEL_EPTP_AD		0x00000040ULL
+
+#define INTEL_EPT_READ		0x00000001ULL
+#define INTEL_EPT_WRITE 	0x00000002ULL
+#define INTEL_EPT_EX		0x00000004ULL
+#define INTEL_EPT_IPTA		0x00000040ULL
+#define INTEL_EPT_PS		0x00000080ULL
+#define INTEL_EPT_REF		0x00000100ULL
+#define INTEL_EPT_MOD		0x00000200ULL
+
+#define INTEL_EPT_CACHE_MASK 	0x00000038ULL
+#define INTEL_EPT_NCACHE	0x00000000ULL
+#define INTEL_EPT_WC		0x00000008ULL
+#define INTEL_EPT_WTHRU 	0x00000020ULL
+#define INTEL_EPT_WP    	0x00000028ULL
+#define INTEL_EPT_WB		0x00000030ULL
+
+/*
+ * Routines to filter correct bits depending on the pmap type
+ */
+
+static inline pt_entry_t
+pte_remove_ex(pt_entry_t pte, boolean_t is_ept)
+{
+	if (__probable(!is_ept)) {
+		return (pte | INTEL_PTE_NX);
+	}
+
+	return (pte & (~INTEL_EPT_EX));
+}
+
+static inline pt_entry_t
+pte_set_ex(pt_entry_t pte, boolean_t is_ept)
+{
+	if (__probable(!is_ept)) {
+		return (pte & (~INTEL_PTE_NX));
+	}
+
+	return (pte | INTEL_EPT_EX);
+}
+
+static inline pt_entry_t
+physmap_refmod_to_ept(pt_entry_t physmap_pte)
+{
+	pt_entry_t ept_pte = 0;
+
+	if (physmap_pte & INTEL_PTE_MOD) {
+		ept_pte |= INTEL_EPT_MOD;
+	}
+
+	if (physmap_pte & INTEL_PTE_REF) {
+		ept_pte |= INTEL_EPT_REF;
+	}
+
+	return ept_pte;
+}
+
+static inline pt_entry_t
+ept_refmod_to_physmap(pt_entry_t ept_pte)
+{
+	pt_entry_t physmap_pte = 0;
+
+	assert((ept_pte & ~(INTEL_EPT_REF | INTEL_EPT_MOD)) == 0);
+
+	if (ept_pte & INTEL_EPT_REF) {
+		physmap_pte |= INTEL_PTE_REF;
+	}
+
+	if (ept_pte & INTEL_EPT_MOD) {
+		physmap_pte |= INTEL_PTE_MOD;
+	}
+
+	return physmap_pte;
+}
+
+/*
+ * Note: Not all Intel processors support EPT referenced access and dirty bits.
+ *	 During pmap_init() we check the VMX capability for the current hardware
+ *	 and update this variable accordingly.
+ */
+extern boolean_t pmap_ept_support_ad;
+
+#define PTE_VALID_MASK(is_ept)	((is_ept) ? (INTEL_EPT_READ | INTEL_EPT_WRITE | INTEL_EPT_EX) : INTEL_PTE_VALID)
+#define PTE_READ(is_ept)	((is_ept) ? INTEL_EPT_READ : INTEL_PTE_VALID)
+#define PTE_WRITE(is_ept)	((is_ept) ? INTEL_EPT_WRITE : INTEL_PTE_WRITE)
+#define PTE_PS			INTEL_PTE_PS
+#define PTE_COMPRESSED		INTEL_COMPRESSED
+#define PTE_NCACHE(is_ept)	((is_ept) ? INTEL_EPT_NCACHE : INTEL_PTE_NCACHE)
+#define PTE_WTHRU(is_ept)	((is_ept) ? INTEL_EPT_WTHRU : INTEL_PTE_WTHRU)
+#define PTE_REF(is_ept) 	((is_ept) ? INTEL_EPT_REF : INTEL_PTE_REF)
+#define PTE_MOD(is_ept) 	((is_ept) ? INTEL_EPT_MOD : INTEL_PTE_MOD)
+#define PTE_WIRED		INTEL_PTE_WIRED
+
 
 #define PMAP_DEFAULT_CACHE	0
 #define PMAP_INHIBIT_CACHE	1
 #define PMAP_GUARDED_CACHE	2
 #define PMAP_ACTIVATE_CACHE	4
 #define PMAP_NO_GUARD_CACHE	8
-
 
 #ifndef	ASSEMBLER
 
@@ -375,19 +470,16 @@ static	inline void * PHYSMAP_PTOV_check(void *paddr) {
 /*
  * For KASLR, we alias the master processor's IDT and GDT at fixed
  * virtual addresses to defeat SIDT/SGDT address leakage.
+ * And non-boot processor's GDT aliases likewise (skipping LOWGLOBAL_ALIAS)
+ * The low global vector page is mapped at a fixed alias also.
  */
 #define MASTER_IDT_ALIAS	(VM_MIN_KERNEL_ADDRESS + 0x0000)
 #define MASTER_GDT_ALIAS	(VM_MIN_KERNEL_ADDRESS + 0x1000)
-
-/*
- * The low global vector page is mapped at a fixed alias also.
- */
 #define LOWGLOBAL_ALIAS		(VM_MIN_KERNEL_ADDRESS + 0x2000)
+#define CPU_GDT_ALIAS(_cpu)	(LOWGLOBAL_ALIAS + (0x1000*(_cpu)))
 
 #endif /*__x86_64__ */
 
-typedef	volatile long	cpu_set;	/* set of CPUs - must be <= 32 */
-					/* changed by other processors */
 #include <vm/vm_page.h>
 
 /*
@@ -399,6 +491,7 @@ typedef	volatile long	cpu_set;	/* set of CPUs - must be <= 32 */
 struct pmap {
 	decl_simple_lock_data(,lock)	/* lock on map */
 	pmap_paddr_t    pm_cr3;         /* physical addr */
+	pmap_paddr_t	pm_eptp;	/* EPTP */
 	boolean_t       pm_shared;
         pd_entry_t      *dirbase;        /* page directory pointer */
         vm_object_t     pm_obj;         /* object to hold pde's */
@@ -407,7 +500,7 @@ struct pmap {
 	pml4_entry_t    *pm_pml4;       /* VKA of top level */
 	vm_object_t     pm_obj_pdpt;    /* holds pdpt pages */
 	vm_object_t     pm_obj_pml4;    /* holds pml4 pages */
-#define	PMAP_PCID_MAX_CPUS	(48)	/* Must be a multiple of 8 */
+#define	PMAP_PCID_MAX_CPUS	MAX_CPUS	/* Must be a multiple of 8 */
 	pcid_t		pmap_pcid_cpus[PMAP_PCID_MAX_CPUS];
 	volatile uint8_t pmap_pcid_coherency_vector[PMAP_PCID_MAX_CPUS];
 	struct pmap_statistics	stats;	/* map statistics */
@@ -416,6 +509,20 @@ struct pmap {
 	ledger_t	ledger;		/* ledger tracking phys mappings */
 };
 
+static inline boolean_t
+is_ept_pmap(pmap_t p)
+{
+	if (__probable(p->pm_cr3 != 0)) {
+		assert(p->pm_eptp == 0);
+		return FALSE;
+	}
+
+	assert(p->pm_eptp != 0);
+
+	return TRUE;
+}
+
+void hv_ept_pmap_create(void **ept_pmap, void **eptp);
 
 #if NCOPY_WINDOWS > 0
 #define PMAP_PDPT_FIRST_WINDOW 0
@@ -464,8 +571,8 @@ extern pmap_memory_region_t pmap_memory_regions[];
 #include <i386/pmap_pcid.h>
 
 static inline void
-set_dirbase(pmap_t tpmap, __unused thread_t thread) {
-	int ccpu = cpu_number();
+set_dirbase(pmap_t tpmap, __unused thread_t thread, int my_cpu) {
+	int ccpu = my_cpu;
 	cpu_datap(ccpu)->cpu_task_cr3 = tpmap->pm_cr3;
 	cpu_datap(ccpu)->cpu_task_map = tpmap->pm_task_map;
 	/*
@@ -551,7 +658,7 @@ extern void		x86_filter_TLB_coherency_interrupts(boolean_t);
 /*
  * Get cache attributes (as pagetable bits) for the specified phys page
  */
-extern	unsigned	pmap_get_cache_attributes(ppnum_t);
+extern	unsigned	pmap_get_cache_attributes(ppnum_t, boolean_t is_ept);
 #if NCOPY_WINDOWS > 0
 extern struct cpu_pmap	*pmap_cpu_alloc(
 				boolean_t	is_boot_cpu);
@@ -588,16 +695,16 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
 #include <kern/spl.h>
 
 				  
-#define PMAP_ACTIVATE_MAP(map, thread)	{				\
+#define PMAP_ACTIVATE_MAP(map, thread, my_cpu)	{				\
 	register pmap_t		tpmap;					\
                                                                         \
         tpmap = vm_map_pmap(map);					\
-        set_dirbase(tpmap, thread);					\
+        set_dirbase(tpmap, thread, my_cpu);					\
 }
 
 #if   defined(__x86_64__)
-#define PMAP_DEACTIVATE_MAP(map, thread)				\
-	pmap_assert(pmap_pcid_ncpus ? (pcid_for_pmap_cpu_tuple(map->pmap, cpu_number()) == (get_cr3_raw() & 0xFFF)) : TRUE);
+#define PMAP_DEACTIVATE_MAP(map, thread, ccpu)				\
+	pmap_assert(pmap_pcid_ncpus ? (pcid_for_pmap_cpu_tuple(map->pmap, ccpu) == (get_cr3_raw() & 0xFFF)) : TRUE);
 #else
 #define PMAP_DEACTIVATE_MAP(map, thread)
 #endif
@@ -606,8 +713,8 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
                                                                         \
 	pmap_assert(ml_get_interrupts_enabled() == FALSE);		\
 	if (old_th->map != new_th->map) {				\
-		PMAP_DEACTIVATE_MAP(old_th->map, old_th);		\
-		PMAP_ACTIVATE_MAP(new_th->map, new_th);			\
+		PMAP_DEACTIVATE_MAP(old_th->map, old_th, my_cpu);		\
+		PMAP_ACTIVATE_MAP(new_th->map, new_th, my_cpu);		\
 	}								\
 }
 
@@ -627,9 +734,9 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
 	spl_t		spl;						\
 									\
 	spl = splhigh();						\
-	PMAP_DEACTIVATE_MAP(th->map, th);				\
+	PMAP_DEACTIVATE_MAP(th->map, th, my_cpu);				\
 	th->map = new_map;						\
-	PMAP_ACTIVATE_MAP(th->map, th);					\
+	PMAP_ACTIVATE_MAP(th->map, th, my_cpu);				\
 	splx(spl);							\
 }
 #endif
@@ -695,6 +802,7 @@ extern void pmap_pagetable_corruption_msg_log(int (*)(const char * fmt, ...)__pr
 	 (((vm_offset_t) (VA)) <= vm_max_kernel_address))
 
 
+#define pmap_compressed(pmap)		((pmap)->stats.compressed)
 #define pmap_resident_count(pmap)	((pmap)->stats.resident_count)
 #define pmap_resident_max(pmap)		((pmap)->stats.resident_max)
 #define	pmap_copy(dst_pmap,src_pmap,dst_addr,len,src_addr)

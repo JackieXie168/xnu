@@ -56,11 +56,9 @@
 /*
  */
 
-#include <platforms.h>
 
 #include <i386/asm.h>
 #include <i386/proc_reg.h>
-#include <i386/mp.h>
 #include <assym.s>
 
 Entry(Load_context)

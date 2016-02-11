@@ -41,6 +41,8 @@
 #include <kperf/pet.h>
 #include <kperf/timetrigger.h>
 
+#include <kern/task.h>
+
 /* timer id to call back on */
 static unsigned pet_timerid = 0;
 
@@ -157,7 +159,7 @@ pet_sample_task_list( int taskc, task_array_t taskv  )
 		/* try and stop any task other than the kernel task */
 		if( task != kernel_task )
 		{
-			kr = task_suspend( task );
+			kr = task_suspend_internal( task );
 
 			/* try the next task */
 			if( kr != KERN_SUCCESS )
@@ -169,7 +171,7 @@ pet_sample_task_list( int taskc, task_array_t taskv  )
 
 		/* if it wasn't the kernel, resume it */
 		if( task != kernel_task )
-			task_resume(task);
+			(void) task_resume_internal(task);
 	}
 }
 

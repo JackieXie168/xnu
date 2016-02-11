@@ -185,8 +185,8 @@ cpu_machine_init(
 	ml_init_interrupt();
 
 #if CONFIG_VMX
-	/* for every CPU, get the VT specs */
-	vmx_get_specs();
+	/* initialize VMX for every CPU */
+	vmx_cpu_init();
 #endif
 }
 
@@ -199,7 +199,7 @@ cpu_processor_alloc(boolean_t is_boot_cpu)
 	if (is_boot_cpu)
 		return &processor_master;
 
-	ret = kmem_alloc(kernel_map, (vm_offset_t *) &proc, sizeof(*proc));
+	ret = kmem_alloc(kernel_map, (vm_offset_t *) &proc, sizeof(*proc), VM_KERN_MEMORY_OSFMK);
 	if (ret != KERN_SUCCESS)
 		return NULL;
 

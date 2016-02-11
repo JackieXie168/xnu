@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -79,6 +79,7 @@
 
 #include <net/route.h>
 #include <net/if_var.h>
+#include <net/ntstat.h>
 
 #include <netinet/in.h>
 #include <netinet/in_systm.h>
@@ -88,6 +89,7 @@
 #endif
 #include <netinet/ip_var.h>
 #include <netinet/tcp.h>
+#include <netinet/tcp_cache.h>
 #include <netinet/tcp_fsm.h>
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
@@ -104,11 +106,6 @@
 #include <mach/sdt.h>
 #include <netinet/mptcp_var.h>
 
-extern void postevent(struct socket *, struct sockbuf *,
-                                               int);
-#define DBG_FNC_TCP_FAST	NETDBG_CODE(DBG_NETTCP, (5 << 8))
-#define DBG_FNC_TCP_SLOW	NETDBG_CODE(DBG_NETTCP, (5 << 8) | 1)
-
 #define TIMERENTRY_TO_TP(te) ((struct tcpcb *)((uintptr_t)te - offsetof(struct tcpcb, tentry.le.le_next))) 
 
 #define VERIFY_NEXT_LINK(elm,field) do {	\
@@ -123,15 +120,29 @@ extern void postevent(struct socket *, struct sockbuf *,
 		panic("Bad link elm %p prev->next != elm", (elm));	\
 } while(0)
 
+#define TCP_SET_TIMER_MODE(mode, i) do { \
+	if (IS_TIMER_HZ_10MS(i)) \
+		(mode) |= TCP_TIMERLIST_10MS_MODE; \
+	else if (IS_TIMER_HZ_100MS(i)) \
+		(mode) |= TCP_TIMERLIST_100MS_MODE; \
+	else \
+		(mode) |= TCP_TIMERLIST_500MS_MODE; \
+} while(0)
+
+/* Max number of times a stretch ack can be delayed on a connection */
+#define	TCP_STRETCHACK_DELAY_THRESHOLD	5
+
+/*
+ * If the host processor has been sleeping for too long, this is the threshold
+ * used to avoid sending stale retransmissions.
+ */
+#define	TCP_SLEEP_TOO_LONG	(10 * 60 * 1000) /* 10 minutes in ms */
+
 /* tcp timer list */
 struct tcptimerlist tcp_timer_list;
 
 /* List of pcbs in timewait state, protected by tcbinfo's ipi_lock */
 struct tcptailq tcp_tw_tailq;
-
-static int 	background_io_trigger = 5;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, background_io_trigger, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &background_io_trigger, 0, "Background IO Trigger Setting");
 
 static int
 sysctl_msec_to_ticks SYSCTL_HANDLER_ARGS
@@ -155,45 +166,59 @@ sysctl_msec_to_ticks SYSCTL_HANDLER_ARGS
 }
 
 int	tcp_keepinit;
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPINIT, keepinit, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPINIT, keepinit,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_keepinit, 0, sysctl_msec_to_ticks, "I", "");
 
 int	tcp_keepidle;
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPIDLE, keepidle, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPIDLE, keepidle,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_keepidle, 0, sysctl_msec_to_ticks, "I", "");
 
 int	tcp_keepintvl;
-SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPINTVL, keepintvl, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, TCPCTL_KEEPINTVL, keepintvl,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_keepintvl, 0, sysctl_msec_to_ticks, "I", "");
 
 int	tcp_keepcnt;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, keepcnt, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-	&tcp_keepcnt, 0, "number of times to repeat keepalive");
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, keepcnt,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tcp_keepcnt, 0, "number of times to repeat keepalive");
 
 int	tcp_msl;
-SYSCTL_PROC(_net_inet_tcp, OID_AUTO, msl, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_tcp, OID_AUTO, msl,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
     &tcp_msl, 0, sysctl_msec_to_ticks, "I", "Maximum segment lifetime");
 
 /* 
- * Avoid DoS via TCP Robustness in Persist Condition (see http://www.ietf.org/id/draft-ananth-tcpm-persist-02.txt)
- * by allowing a system wide maximum persistence timeout value when in Zero Window Probe mode.
- * Expressed in milliseconds to be consistent without timeout related values, the TCP socket option is in seconds.
+ * Avoid DoS via TCP Robustness in Persist Condition
+ * (see http://www.ietf.org/id/draft-ananth-tcpm-persist-02.txt)
+ * by allowing a system wide maximum persistence timeout value when in
+ * Zero Window Probe mode.
+ *
+ * Expressed in milliseconds to be consistent without timeout related
+ * values, the TCP socket option is in seconds.
  */
 u_int32_t tcp_max_persist_timeout = 0;
-SYSCTL_PROC(_net_inet_tcp, OID_AUTO, max_persist_timeout, CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_max_persist_timeout, 0, sysctl_msec_to_ticks, "I", "Maximum persistence timout for ZWP");
+SYSCTL_PROC(_net_inet_tcp, OID_AUTO, max_persist_timeout,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_LOCKED,
+    &tcp_max_persist_timeout, 0, sysctl_msec_to_ticks, "I", 
+    "Maximum persistence timeout for ZWP");
 
 static int	always_keepalive = 0;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, always_keepalive, CTLFLAG_RW | CTLFLAG_LOCKED,
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, always_keepalive,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
     &always_keepalive , 0, "Assume SO_KEEPALIVE on all TCP connections");
 
-/* This parameter determines how long the timer list will stay in fast mode even
- * though all connections are idle. In fast mode, the timer will fire more frequently
- * anticipating new data.
+/*
+ * This parameter determines how long the timer list will stay in fast or
+ * quick mode even though all connections are idle. In this state, the 
+ * timer will run more frequently anticipating new data.
  */
-int timer_fastmode_idlemax = TCP_FASTMODE_IDLEGEN_MAX;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, timer_fastmode_idlemax, CTLFLAG_RW | CTLFLAG_LOCKED,
-	&timer_fastmode_idlemax, 0, "Maximum idle generations in fast mode");
+int timer_fastmode_idlemax = TCP_FASTMODE_IDLERUN_MAX;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, timer_fastmode_idlemax,
+    CTLFLAG_RW | CTLFLAG_LOCKED,
+    &timer_fastmode_idlemax, 0, "Maximum idle generations in fast mode");
 
 /*
  * See tcp_syn_backoff[] for interval values between SYN retransmits;
@@ -202,43 +227,50 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, timer_fastmode_idlemax, CTLFLAG_RW | CTLFLAG
  * SYN retransmits.  Setting it to 0 disables the dropping off of those
  * two options.
  */
-static int tcp_broken_peer_syn_rxmit_thres = 7;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, broken_peer_syn_rxmit_thres, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_broken_peer_syn_rxmit_thres, 0, "Number of retransmitted SYNs before "
-    "TCP disables rfc1323 and rfc1644 during the rest of attempts");
-
-/* A higher threshold on local connections for disabling RFC 1323 options */
-static int tcp_broken_peer_syn_rxmit_thres_local = 10;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, broken_peer_syn_rexmit_thres_local, 
-	CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_broken_peer_syn_rxmit_thres_local, 0,
-	"Number of retransmitted SYNs before disabling RFC 1323 options on local connections");
+static int tcp_broken_peer_syn_rxmit_thres = 10;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, broken_peer_syn_rexmit_thres,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_broken_peer_syn_rxmit_thres, 0,
+    "Number of retransmitted SYNs before disabling RFC 1323 "
+    "options on local connections");
 
 static int tcp_timer_advanced = 0;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcp_timer_advanced, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &tcp_timer_advanced, 0, "Number of times one of the timers was advanced");
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcp_timer_advanced,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_timer_advanced, 0,
+    "Number of times one of the timers was advanced");
 
 static int tcp_resched_timerlist = 0;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcp_resched_timerlist, CTLFLAG_RD | CTLFLAG_LOCKED,
-    &tcp_resched_timerlist, 0, 
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, tcp_resched_timerlist,
+    CTLFLAG_RD | CTLFLAG_LOCKED, &tcp_resched_timerlist, 0, 
     "Number of times timer list was rescheduled as part of processing a packet");
 
 int	tcp_pmtud_black_hole_detect = 1 ;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, pmtud_blackhole_detection, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_pmtud_black_hole_detect, 0, "Path MTU Discovery Black Hole Detection");
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, pmtud_blackhole_detection,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_pmtud_black_hole_detect, 0,
+    "Path MTU Discovery Black Hole Detection");
 
 int	tcp_pmtud_black_hole_mss = 1200 ;
-SYSCTL_INT(_net_inet_tcp, OID_AUTO, pmtud_blackhole_mss, CTLFLAG_RW | CTLFLAG_LOCKED,
-    &tcp_pmtud_black_hole_mss, 0, "Path MTU Discovery Black Hole Detection lowered MSS");
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, pmtud_blackhole_mss,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_pmtud_black_hole_mss, 0,
+    "Path MTU Discovery Black Hole Detection lowered MSS");
+
+#define	TCP_REPORT_STATS_INTERVAL	43200 /* 12 hours, in seconds */
+int tcp_report_stats_interval = TCP_REPORT_STATS_INTERVAL;
+#if (DEVELOPMENT || DEBUG)
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, report_stats_interval,
+    CTLFLAG_RW | CTLFLAG_LOCKED, &tcp_report_stats_interval, 0,
+    "Report stats interval");
+#endif /* (DEVELOPMENT || DEBUG) */
 
 /* performed garbage collection of "used" sockets */
 static boolean_t tcp_gc_done = FALSE;
 
-	/* max idle probes */
+/* max idle probes */
 int	tcp_maxpersistidle;
 
-/* TCP delack timer is set to 100 ms. Since the processing of timer list in fast
- * mode will happen no faster than 100 ms, the delayed ack timer will fire some where 
- * between 100 and 200 ms.
+/*
+ * TCP delack timer is set to 100 ms. Since the processing of timer list
+ * in fast mode will happen no faster than 100 ms, the delayed ack timer
+ * will fire some where between 100 and 200 ms.
  */
 int	tcp_delack = TCP_RETRANSHZ / 10;
 
@@ -249,45 +281,78 @@ int	tcp_delack = TCP_RETRANSHZ / 10;
 int	tcp_jack_rxmt = TCP_RETRANSHZ / 2;
 #endif /* MPTCP */
 
-/* The frequency of running through the TCP timer list in 
- * fast and slow mode can be configured.
- */
-SYSCTL_UINT(_net_inet_tcp, OID_AUTO, timer_fastquantum, CTLFLAG_RW | CTLFLAG_LOCKED,
-	&tcp_timer_list.fast_quantum, TCP_FASTTIMER_QUANTUM, 
-	"Frequency of running timer list in fast mode");
-
-SYSCTL_UINT(_net_inet_tcp, OID_AUTO, timer_slowquantum, CTLFLAG_RW | CTLFLAG_LOCKED,
-	&tcp_timer_list.slow_quantum, TCP_SLOWTIMER_QUANTUM, 
-	"Frequency of running timer list in slow mode");
+static boolean_t tcp_itimer_done = FALSE;
 
 static void tcp_remove_timer(struct tcpcb *tp);
 static void tcp_sched_timerlist(uint32_t offset);
-static uint32_t tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index);
+static u_int32_t tcp_run_conn_timer(struct tcpcb *tp, u_int16_t *mode,
+    u_int16_t probe_if_index);
 static void tcp_sched_timers(struct tcpcb *tp);
 static inline void tcp_set_lotimer_index(struct tcpcb *);
-static void tcp_rexmt_save_state(struct tcpcb *tp);
-void tcp_remove_from_time_wait(struct inpcb *inp);
+__private_extern__ void tcp_remove_from_time_wait(struct inpcb *inp);
+__private_extern__ void tcp_report_stats(void);
 
-/* Macro to compare two timers. If there is a reset of the sign bit, it is 
- * safe to assume that the timer has wrapped around. By doing signed comparision, 
- * we take care of wrap around such that the value with the sign bit reset is 
- * actually ahead of the other.
+/*
+ * Macro to compare two timers. If there is a reset of the sign bit,
+ * it is safe to assume that the timer has wrapped around. By doing
+ * signed comparision, we take care of wrap around such that the value
+ * with the sign bit reset is actually ahead of the other.
  */
-
-static inline int32_t
-timer_diff(uint32_t t1, uint32_t toff1, uint32_t t2, uint32_t toff2) { 
+inline int32_t
+timer_diff(uint32_t t1, uint32_t toff1, uint32_t t2, uint32_t toff2) {
 	return (int32_t)((t1 + toff1) - (t2 + toff2));
 };
+
+static	u_int64_t tcp_last_report_time;
+
+/*
+ * Structure to store previously reported stats so that we can send
+ * incremental changes in each report interval.
+ */
+struct tcp_last_report_stats {
+	u_int32_t	tcps_connattempt;
+	u_int32_t	tcps_accepts;
+	u_int32_t	tcps_ecn_client_setup;
+	u_int32_t	tcps_ecn_server_setup;
+	u_int32_t	tcps_ecn_client_success;
+	u_int32_t	tcps_ecn_server_success;
+	u_int32_t	tcps_ecn_not_supported;
+	u_int32_t	tcps_ecn_lost_syn;
+	u_int32_t	tcps_ecn_lost_synack;
+	u_int32_t	tcps_ecn_recv_ce;
+	u_int32_t	tcps_ecn_recv_ece;
+	u_int32_t	tcps_ecn_sent_ece;
+	u_int32_t	tcps_ecn_conn_recv_ce;
+	u_int32_t	tcps_ecn_conn_recv_ece;
+	u_int32_t	tcps_ecn_conn_plnoce;
+	u_int32_t	tcps_ecn_conn_pl_ce;
+	u_int32_t	tcps_ecn_conn_nopl_ce;
+	u_int32_t	tcps_ecn_fallback_synloss;
+	u_int32_t	tcps_ecn_fallback_reorder;
+	u_int32_t	tcps_ecn_fallback_ce;
+
+	/* TFO-related statistics */
+	u_int32_t	tcps_tfo_syn_data_rcv;
+	u_int32_t	tcps_tfo_cookie_req_rcv;
+	u_int32_t	tcps_tfo_cookie_sent;
+	u_int32_t	tcps_tfo_cookie_invalid;
+	u_int32_t	tcps_tfo_cookie_req;
+	u_int32_t	tcps_tfo_cookie_rcv;
+	u_int32_t	tcps_tfo_syn_data_sent;
+	u_int32_t	tcps_tfo_syn_data_acked;
+	u_int32_t	tcps_tfo_syn_loss;
+	u_int32_t	tcps_tfo_blackhole;
+};
+
 
 /* Returns true if the timer is on the timer list */
 #define TIMER_IS_ON_LIST(tp) ((tp)->t_flags & TF_TIMER_ONLIST)
 
 /* Run the TCP timerlist atleast once every hour */
-#define	TCP_TIMERLIST_MAX_OFFSET	(60 * 60 * TCP_RETRANSHZ)
+#define TCP_TIMERLIST_MAX_OFFSET (60 * 60 * TCP_RETRANSHZ)
+
 
 static void add_to_time_wait_locked(struct tcpcb *tp, uint32_t delay);
-void	add_to_time_wait(struct tcpcb *tp, uint32_t delay) ;
-
 static boolean_t tcp_garbage_collect(struct inpcb *, int);
 
 /*
@@ -330,6 +395,11 @@ void
 add_to_time_wait(struct tcpcb *tp, uint32_t delay)
 {
 	struct inpcbinfo *pcbinfo = &tcbinfo;
+	if (tp->t_inpcb->inp_socket->so_options & SO_NOWAKEFROMSLEEP)
+		socket_post_kev_msg_closed(tp->t_inpcb->inp_socket);
+
+	/* 19182803: Notify nstat that connection is closing before waiting. */
+	nstat_pcb_detach(tp->t_inpcb);
 
 	if (!lck_rw_try_lock_exclusive(pcbinfo->ipi_lock)) {
 		tcp_unlock(tp->t_inpcb->inp_socket, 0, 0);
@@ -573,7 +643,7 @@ int	tcp_backoff[TCP_MAXRXTSHIFT + 1] =
 
 static int tcp_totbackoff = 511;	/* sum of tcp_backoff[] */
 
-static void tcp_rexmt_save_state(struct tcpcb *tp)
+void tcp_rexmt_save_state(struct tcpcb *tp)
 {
 	u_int32_t fsize;
 	if (TSTMP_SUPPORTED(tp)) {
@@ -609,6 +679,30 @@ static void tcp_rexmt_save_state(struct tcpcb *tp)
 }
 
 /*
+ * Revert to the older segment size if there is an indication that PMTU
+ * blackhole detection was not needed.
+ */
+void tcp_pmtud_revert_segment_size(struct tcpcb *tp)
+{
+	int32_t optlen;
+
+	VERIFY(tp->t_pmtud_saved_maxopd > 0);
+	tp->t_flags |= TF_PMTUD; 
+	tp->t_flags &= ~TF_BLACKHOLE; 
+	optlen = tp->t_maxopd - tp->t_maxseg;
+	tp->t_maxopd = tp->t_pmtud_saved_maxopd;
+	tp->t_maxseg = tp->t_maxopd - optlen;
+	/*
+	 * Reset the slow-start flight size as it 
+	 * may depend on the new MSS
+	 */
+	if (CC_ALGO(tp)->cwnd_init != NULL)
+		CC_ALGO(tp)->cwnd_init(tp);
+	tp->t_pmtud_start_ts = 0;
+	tcpstat.tcps_pmtudbh_reverted++;
+}
+
+/*
  * TCP timer processing.
  */
 struct tcpcb *
@@ -616,12 +710,9 @@ tcp_timers(tp, timer)
 	register struct tcpcb *tp;
 	int timer;
 {
-	register int rexmt;
+	int32_t rexmt, optlen = 0, idle_time = 0;
 	struct socket *so;
 	struct tcptemp *t_template;
-	int optlen = 0;
-	int idle_time = 0;
-
 #if TCPDEBUG
 	int ostate;
 #endif
@@ -629,6 +720,8 @@ tcp_timers(tp, timer)
 #if INET6
 	int isipv6 = (tp->t_inpcb->inp_vflag & INP_IPV4) == 0;
 #endif /* INET6 */
+	u_int64_t accsleep_ms;
+	u_int32_t last_sleep_ms = 0;
 
 	so = tp->t_inpcb->inp_socket;
 	idle_time = tcp_now - tp->t_rcvtime;
@@ -662,24 +755,41 @@ tcp_timers(tp, timer)
 	 * to a longer retransmit interval and retransmit one segment.
 	 */
 	case TCPT_REXMT:
-		/* Drop a connection in the retransmit timer
-		 * 1. If we have retransmitted more than TCP_MAXRXTSHIFT times
-		 * 2. If the time spent in this retransmission episode is more than
-		 *    the time limit set with TCP_RXT_CONNDROPTIME socket option
-		 * 3. If TCP_RXT_FINDROP socket option was set and we have already
-		 *    retransmitted the FIN 3 times without receiving an ack
+		accsleep_ms = mach_absolutetime_asleep / 1000000UL;
+		if (accsleep_ms > tp->t_accsleep_ms)
+			last_sleep_ms = accsleep_ms - tp->t_accsleep_ms;
+		/*
+		 * Drop a connection in the retransmit timer
+		 * 1. If we have retransmitted more than TCP_MAXRXTSHIFT
+		 * times
+		 * 2. If the time spent in this retransmission episode is
+		 * more than the time limit set with TCP_RXT_CONNDROPTIME
+		 * socket option
+		 * 3. If TCP_RXT_FINDROP socket option was set and
+		 * we have already retransmitted the FIN 3 times without
+		 * receiving an ack
 		 */
 		if (++tp->t_rxtshift > TCP_MAXRXTSHIFT ||
-			(tp->t_rxt_conndroptime > 0 && tp->t_rxtstart > 0 && 
-			(tcp_now - tp->t_rxtstart) >= tp->t_rxt_conndroptime) ||
-			((tp->t_flagsext & TF_RXTFINDROP) != 0 &&
-			(tp->t_flags & TF_SENTFIN) != 0 &&
-			tp->t_rxtshift >= 4)) {
-
+		    (tp->t_rxt_conndroptime > 0 && tp->t_rxtstart > 0 &&
+		    (tcp_now - tp->t_rxtstart) >= tp->t_rxt_conndroptime) ||
+		    ((tp->t_flagsext & TF_RXTFINDROP) != 0 &&
+		    (tp->t_flags & TF_SENTFIN) != 0 && tp->t_rxtshift >= 4) ||
+		    (tp->t_rxtshift > 4 && last_sleep_ms >= TCP_SLEEP_TOO_LONG)) {
 			if ((tp->t_flagsext & TF_RXTFINDROP) != 0) {
 				tcpstat.tcps_rxtfindrop++;
+			} else if (last_sleep_ms >= TCP_SLEEP_TOO_LONG) {
+				tcpstat.tcps_drop_after_sleep++;
 			} else {
 				tcpstat.tcps_timeoutdrop++;
+			}
+			if (tp->t_rxtshift >= TCP_MAXRXTSHIFT) {
+				if (TCP_ECN_ENABLED(tp)) {
+					INP_INC_IFNET_STAT(tp->t_inpcb,
+					    ecn_on.rxmit_drop);
+				} else {
+					INP_INC_IFNET_STAT(tp->t_inpcb,
+					    ecn_off.rxmit_drop);
+				}
 			}
 			tp->t_rxtshift = TCP_MAXRXTSHIFT;
 			postevent(so, 0, EV_TIMEOUT);			
@@ -692,6 +802,7 @@ tcp_timers(tp, timer)
 		}
 
 		tcpstat.tcps_rexmttimeo++;
+		tp->t_accsleep_ms = accsleep_ms;
 
 		if (tp->t_rxtshift == 1 && 
 			tp->t_state == TCPS_ESTABLISHED) {
@@ -706,7 +817,7 @@ tcp_timers(tp, timer)
 			tcp_rexmt_save_state(tp);
 		}
 #if MPTCP
-		if ((tp->t_rxtshift == mptcp_fail_thresh) &&
+		if ((tp->t_rxtshift >= mptcp_fail_thresh) &&
 		    (tp->t_state == TCPS_ESTABLISHED) &&
 		    (tp->t_mpflags & TMPF_MPTCP_TRUE)) {
 			mptcp_act_on_txfail(so);
@@ -723,12 +834,66 @@ tcp_timers(tp, timer)
 				SO_FILT_HINT_ADAPTIVE_WTIMO));
 		}
 
+		/*
+		 * If this is a retransmit timeout after PTO, the PTO
+		 * was not effective
+		 */
+		if (tp->t_flagsext & TF_SENT_TLPROBE) {
+			tp->t_flagsext &= ~(TF_SENT_TLPROBE);
+			tcpstat.tcps_rto_after_pto++;
+		}
+
+		if (tp->t_flagsext & TF_DELAY_RECOVERY) {
+			/*
+			 * Retransmit timer fired before entering recovery
+			 * on a connection with packet re-ordering. This
+			 * suggests that the reordering metrics computed
+			 * are not accurate.
+			 */
+			tp->t_reorderwin = 0;
+			tp->t_timer[TCPT_DELAYFR] = 0;
+			tp->t_flagsext &= ~(TF_DELAY_RECOVERY);
+		}
+
+		if (tp->t_state == TCPS_SYN_RECEIVED)
+			tcp_disable_tfo(tp);
+
+		if ((tp->t_tfo_stats & TFO_S_SYN_DATA_SENT) &&
+		    !(tp->t_tfo_flags & TFO_F_NO_SNDPROBING) &&
+		    ((tp->t_state != TCPS_SYN_SENT && tp->t_rxtshift > 1) ||
+		     tp->t_rxtshift > 2)) {
+			/*
+			 * For regular retransmissions, a first one is being
+			 * done for tail-loss probe.
+			 * Thus, if rxtshift > 1, this means we have sent the segment
+			 * a total of 3 times.
+			 *
+			 * If we are in SYN-SENT state, then there is no tail-loss
+			 * probe thus we have to let rxtshift go up to 3.
+			 */
+			tcp_heuristic_tfo_middlebox(tp);
+
+			so->so_error = ENODATA;
+			sorwakeup(so);
+			sowwakeup(so);
+		}
+
 		if (tp->t_state == TCPS_SYN_SENT) {
 			rexmt = TCP_REXMTVAL(tp) * tcp_syn_backoff[tp->t_rxtshift];
 			tp->t_stat.synrxtshift = tp->t_rxtshift;
-		}
-		else
+
+			/* When retransmitting, disable TFO */
+			if (tfo_enabled(tp)) {
+				tp->t_flagsext &= ~TF_FASTOPEN;
+				tp->t_tfo_flags |= TFO_F_SYN_LOSS;
+
+				tp->t_tfo_stats |= TFO_S_SYN_LOSS;
+				tcpstat.tcps_tfo_syn_loss++;
+			}
+		} else {
 			rexmt = TCP_REXMTVAL(tp) * tcp_backoff[tp->t_rxtshift];
+		}
+
 		TCPT_RANGESET(tp->t_rxtcur, rexmt,
 			tp->t_rttmin, TCPTV_REXMTMAX, 
 			TCP_ADD_REXMTSLOP(tp));
@@ -739,16 +904,20 @@ tcp_timers(tp, timer)
 
 		tcp_free_sackholes(tp);
 		/*
-		 * Check for potential Path MTU Discovery Black Hole 
+		 * Check for potential Path MTU Discovery Black Hole
 		 */
-
-		if (tcp_pmtud_black_hole_detect && (tp->t_state == TCPS_ESTABLISHED)) {
-			if (((tp->t_flags & (TF_PMTUD|TF_MAXSEGSNT)) == (TF_PMTUD|TF_MAXSEGSNT)) &&
-				 (tp->t_rxtshift == 2)) {
+		if (tcp_pmtud_black_hole_detect &&
+			!(tp->t_flagsext & TF_NOBLACKHOLE_DETECTION) &&
+			(tp->t_state == TCPS_ESTABLISHED)) {
+			if ((tp->t_flags & TF_PMTUD) &&
+			    ((tp->t_flags & TF_MAXSEGSNT)
+			    || tp->t_pmtud_lastseg_size > tcp_pmtud_black_hole_mss) &&
+			    tp->t_rxtshift == 2) {
 				/* 
 				 * Enter Path MTU Black-hole Detection mechanism:
 				 * - Disable Path MTU Discovery (IP "DF" bit).
-				 * - Reduce MTU to lower value than what we negociated with peer.
+				 * - Reduce MTU to lower value than what we
+				 * negotiated with the peer.
 				 */
 				/* Disable Path MTU Discovery for now */
 				tp->t_flags &= ~TF_PMTUD;
@@ -757,6 +926,9 @@ tcp_timers(tp, timer)
 				optlen = tp->t_maxopd - tp->t_maxseg;
 				/* Keep track of previous MSS */
 				tp->t_pmtud_saved_maxopd = tp->t_maxopd;
+				tp->t_pmtud_start_ts = tcp_now;
+				if (tp->t_pmtud_start_ts == 0)
+					tp->t_pmtud_start_ts++;
 				/* Reduce the MSS to intermediary value */
 				if (tp->t_maxopd > tcp_pmtud_black_hole_mss) {
 					tp->t_maxopd = tcp_pmtud_black_hole_mss;
@@ -777,42 +949,32 @@ tcp_timers(tp, timer)
 					CC_ALGO(tp)->cwnd_init(tp);
 			}
 			/*
-			 * If further retransmissions are still unsuccessful with a lowered MTU,
-			 * maybe this isn't a Black Hole and we restore the previous MSS and
-			 * blackhole detection flags.
+			 * If further retransmissions are still
+			 * unsuccessful with a lowered MTU, maybe this
+			 * isn't a Black Hole and we restore the previous
+			 * MSS and blackhole detection flags.
 			 */
 			else {
 	
-				if ((tp->t_flags & TF_BLACKHOLE) && (tp->t_rxtshift > 4)) {
-					tp->t_flags |= TF_PMTUD; 
-					tp->t_flags &= ~TF_BLACKHOLE; 
-					optlen = tp->t_maxopd - tp->t_maxseg;
-					tp->t_maxopd = tp->t_pmtud_saved_maxopd;
-					tp->t_maxseg = tp->t_maxopd - optlen;
-					/*
-	 			 	 * Reset the slow-start flight size as it 
-					 * may depend on the new MSS
-	 			 	 */
-					if (CC_ALGO(tp)->cwnd_init != NULL)
-						CC_ALGO(tp)->cwnd_init(tp);
+				if ((tp->t_flags & TF_BLACKHOLE) &&
+				    (tp->t_rxtshift > 4)) {
+					tcp_pmtud_revert_segment_size(tp);
 				}
 			}
 		}
 
 
 		/*
-		 * Disable rfc1323 and rfc1644 if we haven't got any response to
-		 * our SYN (after we reach the threshold) to work-around some
-		 * broken terminal servers (most of which have hopefully been
-		 * retired) that have bad VJ header compression code which
-		 * trashes TCP segments containing unknown-to-them TCP options.
+		 * Disable rfc1323 and rfc1644 if we haven't got any
+		 * response to our SYN (after we reach the threshold)
+		 * to work-around some broken terminal servers (most of
+		 * which have hopefully been retired) that have bad VJ
+		 * header compression code which trashes TCP segments
+		 * containing unknown-to-them TCP options.
 		 * Do this only on non-local connections.
 		 */
 		if (tp->t_state == TCPS_SYN_SENT &&
-		    ((!(tp->t_flags & TF_LOCAL) &&
-		    tp->t_rxtshift == tcp_broken_peer_syn_rxmit_thres) ||
-		    ((tp->t_flags & TF_LOCAL) && 
-		    tp->t_rxtshift == tcp_broken_peer_syn_rxmit_thres_local)))
+		    tp->t_rxtshift == tcp_broken_peer_syn_rxmit_thres)
 			tp->t_flags &= ~(TF_REQ_SCALE|TF_REQ_TSTMP|TF_REQ_CC);
 
 		/*
@@ -843,33 +1005,40 @@ tcp_timers(tp, timer)
 		 * Force a segment to be sent.
 		 */
 		tp->t_flags |= TF_ACKNOW;
-		/*
-		 * If timing a segment in this window, stop the timer.
-		 */
+
+		/* If timing a segment in this window, stop the timer */
 		tp->t_rtttime = 0;
 
-		EXIT_FASTRECOVERY(tp);
+		if (!IN_FASTRECOVERY(tp) && tp->t_rxtshift == 1)
+			tcpstat.tcps_tailloss_rto++;
 
-		/* RFC 5681 says: when a TCP sender detects segment loss
+
+		/*
+		 * RFC 5681 says: when a TCP sender detects segment loss
 		 * using retransmit timer and the given segment has already
 		 * been retransmitted by way of the retransmission timer at
 		 * least once, the value of ssthresh is held constant
 		 */
 		if (tp->t_rxtshift == 1 && 
-			CC_ALGO(tp)->after_timeout != NULL)
+		    CC_ALGO(tp)->after_timeout != NULL) {
 			CC_ALGO(tp)->after_timeout(tp);
-
-
-		/* CWR notifications are to be sent on new data right after
-		 * RTOs, Fast Retransmits and ECE notification receipts.
-		 */
-		if ((tp->ecn_flags & TE_ECN_ON) == TE_ECN_ON) {
-			tp->ecn_flags |= TE_SENDCWR;
+			/*
+			 * CWR notifications are to be sent on new data
+			 * right after Fast Retransmits and ECE
+			 * notification receipts.
+			 */
+			if (TCP_ECN_ENABLED(tp))
+				tp->ecn_flags |= TE_SENDCWR;
 		}
+
+		EXIT_FASTRECOVERY(tp);
+
+		/* Exit cwnd non validated phase */
+		tp->t_flagsext &= ~TF_CWND_NONVALIDATED;
+
+
 fc_output:
-		DTRACE_TCP5(cc, void, NULL, struct inpcb *, tp->t_inpcb,
-			struct tcpcb *, tp, struct tcphdr *, NULL,
-			int32_t, TCP_CC_REXMT_TIMEOUT);
+		tcp_ccdbg_trace(tp, NULL, TCP_CC_REXMT_TIMEOUT);
 
 		(void) tcp_output(tp);
 		break;
@@ -904,9 +1073,9 @@ fc_output:
 			break;
 		}
 		tcp_setpersist(tp);
-		tp->t_force = 1;
+		tp->t_flagsext |= TF_FORCE;
 		(void) tcp_output(tp);
-		tp->t_force = 0;
+		tp->t_flagsext &= ~TF_FORCE;
 		break;
 
 	/*
@@ -921,8 +1090,8 @@ fc_output:
 		 * MPTCP must not also, after sending Data FINs.
 		 */
 		struct mptcb *mp_tp = tp->t_mptcb;
-		if ((tp->t_mpflags & TMPF_MPTCP_TRUE) && 
-		    (mp_tp == NULL)) {
+		if ((tp->t_mpflags & TMPF_MPTCP_TRUE) &&
+		    (tp->t_state > TCPS_ESTABLISHED)) {
 			goto dropit;
 		} else if (mp_tp != NULL) {
 			if ((mptcp_ok_to_keepalive(mp_tp) == 0))
@@ -933,7 +1102,8 @@ fc_output:
 			goto dropit;
 		if ((always_keepalive ||
 		    (tp->t_inpcb->inp_socket->so_options & SO_KEEPALIVE) ||
-		    (tp->t_flagsext & TF_DETECT_READSTALL)) &&
+		    (tp->t_flagsext & TF_DETECT_READSTALL) ||
+		    (tp->t_tfo_probe_state == TFO_PROBE_PROBING)) &&
 		    (tp->t_state <= TCPS_CLOSING || tp->t_state == TCPS_FIN_WAIT_2)) {
 		    	if (idle_time >= TCP_CONN_KEEPIDLE(tp) + TCP_CONN_MAXIDLE(tp))
 				goto dropit;
@@ -952,35 +1122,33 @@ fc_output:
 			tcpstat.tcps_keepprobe++;
 			t_template = tcp_maketemplate(tp);
 			if (t_template) {
-				unsigned int ifscope, nocell = 0;
+				struct inpcb *inp = tp->t_inpcb;
+				struct tcp_respond_args tra;
 
+				bzero(&tra, sizeof(tra));
+				tra.nocell = INP_NO_CELLULAR(inp);
+				tra.noexpensive = INP_NO_EXPENSIVE(inp);
+				tra.awdl_unrestricted = INP_AWDL_UNRESTRICTED(inp);
 				if (tp->t_inpcb->inp_flags & INP_BOUND_IF)
-					ifscope = tp->t_inpcb->inp_boundifp->if_index;
+					tra.ifscope = tp->t_inpcb->inp_boundifp->if_index;
 				else
-					ifscope = IFSCOPE_NONE;
-
-				/*
-				 * If the socket isn't allowed to use the
-				 * cellular interface, indicate it as such.
-				 */
-				if (tp->t_inpcb->inp_flags & INP_NO_IFT_CELLULAR)
-					nocell = 1;
-
+					tra.ifscope = IFSCOPE_NONE;
 				tcp_respond(tp, t_template->tt_ipgen,
 				    &t_template->tt_t, (struct mbuf *)NULL,
-				    tp->rcv_nxt, tp->snd_una - 1, 0, ifscope,
-				    nocell);
+				    tp->rcv_nxt, tp->snd_una - 1, 0, &tra);
 				(void) m_free(dtom(t_template));
 				if (tp->t_flagsext & TF_DETECT_READSTALL)
 					tp->t_rtimo_probes++;
 			}
 			tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
-				TCP_CONN_KEEPINTVL(tp));
+			    TCP_CONN_KEEPINTVL(tp));
 		} else {
 			tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
-				TCP_CONN_KEEPIDLE(tp));
+			    TCP_CONN_KEEPIDLE(tp));
 		}
 		if (tp->t_flagsext & TF_DETECT_READSTALL) {
+			struct ifnet *outifp = tp->t_inpcb->inp_last_outifp;
+			bool reenable_probe = false;
 			/* 
 			 * The keep alive packets sent to detect a read
 			 * stall did not get a response from the 
@@ -988,16 +1156,53 @@ fc_output:
 			 * If the number of probes sent reaches the limit,
 			 * generate an event.
 			 */
-			if (tp->t_rtimo_probes > tp->t_adaptive_rtimo) {
-				/* Generate an event */
-				soevent(so,
-					(SO_FILT_HINT_LOCKED|
-					SO_FILT_HINT_ADAPTIVE_RTIMO));
-				tcp_keepalive_reset(tp);
+			if (tp->t_adaptive_rtimo > 0) {
+				if (tp->t_rtimo_probes > tp->t_adaptive_rtimo) {
+					/* Generate an event */
+					soevent(so,
+					    (SO_FILT_HINT_LOCKED |
+					    SO_FILT_HINT_ADAPTIVE_RTIMO));
+					tcp_keepalive_reset(tp);
+				} else {
+					reenable_probe = true;
+				}
+			} else if (outifp != NULL &&
+			    (outifp->if_eflags & IFEF_PROBE_CONNECTIVITY) &&
+			    tp->t_rtimo_probes <= TCP_CONNECTIVITY_PROBES_MAX) {
+				reenable_probe = true;
 			} else {
-				tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(
-					tp, TCP_REXMTVAL(tp));
+				tp->t_flagsext &= ~TF_DETECT_READSTALL;
 			}
+			if (reenable_probe) {
+				int ind = min(tp->t_rtimo_probes,
+				    TCP_MAXRXTSHIFT);
+				tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(
+				    tp, tcp_backoff[ind] * TCP_REXMTVAL(tp));
+			}
+		}
+		if (tp->t_tfo_probe_state == TFO_PROBE_PROBING) {
+			int ind;
+
+			tp->t_tfo_probes++;
+			ind = min(tp->t_tfo_probes, TCP_MAXRXTSHIFT);
+
+			/*
+			 * We take the minimum among the time set by true
+			 * keepalive (see above) and the backoff'd RTO. That
+			 * way we backoff in case of packet-loss but will never
+			 * timeout slower than regular keepalive due to the
+			 * backing off.
+			 */
+			tp->t_timer[TCPT_KEEP] = min(OFFSET_FROM_START(
+			    tp, tcp_backoff[ind] * TCP_REXMTVAL(tp)),
+			    tp->t_timer[TCPT_KEEP]);
+		} else if (tp->t_tfo_probe_state == TFO_PROBE_WAIT_DATA) {
+			/* Still no data! Let's assume a TFO-error and err out... */
+			tcp_heuristic_tfo_middlebox(tp);
+
+			so->so_error = ENODATA;
+			sorwakeup(so);
+			tcpstat.tcps_tfo_blackhole++;
 		}
 		break;
 	case TCPT_DELACK:
@@ -1006,16 +1211,39 @@ fc_output:
 			tp->t_timer[TCPT_DELACK] = 0;
 			tp->t_flags |= TF_ACKNOW;
 
-			/* If delayed ack timer fired while stretching acks
-			 * go back to acking every other packet
+			/*
+			 * If delayed ack timer fired while stretching
+			 * acks, count the number of times the streaming
+			 * detection was not correct. If this exceeds a 
+			 * threshold, disable strech ack on this
+			 * connection
+			 *
+			 * Also, go back to acking every other packet.
 			 */
-			if ((tp->t_flags & TF_STRETCHACK) != 0)
-				tcp_reset_stretch_ack(tp);
+			if ((tp->t_flags & TF_STRETCHACK)) {
+				if (tp->t_unacksegs > 1 &&
+				    tp->t_unacksegs < maxseg_unacked)
+					tp->t_stretchack_delayed++;
 
-			/* If we are measuring inter packet arrival jitter for 
-			 * throttling a connection, this delayed ack might be 
-			 * the reason for accumulating some jitter. So let's
-			 * restart the measurement.
+				if (tp->t_stretchack_delayed >
+					TCP_STRETCHACK_DELAY_THRESHOLD) {
+					tp->t_flagsext |= TF_DISABLE_STRETCHACK;
+					/*
+					 * Note the time at which stretch
+					 * ack was disabled automatically
+					 */
+					tp->rcv_nostrack_ts = tcp_now;
+					tcpstat.tcps_nostretchack++;
+					tp->t_stretchack_delayed = 0;
+				}
+				tcp_reset_stretch_ack(tp);
+			}
+
+			/*
+			 * If we are measuring inter packet arrival jitter
+			 * for throttling a connection, this delayed ack
+			 * might be the reason for accumulating some
+			 * jitter. So let's restart the measurement.
 			 */
 			CLEAR_IAJ_STATE(tp);
 
@@ -1051,11 +1279,86 @@ fc_output:
 		break;
 #endif /* MPTCP */
 
-#if TCPDEBUG
-	if (tp->t_inpcb->inp_socket->so_options & SO_DEBUG)
-		tcp_trace(TA_USER, ostate, tp, (void *)0, (struct tcphdr *)0,
-			  PRU_SLOWTIMO);
-#endif
+	case TCPT_PTO:
+	{
+		int32_t snd_len;
+		tp->t_flagsext &= ~(TF_SENT_TLPROBE);
+
+		/*
+		 * Check if the connection is in the right state to
+		 * send a probe
+		 */
+		if (tp->t_state != TCPS_ESTABLISHED ||
+		    (tp->t_rxtshift > 0 && !(tp->t_flagsext & TF_PROBING))
+		    || tp->snd_max == tp->snd_una ||
+		    !SACK_ENABLED(tp) || !TAILQ_EMPTY(&tp->snd_holes) ||
+		    IN_FASTRECOVERY(tp))
+			break;
+
+		/*
+		 * If there is no new data to send or if the
+		 * connection is limited by receive window then
+		 * retransmit the last segment, otherwise send
+		 * new data.
+		 */
+		snd_len = min(so->so_snd.sb_cc, tp->snd_wnd)
+		    - (tp->snd_max - tp->snd_una);
+		if (snd_len > 0) {
+			tp->snd_nxt = tp->snd_max;
+		} else {
+			snd_len = min((tp->snd_max - tp->snd_una),
+			    tp->t_maxseg);
+			tp->snd_nxt = tp->snd_max - snd_len;
+		}
+
+		tcpstat.tcps_pto++;
+		if (tp->t_flagsext & TF_PROBING)
+			tcpstat.tcps_probe_if++;
+
+		/* If timing a segment in this window, stop the timer */
+		tp->t_rtttime = 0;
+		/* Note that tail loss probe is being sent */
+		tp->t_flagsext |= TF_SENT_TLPROBE;
+		tp->t_tlpstart = tcp_now;
+
+		tp->snd_cwnd += tp->t_maxseg;
+		(void )tcp_output(tp);
+		tp->snd_cwnd -= tp->t_maxseg;
+
+		tp->t_tlphighrxt = tp->snd_nxt;
+		break;
+	}
+	case TCPT_DELAYFR:
+		tp->t_flagsext &= ~TF_DELAY_RECOVERY;
+
+		/*
+		 * Don't do anything if one of the following is true:
+		 * - the connection is already in recovery
+		 * - sequence until snd_recover has been acknowledged.
+		 * - retransmit timeout has fired
+		 */
+		if (IN_FASTRECOVERY(tp) ||
+		    SEQ_GEQ(tp->snd_una, tp->snd_recover) ||
+		    tp->t_rxtshift > 0)
+			break;
+
+		VERIFY(SACK_ENABLED(tp));
+		tcp_rexmt_save_state(tp);
+		if (CC_ALGO(tp)->pre_fr != NULL) {
+			CC_ALGO(tp)->pre_fr(tp);
+			if (TCP_ECN_ENABLED(tp))
+				tp->ecn_flags |= TE_SENDCWR;
+		}
+		ENTER_FASTRECOVERY(tp);
+
+		tp->t_timer[TCPT_REXMT] = 0;
+		tcpstat.tcps_sack_recovery_episode++;
+		tp->t_sack_recovery_episode++;
+		tp->sack_newdata = tp->snd_nxt;
+		tp->snd_cwnd = tp->t_maxseg;
+		tcp_ccdbg_trace(tp, NULL, TCP_CC_ENTER_FASTRECOVERY);
+		(void) tcp_output(tp);
+		break;
 	dropit:
 		tcpstat.tcps_keepdrops++;
 		postevent(so, 0, EV_TIMEOUT);
@@ -1064,6 +1367,11 @@ fc_output:
 		tp = tcp_drop(tp, ETIMEDOUT);
 		break;
 	}
+#if TCPDEBUG
+	if (tp->t_inpcb->inp_socket->so_options & SO_DEBUG)
+		tcp_trace(TA_USER, ostate, tp, (void *)0, (struct tcphdr *)0,
+			  PRU_SLOWTIMO);
+#endif
 	return (tp);
 }
 
@@ -1098,26 +1406,25 @@ tcp_remove_timer(struct tcpcb *tp)
 	lck_mtx_unlock(listp->mtx);
 }
 
-/* Function to check if the timerlist needs to be rescheduled to run
+/*
+ * Function to check if the timerlist needs to be rescheduled to run
  * the timer entry correctly. Basically, this is to check if we can avoid
  * taking the list lock.
  */
 
 static boolean_t
-need_to_resched_timerlist(uint32_t runtime, uint16_t index) {
+need_to_resched_timerlist(u_int32_t runtime, u_int16_t mode)
+{
 	struct tcptimerlist *listp = &tcp_timer_list;
 	int32_t diff;
-	boolean_t is_fast;
 
-	if (index == TCPT_NONE)
-		return FALSE;
-	is_fast = !(IS_TIMER_SLOW(index));
-
-	/* If the list is being processed then the state of the list is in flux.
-	 * In this case always acquire the lock and set the state correctly.
+	/*
+	 * If the list is being processed then the state of the list is
+	 * in flux. In this case always acquire the lock and set the state
+	 * correctly.
 	 */
 	if (listp->running)
-		return TRUE;
+		return (TRUE);
 
 	if (!listp->scheduled)
 		return (TRUE);
@@ -1125,23 +1432,25 @@ need_to_resched_timerlist(uint32_t runtime, uint16_t index) {
 	diff = timer_diff(listp->runtime, 0, runtime, 0);
 	if (diff <= 0) {
 		/* The list is going to run before this timer */
-		return FALSE;
+		return (FALSE);
 	} else {
-		if (is_fast) {
-			if (diff <= listp->fast_quantum)
-				return FALSE;
+		if (mode & TCP_TIMERLIST_10MS_MODE) {
+			if (diff <= TCP_TIMER_10MS_QUANTUM)
+				return (FALSE);
+		} else if (mode & TCP_TIMERLIST_100MS_MODE) {
+			if (diff <= TCP_TIMER_100MS_QUANTUM)
+				return (FALSE);
 		} else {
-			if (diff <= listp->slow_quantum)
-				return FALSE;
+			if (diff <= TCP_TIMER_500MS_QUANTUM)
+				return (FALSE);
 		}
 	}
-	return TRUE;
+	return (TRUE);
 }
 
 void
 tcp_sched_timerlist(uint32_t offset) 
 {
-
 	uint64_t deadline = 0;
 	struct tcptimerlist *listp = &tcp_timer_list;
 
@@ -1149,39 +1458,47 @@ tcp_sched_timerlist(uint32_t offset)
 
 	offset = min(offset, TCP_TIMERLIST_MAX_OFFSET);
 	listp->runtime = tcp_now + offset;
-	if (listp->runtime == 0)
+	if (listp->runtime == 0) {
 		listp->runtime++;
+		offset++;
+	}
 
-	clock_interval_to_deadline(offset, NSEC_PER_SEC / TCP_RETRANSHZ,
-		&deadline);
+	clock_interval_to_deadline(offset, USEC_PER_SEC, &deadline);
 
 	thread_call_enter_delayed(listp->call, deadline);
 	listp->scheduled = TRUE;
 }
 
-/* Function to run the timers for a connection.
+/*
+ * Function to run the timers for a connection.
  *
  * Returns the offset of next timer to be run for this connection which 
  * can be used to reschedule the timerlist.
+ *
+ * te_mode is an out parameter that indicates the modes of active
+ * timers for this connection.
  */
-uint32_t
-tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index) {
-
-        struct socket *so;
-        uint16_t i = 0, index = TCPT_NONE, lo_index = TCPT_NONE;
-        uint32_t timer_val, offset = 0, lo_timer = 0;
+u_int32_t
+tcp_run_conn_timer(struct tcpcb *tp, u_int16_t *te_mode,
+	u_int16_t probe_if_index)
+{
+	struct socket *so;
+	u_int16_t i = 0, index = TCPT_NONE, lo_index = TCPT_NONE;
+	u_int32_t timer_val, offset = 0, lo_timer = 0;
 	int32_t diff;
 	boolean_t needtorun[TCPT_NTIMERS];
 	int count = 0;
 
-        VERIFY(tp != NULL);
-        bzero(needtorun, sizeof(needtorun));
+	VERIFY(tp != NULL);
+	bzero(needtorun, sizeof(needtorun));
+	*te_mode = 0;
 
-        tcp_lock(tp->t_inpcb->inp_socket, 1, 0);
+	tcp_lock(tp->t_inpcb->inp_socket, 1, 0);
 
-        so = tp->t_inpcb->inp_socket;
+	so = tp->t_inpcb->inp_socket;
 	/* Release the want count on inp */ 
-	if (in_pcb_checkstate(tp->t_inpcb, WNT_RELEASE, 1) == WNT_STOPUSING) {
+	if (in_pcb_checkstate(tp->t_inpcb, WNT_RELEASE, 1)
+		== WNT_STOPUSING) {
 		if (TIMER_IS_ON_LIST(tp)) {
 			tcp_remove_timer(tp);
 		}
@@ -1192,19 +1509,33 @@ tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index) {
 		goto done;
 	}
 
-        /* Since the timer thread needs to wait for tcp lock, it may race
-         * with another thread that can cancel or reschedule the timer that is
-         * about to run. Check if we need to run anything.
-         */
+	/*
+	 * If this connection is over an interface that needs to
+	 * be probed, send probe packets to reinitiate communication.
+	 */
+	if (probe_if_index > 0 && tp->t_inpcb->inp_last_outifp != NULL &&
+	    tp->t_inpcb->inp_last_outifp->if_index == probe_if_index) {
+		tp->t_flagsext |= TF_PROBING;
+		tcp_timers(tp, TCPT_PTO);
+		tp->t_timer[TCPT_PTO] = 0;
+		tp->t_flagsext &= TF_PROBING;
+	}
+
+	/*
+	 * Since the timer thread needs to wait for tcp lock, it may race
+	 * with another thread that can cancel or reschedule the timer
+	 * that is about to run. Check if we need to run anything.
+	 */
 	if ((index = tp->tentry.index) == TCPT_NONE)
 		goto done;
+	
 	timer_val = tp->t_timer[index];
 
 	diff = timer_diff(tp->tentry.runtime, 0, tcp_now, 0);
 	if (diff > 0) {
 		if (tp->tentry.index != TCPT_NONE) {
 			offset = diff;
-			*(next_index) = tp->tentry.index;
+			*(te_mode) = tp->tentry.mode;
 		}
 		goto done;
 	}
@@ -1212,18 +1543,20 @@ tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index) {
 	tp->t_timer[index] = 0;
 	if (timer_val > 0) {
 		tp = tcp_timers(tp, index);
-		if (tp == NULL) 
+		if (tp == NULL)
 			goto done;
 	}
 	
-	/* Check if there are any other timers that need to be run. While doing it,
-	 * adjust the timer values wrt tcp_now.
+	/*
+	 * Check if there are any other timers that need to be run.
+	 * While doing it, adjust the timer values wrt tcp_now.
 	 */
+	tp->tentry.mode = 0;
 	for (i = 0; i < TCPT_NTIMERS; ++i) {
 		if (tp->t_timer[i] != 0) {
-			diff = timer_diff(tp->tentry.timer_start, tp->t_timer[i], tcp_now, 0);
+			diff = timer_diff(tp->tentry.timer_start,
+				tp->t_timer[i], tcp_now, 0);
 			if (diff <= 0) {
-				tp->t_timer[i] = 0;
 				needtorun[i] = TRUE;
 				count++;
 			} else {
@@ -1233,27 +1566,31 @@ tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index) {
 					lo_timer = diff;
 					lo_index = i;
 				}
+				TCP_SET_TIMER_MODE(tp->tentry.mode, i);
 			}
 		}
 	}
 	
 	tp->tentry.timer_start = tcp_now;
 	tp->tentry.index = lo_index;
-	if (lo_index != TCPT_NONE) {
-		tp->tentry.runtime = tp->tentry.timer_start + tp->t_timer[lo_index];
+	VERIFY(tp->tentry.index == TCPT_NONE || tp->tentry.mode > 0);
+
+	if (tp->tentry.index != TCPT_NONE) {
+		tp->tentry.runtime = tp->tentry.timer_start +
+			tp->t_timer[tp->tentry.index];
 		if (tp->tentry.runtime == 0)
 			tp->tentry.runtime++;
 	}
 
 	if (count > 0) {
-		/* run any other timers that are also outstanding at this time. */
+		/* run any other timers outstanding at this time. */
 		for (i = 0; i < TCPT_NTIMERS; ++i) {
 			if (needtorun[i]) {
 				tp->t_timer[i] = 0;
 				tp = tcp_timers(tp, i);
 				if (tp == NULL) {
 					offset = 0;
-					*(next_index) = TCPT_NONE;
+					*(te_mode) = 0;
 					goto done;
 				}
 			}
@@ -1263,7 +1600,7 @@ tcp_run_conn_timer(struct tcpcb *tp, uint16_t *next_index) {
 
 	if (tp->tentry.index < TCPT_NONE) {
 		offset = tp->t_timer[tp->tentry.index];
-		*(next_index) = tp->tentry.index;
+		*(te_mode) = tp->tentry.mode;
 	}
 
 done:
@@ -1271,23 +1608,21 @@ done:
 		tcp_remove_timer(tp);
 		offset = 0;
 	}
-        tcp_unlock(so, 1, 0);
-        return offset;
+
+	tcp_unlock(so, 1, 0);
+	return(offset);
 }
 
 void
 tcp_run_timerlist(void * arg1, void * arg2) {
-
 #pragma unused(arg1, arg2)
-	
 	struct tcptimerentry *te, *next_te;
 	struct tcptimerlist *listp = &tcp_timer_list;
 	struct tcpcb *tp;
-	uint32_t next_timer = 0;
-	uint16_t index = TCPT_NONE;
-	boolean_t need_fast = FALSE;
+	uint32_t next_timer = 0; /* offset of the next timer on the list */
+	u_int16_t te_mode = 0;	/* modes of all active timers in a tcpcb */
+	u_int16_t list_mode = 0; /* cumulative of modes of all tcpcbs */
 	uint32_t active_count = 0;
-	uint32_t mode = TCP_TIMERLIST_FASTMODE;
 
 	calculate_tcp_clock();
 
@@ -1303,19 +1638,24 @@ tcp_run_timerlist(void * arg1, void * arg2) {
 			if (next_timer == 0 || offset < next_timer) {
 				next_timer = offset;
 			}
+			list_mode |= te->mode;
 			continue;
 		}
-		active_count++;
 
 		tp = TIMERENTRY_TO_TP(te);
 
-		/* Acquire an inp wantcnt on the inpcb so that the socket won't get
-		 * detached even if tcp_close is called
+		/*
+		 * Acquire an inp wantcnt on the inpcb so that the socket
+		 * won't get detached even if tcp_close is called
 		 */
-		if (in_pcb_checkstate(tp->t_inpcb, WNT_ACQUIRE, 0) == WNT_STOPUSING) {
-			/* Some how this pcb went into dead state while on the timer list,
-			 * just take it off the list. Since the timer list entry pointers 
-			 * are protected by the timer list lock, we can do it here
+		if (in_pcb_checkstate(tp->t_inpcb, WNT_ACQUIRE, 0)
+		    == WNT_STOPUSING) {
+			/*
+			 * Some how this pcb went into dead state while
+			 * on the timer list, just take it off the list.
+			 * Since the timer list entry pointers are
+			 * protected by the timer list lock, we can 
+			 * do it here without the socket lock.
 			 */
 			if (TIMER_IS_ON_LIST(tp)) {
 				tp->t_flags &= ~(TF_TIMER_ONLIST);
@@ -1327,10 +1667,13 @@ tcp_run_timerlist(void * arg1, void * arg2) {
 			}
 			continue;
 		}
+		active_count++;
 
-		/* Store the next timerentry pointer before releasing the list lock.
-		 * If that entry has to be removed when we release the lock, this
-		 * pointer will be updated to the element after that.
+		/*
+		 * Store the next timerentry pointer before releasing the
+		 * list lock. If that entry has to be removed when we
+		 * release the lock, this pointer will be updated to the
+		 * element after that.
 		 */
 		listp->next_te = next_te; 
 
@@ -1339,58 +1682,60 @@ tcp_run_timerlist(void * arg1, void * arg2) {
 
 		lck_mtx_unlock(listp->mtx);
 
-		index = TCPT_NONE;
-		offset = tcp_run_conn_timer(tp, &index);
+		offset = tcp_run_conn_timer(tp, &te_mode,
+		    listp->probe_if_index);
 		
 		lck_mtx_lock(listp->mtx);
 
 		next_te = listp->next_te;
 		listp->next_te = NULL;
 
-		if (offset > 0) {
-			if (index < TCPT_NONE) {
-				/* Check if this is a fast_timer. */
-				if (!need_fast && !(IS_TIMER_SLOW(index))) {
-					need_fast = TRUE;
-				}
+		if (offset > 0 && te_mode != 0) {
+			list_mode |= te_mode;
 
-				if (next_timer == 0 || offset < next_timer) {
-					next_timer = offset;
-				}
-			}
+			if (next_timer == 0 || offset < next_timer)
+				next_timer = offset;
 		}
 	}
 
 	if (!LIST_EMPTY(&listp->lhead)) {
-		if (listp->mode == TCP_TIMERLIST_FASTMODE) {
-			if (need_fast || active_count > 0 || 
-				listp->pref_mode == TCP_TIMERLIST_FASTMODE) {
-				listp->idlegen = 0;
+		u_int16_t next_mode = 0;
+		if ((list_mode & TCP_TIMERLIST_10MS_MODE) ||
+			(listp->pref_mode & TCP_TIMERLIST_10MS_MODE))
+			next_mode = TCP_TIMERLIST_10MS_MODE;
+		else if ((list_mode & TCP_TIMERLIST_100MS_MODE) ||
+			(listp->pref_mode & TCP_TIMERLIST_100MS_MODE))
+			next_mode = TCP_TIMERLIST_100MS_MODE;
+		else
+			next_mode = TCP_TIMERLIST_500MS_MODE;
+
+		if (next_mode != TCP_TIMERLIST_500MS_MODE) {
+			listp->idleruns = 0;
+		} else {
+			/*
+			 * the next required mode is slow mode, but if
+			 * the last one was a faster mode and we did not
+			 * have enough idle runs, repeat the last mode.
+			 *
+			 * We try to keep the timer list in fast mode for
+			 * some idle time in expectation of new data.
+			 */
+			if (listp->mode != next_mode &&
+			    listp->idleruns < timer_fastmode_idlemax) {
+				listp->idleruns++;
+				next_mode = listp->mode;
+				next_timer = TCP_TIMER_100MS_QUANTUM;
 			} else {
-				listp->idlegen++;
-				if (listp->idlegen > timer_fastmode_idlemax) {
-					mode = TCP_TIMERLIST_SLOWMODE;
-					listp->idlegen = 0;
-				}
-			}
-		} else {
-			if (!need_fast) {
-				mode = TCP_TIMERLIST_SLOWMODE;
+				listp->idleruns = 0;
 			}
 		}
+		listp->mode = next_mode;
+		if (listp->pref_offset != 0)
+			next_timer = min(listp->pref_offset, next_timer);
 
-		if (mode == TCP_TIMERLIST_FASTMODE || 
-			listp->pref_mode == TCP_TIMERLIST_FASTMODE) {
-			next_timer = listp->fast_quantum;
-		} else {
-			if (listp->pref_offset != 0 && 
-				listp->pref_offset < next_timer)
-				next_timer = listp->pref_offset;
-			if (next_timer < listp->slow_quantum)
-				next_timer = listp->slow_quantum;
-		}
-
-		listp->mode = mode;
+		if (listp->mode == TCP_TIMERLIST_500MS_MODE)
+			next_timer = max(next_timer,
+				TCP_TIMER_500MS_QUANTUM);
 
 		tcp_sched_timerlist(next_timer);
 	} else {
@@ -1404,20 +1749,24 @@ tcp_run_timerlist(void * arg1, void * arg2) {
 	listp->running = FALSE;
 	listp->pref_mode = 0;
 	listp->pref_offset = 0;
+	listp->probe_if_index = 0;
 
 	lck_mtx_unlock(listp->mtx);
 }
 
-/* Function to verify if a change in timer state is required for a connection */
+/*
+ * Function to check if the timerlist needs to be rescheduled to run this
+ * connection's timers correctly.
+ */
 void 
 tcp_sched_timers(struct tcpcb *tp) 
 {
 	struct tcptimerentry *te = &tp->tentry;
-	uint16_t index = te->index;
+	u_int16_t index = te->index;
+	u_int16_t mode = te->mode;
 	struct tcptimerlist *listp = &tcp_timer_list;
 	int32_t offset = 0;
-	boolean_t is_fast;
-	int list_locked = 0;
+	boolean_t list_locked = FALSE;
 
 	if (tp->t_inpcb->inp_state == INPCB_STATE_DEAD) {
 		/* Just return without adding the dead pcb to the list */
@@ -1428,62 +1777,65 @@ tcp_sched_timers(struct tcpcb *tp)
 	}
 
 	if (index == TCPT_NONE) {
+		/* Nothing to run */
 		tcp_remove_timer(tp);
 		return;
 	}
 
-	is_fast = !(IS_TIMER_SLOW(index));
+	/*
+	 * compute the offset at which the next timer for this connection
+	 * has to run.
+	 */
 	offset = timer_diff(te->runtime, 0, tcp_now, 0);
 	if (offset <= 0) {
 		offset = 1;
 		tcp_timer_advanced++;
 	}
-	if (is_fast)
-		offset = listp->fast_quantum;
 
 	if (!TIMER_IS_ON_LIST(tp)) {
 		if (!list_locked) {
 			lck_mtx_lock(listp->mtx);
-			list_locked = 1;
+			list_locked = TRUE;
 		}
 
 		LIST_INSERT_HEAD(&listp->lhead, te, le);
 		tp->t_flags |= TF_TIMER_ONLIST;
 
-        	listp->entries++;
-        	if (listp->entries > listp->maxentries)
-                	listp->maxentries = listp->entries;
+		listp->entries++;
+		if (listp->entries > listp->maxentries)
+			listp->maxentries = listp->entries;
 
 		/* if the list is not scheduled, just schedule it */
 		if (!listp->scheduled)
 			goto schedule;
-
 	}
 
 
-	/* timer entry is currently on the list */
-	if (need_to_resched_timerlist(te->runtime, index)) {
+	/*
+	 * Timer entry is currently on the list, check if the list needs
+	 * to be rescheduled.
+	 */
+	if (need_to_resched_timerlist(te->runtime, mode)) {
 		tcp_resched_timerlist++;
 	
 		if (!list_locked) {
 			lck_mtx_lock(listp->mtx);
-			list_locked = 1;
+			list_locked = TRUE;
 		}
 
 		VERIFY_NEXT_LINK(te, le);
 		VERIFY_PREV_LINK(te, le);
 
 		if (listp->running) {
-			if (is_fast) {
-				listp->pref_mode = TCP_TIMERLIST_FASTMODE;
-			} else if (listp->pref_offset == 0 ||
+			listp->pref_mode |= mode;
+			if (listp->pref_offset == 0 ||
 				offset < listp->pref_offset) {
 				listp->pref_offset = offset;
 			}
 		} else {
 			/*
-			 * The list could have got scheduled while this
-			 * thread was waiting for the lock
+			 * The list could have got rescheduled while
+			 * this thread was waiting for the lock
 			 */
 			if (listp->scheduled) {
 				int32_t diff;
@@ -1501,9 +1853,20 @@ tcp_sched_timers(struct tcpcb *tp)
 	goto done;
 
 schedule:
-	if (is_fast) {
-		listp->mode = TCP_TIMERLIST_FASTMODE;
-		listp->idlegen = 0;
+	/*
+	 * Since a connection with timers is getting scheduled, the timer
+	 * list moves from idle to active state and that is why idlegen is
+	 * reset
+	 */
+	if (mode & TCP_TIMERLIST_10MS_MODE) {
+		listp->mode = TCP_TIMERLIST_10MS_MODE;
+		listp->idleruns = 0;
+		offset = min(offset, TCP_TIMER_10MS_QUANTUM);
+	} else if (mode & TCP_TIMERLIST_100MS_MODE) {
+		if (listp->mode > TCP_TIMERLIST_100MS_MODE)
+			listp->mode = TCP_TIMERLIST_100MS_MODE;
+		listp->idleruns = 0;
+		offset = min(offset, TCP_TIMER_100MS_QUANTUM);
 	}
 	tcp_sched_timerlist(offset);
 
@@ -1514,28 +1877,35 @@ done:
 	return;
 }
 		
-void
-tcp_set_lotimer_index(struct tcpcb *tp) {
-	uint16_t i, lo_index = TCPT_NONE;
+static inline void
+tcp_set_lotimer_index(struct tcpcb *tp)
+{
+	uint16_t i, lo_index = TCPT_NONE, mode = 0;
 	uint32_t lo_timer = 0;
 	for (i = 0; i < TCPT_NTIMERS; ++i) {
-		if (tp->t_timer[i] != 0 &&
-			(lo_timer == 0 || tp->t_timer[i] < lo_timer)) {
-			lo_timer = tp->t_timer[i];
-			lo_index = i;
+		if (tp->t_timer[i] != 0) {
+			TCP_SET_TIMER_MODE(mode, i);
+			if (lo_timer == 0 || tp->t_timer[i] < lo_timer) {
+				lo_timer = tp->t_timer[i];
+				lo_index = i;
+			}
 		}
 	}
 	tp->tentry.index = lo_index;
-	if (lo_index != TCPT_NONE) {
-		tp->tentry.runtime = tp->tentry.timer_start + tp->t_timer[lo_index];
+	tp->tentry.mode = mode;
+	VERIFY(tp->tentry.index == TCPT_NONE || tp->tentry.mode > 0);
+
+	if (tp->tentry.index != TCPT_NONE) {
+		tp->tentry.runtime = tp->tentry.timer_start 
+		    + tp->t_timer[tp->tentry.index];
 		if (tp->tentry.runtime == 0)
 			tp->tentry.runtime++;
 	}
 }
 
 void
-tcp_check_timer_state(struct tcpcb *tp) {
-
+tcp_check_timer_state(struct tcpcb *tp)
+{
 	lck_mtx_assert(&tp->t_inpcb->inpcb_mtx, LCK_MTX_ASSERT_OWNED);
 
 	if (tp->t_inpcb->inp_flags2 & INP2_TIMEWAIT)
@@ -1546,3 +1916,381 @@ tcp_check_timer_state(struct tcpcb *tp) {
 	tcp_sched_timers(tp);
 	return;
 }
+
+static inline void
+tcp_cumulative_stat(u_int32_t cur, u_int32_t *prev, u_int32_t *dest)
+{
+	/* handle wrap around */
+	int32_t diff = (int32_t) (cur - *prev);
+	if (diff > 0)
+		*dest = diff;
+	else
+		*dest = 0;
+	*prev = cur;
+	return;
+}
+
+__private_extern__ void
+tcp_report_stats(void)
+{
+	struct nstat_sysinfo_data data;
+	struct sockaddr_in dst;
+	struct sockaddr_in6 dst6;
+	struct rtentry *rt = NULL;
+	static struct tcp_last_report_stats prev;
+	u_int64_t var, uptime;	
+
+#define	stat	data.u.tcp_stats
+	if (((uptime = net_uptime()) - tcp_last_report_time) <
+		tcp_report_stats_interval)
+		return;
+
+	tcp_last_report_time = uptime;
+
+	bzero(&data, sizeof(data));
+	data.flags = NSTAT_SYSINFO_TCP_STATS;
+
+	bzero(&dst, sizeof(dst));
+	dst.sin_len = sizeof(dst);
+	dst.sin_family = AF_INET;
+
+	/* ipv4 avg rtt */
+	lck_mtx_lock(rnh_lock);
+	rt =  rt_lookup(TRUE, (struct sockaddr *)&dst, NULL,
+		rt_tables[AF_INET], IFSCOPE_NONE);
+	lck_mtx_unlock(rnh_lock);
+	if (rt != NULL) {
+		RT_LOCK(rt);
+		if (rt_primary_default(rt, rt_key(rt)) &&
+			rt->rt_stats != NULL) {
+			stat.ipv4_avgrtt = rt->rt_stats->nstat_avg_rtt;
+		}
+		RT_UNLOCK(rt);
+		rtfree(rt);
+		rt = NULL;
+	}
+
+	/* ipv6 avg rtt */
+	bzero(&dst6, sizeof(dst6));
+	dst6.sin6_len = sizeof(dst6);
+	dst6.sin6_family = AF_INET6;
+
+	lck_mtx_lock(rnh_lock);
+	rt = rt_lookup(TRUE,(struct sockaddr *)&dst6, NULL,
+		rt_tables[AF_INET6], IFSCOPE_NONE);
+	lck_mtx_unlock(rnh_lock);
+	if (rt != NULL) {
+		RT_LOCK(rt);
+		if (rt_primary_default(rt, rt_key(rt)) &&
+			rt->rt_stats != NULL) {
+			stat.ipv6_avgrtt = rt->rt_stats->nstat_avg_rtt;
+		}
+		RT_UNLOCK(rt);
+		rtfree(rt);
+		rt = NULL;
+	}
+
+	/* send packet loss rate, shift by 10 for precision */
+	if (tcpstat.tcps_sndpack > 0 && tcpstat.tcps_sndrexmitpack > 0) {
+		var = tcpstat.tcps_sndrexmitpack << 10;
+		stat.send_plr = (var * 100) / tcpstat.tcps_sndpack;
+	}
+
+	/* recv packet loss rate, shift by 10 for precision */
+	if (tcpstat.tcps_rcvpack > 0 && tcpstat.tcps_recovered_pkts > 0) {
+		var = tcpstat.tcps_recovered_pkts << 10;
+		stat.recv_plr = (var * 100) / tcpstat.tcps_rcvpack;
+	}
+
+	/* RTO after tail loss, shift by 10 for precision */
+	if (tcpstat.tcps_sndrexmitpack > 0 
+	    && tcpstat.tcps_tailloss_rto > 0) {
+		var = tcpstat.tcps_tailloss_rto << 10;
+		stat.send_tlrto_rate =
+			(var * 100) / tcpstat.tcps_sndrexmitpack;
+	}
+	
+	/* packet reordering */
+	if (tcpstat.tcps_sndpack > 0 && tcpstat.tcps_reordered_pkts > 0) {
+		var = tcpstat.tcps_reordered_pkts << 10;
+		stat.send_reorder_rate =
+			(var * 100) / tcpstat.tcps_sndpack;
+	}
+
+	if (tcp_ecn_outbound == 1)
+		stat.ecn_client_enabled = 1;
+	if (tcp_ecn_inbound == 1)
+		stat.ecn_server_enabled = 1;
+	tcp_cumulative_stat(tcpstat.tcps_connattempt,
+	    &prev.tcps_connattempt, &stat.connection_attempts);
+	tcp_cumulative_stat(tcpstat.tcps_accepts,
+	    &prev.tcps_accepts, &stat.connection_accepts);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_client_setup,
+	    &prev.tcps_ecn_client_setup, &stat.ecn_client_setup);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_server_setup,
+	    &prev.tcps_ecn_server_setup, &stat.ecn_server_setup);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_client_success,
+	    &prev.tcps_ecn_client_success, &stat.ecn_client_success);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_server_success,
+	    &prev.tcps_ecn_server_success, &stat.ecn_server_success);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_not_supported,
+	    &prev.tcps_ecn_not_supported, &stat.ecn_not_supported);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_lost_syn,
+	    &prev.tcps_ecn_lost_syn, &stat.ecn_lost_syn);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_lost_synack,
+	    &prev.tcps_ecn_lost_synack, &stat.ecn_lost_synack);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_recv_ce,
+	    &prev.tcps_ecn_recv_ce, &stat.ecn_recv_ce);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_recv_ece,
+	    &prev.tcps_ecn_recv_ece, &stat.ecn_recv_ece);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_recv_ece,
+	    &prev.tcps_ecn_recv_ece, &stat.ecn_recv_ece);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_sent_ece,
+	    &prev.tcps_ecn_sent_ece, &stat.ecn_sent_ece);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_sent_ece,
+	    &prev.tcps_ecn_sent_ece, &stat.ecn_sent_ece);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_conn_recv_ce,
+	    &prev.tcps_ecn_conn_recv_ce, &stat.ecn_conn_recv_ce);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_conn_recv_ece,
+	    &prev.tcps_ecn_conn_recv_ece, &stat.ecn_conn_recv_ece);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_conn_plnoce,
+	    &prev.tcps_ecn_conn_plnoce, &stat.ecn_conn_plnoce);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_conn_pl_ce,
+	    &prev.tcps_ecn_conn_pl_ce, &stat.ecn_conn_pl_ce);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_conn_nopl_ce,
+	    &prev.tcps_ecn_conn_nopl_ce, &stat.ecn_conn_nopl_ce);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_fallback_synloss,
+	    &prev.tcps_ecn_fallback_synloss, &stat.ecn_fallback_synloss);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_fallback_reorder,
+	    &prev.tcps_ecn_fallback_reorder, &stat.ecn_fallback_reorder);
+	tcp_cumulative_stat(tcpstat.tcps_ecn_fallback_ce,
+	    &prev.tcps_ecn_fallback_ce, &stat.ecn_fallback_ce);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_syn_data_rcv,
+	    &prev.tcps_tfo_syn_data_rcv, &stat.tfo_syn_data_rcv);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_cookie_req_rcv,
+	    &prev.tcps_tfo_cookie_req_rcv, &stat.tfo_cookie_req_rcv);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_cookie_sent,
+	    &prev.tcps_tfo_cookie_sent, &stat.tfo_cookie_sent);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_cookie_invalid,
+	    &prev.tcps_tfo_cookie_invalid, &stat.tfo_cookie_invalid);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_cookie_req,
+	    &prev.tcps_tfo_cookie_req, &stat.tfo_cookie_req);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_cookie_rcv,
+	    &prev.tcps_tfo_cookie_rcv, &stat.tfo_cookie_rcv);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_syn_data_sent,
+	    &prev.tcps_tfo_syn_data_sent, &stat.tfo_syn_data_sent);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_syn_data_acked,
+	    &prev.tcps_tfo_syn_data_acked, &stat.tfo_syn_data_acked);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_syn_loss,
+	    &prev.tcps_tfo_syn_loss, &stat.tfo_syn_loss);
+	tcp_cumulative_stat(tcpstat.tcps_tfo_blackhole,
+	    &prev.tcps_tfo_blackhole, &stat.tfo_blackhole);
+
+	nstat_sysinfo_send_data(&data);
+
+#undef	stat
+}
+
+void
+tcp_interface_send_probe(u_int16_t probe_if_index)
+{
+	int32_t offset = 0;
+	struct tcptimerlist *listp = &tcp_timer_list;
+
+	/* Make sure TCP clock is up to date */
+	calculate_tcp_clock();
+
+	lck_mtx_lock(listp->mtx);
+	if (listp->probe_if_index > 0) {
+		tcpstat.tcps_probe_if_conflict++;
+		goto done;
+	}
+
+	listp->probe_if_index = probe_if_index;
+	if (listp->running)
+		goto done;
+
+	/*
+	 * Reschedule the timerlist to run within the next 10ms, which is
+	 * the fastest that we can do.
+	 */
+	offset = TCP_TIMER_10MS_QUANTUM;
+	if (listp->scheduled) {
+		int32_t diff;
+		diff = timer_diff(listp->runtime, 0, tcp_now, offset);
+		if (diff <= 0) {
+			/* The timer will fire sooner than what's needed */
+			goto done;
+		}
+	}
+	listp->mode = TCP_TIMERLIST_10MS_MODE;
+	listp->idleruns = 0;
+
+	tcp_sched_timerlist(offset);
+
+done:
+	lck_mtx_unlock(listp->mtx);
+	return;
+}
+
+/*
+ * Enable read probes on this connection, if:
+ * - it is in established state
+ * - doesn't have any data outstanding
+ * - the outgoing ifp matches
+ * - we have not already sent any read probes
+ */
+static void
+tcp_enable_read_probe(struct tcpcb *tp, struct ifnet *ifp)
+{
+	if (tp->t_state == TCPS_ESTABLISHED &&
+	    tp->snd_max == tp->snd_una &&
+	    tp->t_inpcb->inp_last_outifp == ifp &&
+	    !(tp->t_flagsext & TF_DETECT_READSTALL) &&
+	    tp->t_rtimo_probes == 0) {
+		tp->t_flagsext |= TF_DETECT_READSTALL;
+		tp->t_rtimo_probes = 0;
+		tp->t_timer[TCPT_KEEP] = OFFSET_FROM_START(tp,
+		    TCP_TIMER_10MS_QUANTUM);
+		if (tp->tentry.index == TCPT_NONE) {
+			tp->tentry.index = TCPT_KEEP;
+			tp->tentry.runtime = tcp_now +
+			    TCP_TIMER_10MS_QUANTUM;
+		} else {
+			int32_t diff = 0;
+
+			/* Reset runtime to be in next 10ms */
+			diff = timer_diff(tp->tentry.runtime, 0,
+			    tcp_now, TCP_TIMER_10MS_QUANTUM);
+			if (diff > 0) {
+				tp->tentry.index = TCPT_KEEP;
+				tp->tentry.runtime = tcp_now +
+				    TCP_TIMER_10MS_QUANTUM;
+				if (tp->tentry.runtime == 0)
+					tp->tentry.runtime++;
+			}
+		}
+	}
+}
+
+/*
+ * Disable read probe and reset the keep alive timer
+ */
+static void
+tcp_disable_read_probe(struct tcpcb *tp)
+{
+	if (tp->t_adaptive_rtimo == 0 &&
+	    ((tp->t_flagsext & TF_DETECT_READSTALL) ||
+	    tp->t_rtimo_probes > 0)) {
+		tcp_keepalive_reset(tp);
+	}
+}
+
+/*
+ * Reschedule the tcp timerlist in the next 10ms to re-enable read/write
+ * probes on connections going over a particular interface.
+ */
+void
+tcp_probe_connectivity(struct ifnet *ifp, u_int32_t enable)
+{
+	int32_t offset;
+	struct tcptimerlist *listp = &tcp_timer_list;
+	struct inpcbinfo *pcbinfo = &tcbinfo;
+	struct inpcb *inp, *nxt;
+
+	if (ifp == NULL)
+		return;
+
+	/* update clock */
+	calculate_tcp_clock();
+
+	/*
+	 * Enable keep alive timer on all connections that are
+	 * active/established on this interface.
+	 */
+	lck_rw_lock_shared(pcbinfo->ipi_lock);
+
+	LIST_FOREACH_SAFE(inp, pcbinfo->ipi_listhead, inp_list, nxt) {
+		struct tcpcb *tp = NULL;
+		if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) ==
+		    WNT_STOPUSING)
+			continue;
+
+		/* Acquire lock to look at the state of the connection */
+		tcp_lock(inp->inp_socket, 1, 0);
+
+		/* Release the want count */
+		if (in_pcb_checkstate(inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
+			tcp_unlock(inp->inp_socket, 1, 0);
+			continue;
+		}
+
+		tp = intotcpcb(inp);
+		if (enable)
+			tcp_enable_read_probe(tp, ifp);
+		else
+			tcp_disable_read_probe(tp);
+
+		tcp_unlock(inp->inp_socket, 1, 0);
+	}
+	lck_rw_done(pcbinfo->ipi_lock);
+
+	lck_mtx_lock(listp->mtx);
+	if (listp->running) {
+		listp->pref_mode |= TCP_TIMERLIST_10MS_MODE;
+		goto done;
+	}
+
+	/* Reschedule within the next 10ms */
+	offset = TCP_TIMER_10MS_QUANTUM;
+	if (listp->scheduled) {
+		int32_t diff;
+		diff = timer_diff(listp->runtime, 0, tcp_now, offset);
+		if (diff <= 0) {
+			/* The timer will fire sooner than what's needed */
+			goto done;
+		}
+	}
+	listp->mode = TCP_TIMERLIST_10MS_MODE;
+	listp->idleruns = 0;
+
+	tcp_sched_timerlist(offset);
+done:
+	lck_mtx_unlock(listp->mtx);
+	return;
+}
+
+void
+tcp_itimer(struct inpcbinfo *ipi)
+{
+	struct inpcb *inp, *nxt;
+
+	if (lck_rw_try_lock_exclusive(ipi->ipi_lock) == FALSE) {
+		if (tcp_itimer_done == TRUE) {
+			tcp_itimer_done = FALSE;
+			atomic_add_32(&ipi->ipi_timer_req.intimer_fast, 1);
+			return;
+		}
+		/* Upgrade failed, lost lock now take it again exclusive */
+		lck_rw_lock_exclusive(ipi->ipi_lock);
+	}
+	tcp_itimer_done = TRUE;
+
+	LIST_FOREACH_SAFE(inp, &tcb, inp_list, nxt) {
+		struct socket *so;
+
+		if (in_pcb_checkstate(inp, WNT_ACQUIRE, 0) == WNT_STOPUSING)
+			continue;
+		so = inp->inp_socket;
+		tcp_lock(so, 1, 0);
+		if (in_pcb_checkstate(inp, WNT_RELEASE, 1) == WNT_STOPUSING) {
+			tcp_unlock(so, 1, 0);
+			continue;
+		}
+		so_check_extended_bk_idle_time(so);
+		tcp_unlock(so, 1, 0);
+	}
+
+	lck_rw_done(ipi->ipi_lock);
+}
+

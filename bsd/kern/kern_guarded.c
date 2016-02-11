@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -35,8 +35,27 @@
 #include <kern/kalloc.h>
 #include <sys/sysproto.h>
 #include <sys/vnode.h>
+#include <sys/vnode_internal.h>
+#include <sys/uio_internal.h>
+#include <sys/ubc_internal.h>
 #include <vfs/vfs_support.h>
 #include <security/audit/audit.h>
+#include <sys/syscall.h>
+#include <sys/kauth.h>
+#include <sys/kdebug.h>
+#include <stdbool.h>
+#include <vm/vm_protos.h>
+#if CONFIG_PROTECT
+#include <sys/cprotect.h>
+#endif
+
+
+#define f_flag f_fglob->fg_flag
+#define f_type f_fglob->fg_ops->fo_type
+extern int dofilewrite(vfs_context_t ctx, struct fileproc *fp,
+			 user_addr_t bufp, user_size_t nbyte, off_t offset, 
+			 int flags, user_ssize_t *retval );
+extern int wr_uio(struct proc *p, struct fileproc *fp, uio_t uio, user_ssize_t *retval);
 
 /*
  * Experimental guarded file descriptor support.
@@ -112,15 +131,15 @@ guarded_fileproc_free(struct fileproc *fp)
 
 static int
 fp_lookup_guarded(proc_t p, int fd, guardid_t guard,
-    struct guarded_fileproc **gfpp)
+    struct guarded_fileproc **gfpp, int locked)
 {
 	struct fileproc *fp;
 	int error;
 
-	if ((error = fp_lookup(p, fd, &fp, 1)) != 0)
+	if ((error = fp_lookup(p, fd, &fp, locked)) != 0)
 		return (error);
 	if (FILEPROC_TYPE(fp) != FTYPE_GUARDED) {
-		(void) fp_drop(p, fd, fp, 1);
+		(void) fp_drop(p, fd, fp, locked);
 		return (EINVAL);
 	}
 	struct guarded_fileproc *gfp = FP_TO_GFP(fp);
@@ -129,7 +148,7 @@ fp_lookup_guarded(proc_t p, int fd, guardid_t guard,
 		panic("%s: corrupt fp %p", __func__, fp);
 
 	if (guard != gfp->gf_guard) {
-		(void) fp_drop(p, fd, fp, 1);
+		(void) fp_drop(p, fd, fp, locked);
 		return (EPERM);	/* *not* a mismatch exception */
 	}
 	if (gfpp)
@@ -156,7 +175,7 @@ fp_isguarded(struct fileproc *fp, u_int attrs)
 		if (GUARDED_FILEPROC_MAGIC != gfp->gf_magic)
 			panic("%s: corrupt gfp %p flags %x",
 			    __func__, gfp, fp->f_flags);
-		return ((attrs & gfp->gf_attrs) ? 1 : 0);
+		return ((attrs & gfp->gf_attrs) == attrs);
 	}
 	return (0);
 }
@@ -303,6 +322,10 @@ fd_guard_ast(thread_t t)
  * requires close-on-fork; O_CLOEXEC must be set in flags.
  * This setting is immutable; attempts to clear the flag will
  * cause a guard exception.
+ *
+ * XXX	It's somewhat broken that change_fdguard_np() can completely
+ *	remove the guard and thus revoke down the immutability
+ *	promises above.  Ick.
  */
 int
 guarded_open_np(proc_t p, struct guarded_open_np_args *uap, int32_t *retval)
@@ -312,7 +335,7 @@ guarded_open_np(proc_t p, struct guarded_open_np_args *uap, int32_t *retval)
 
 #define GUARD_REQUIRED (GUARD_DUP)
 #define GUARD_ALL      (GUARD_REQUIRED |	\
-			(GUARD_CLOSE | GUARD_SOCKET_IPC | GUARD_FILEPORT))
+			(GUARD_CLOSE | GUARD_SOCKET_IPC | GUARD_FILEPORT | GUARD_WRITE))
 
 	if (((uap->guardflags & GUARD_REQUIRED) != GUARD_REQUIRED) ||
 	    ((uap->guardflags & ~GUARD_ALL) != 0))
@@ -351,15 +374,86 @@ guarded_open_np(proc_t p, struct guarded_open_np_args *uap, int32_t *retval)
 }
 
 /*
+ * int guarded_open_dprotected_np(const char *pathname, int flags,
+ *     const guardid_t *guard, u_int guardflags, int dpclass, int dpflags, ...);
+ *
+ * This SPI is extension of guarded_open_np() to include dataprotection class on creation
+ * in "dpclass" and dataprotection flags 'dpflags'. Otherwise behaviors are same as in
+ * guarded_open_np()
+ */
+int
+guarded_open_dprotected_np(proc_t p, struct guarded_open_dprotected_np_args *uap, int32_t *retval)
+{
+	if ((uap->flags & O_CLOEXEC) == 0)
+		return (EINVAL);
+
+	if (((uap->guardflags & GUARD_REQUIRED) != GUARD_REQUIRED) ||
+	    ((uap->guardflags & ~GUARD_ALL) != 0))
+		return (EINVAL);
+
+	int error;
+	struct gfp_crarg crarg = {
+		.gca_attrs = uap->guardflags
+	};
+
+	if ((error = copyin(uap->guard,
+	    &(crarg.gca_guard), sizeof (crarg.gca_guard))) != 0)
+		return (error);
+
+	/*
+	 * Disallow certain guard values -- is zero enough?
+	 */
+	if (crarg.gca_guard == 0)
+		return (EINVAL);
+
+	struct filedesc *fdp = p->p_fd;
+	struct vnode_attr va;
+	struct nameidata nd;
+	vfs_context_t ctx = vfs_context_current();
+	int cmode;
+
+	VATTR_INIT(&va);
+	cmode = ((uap->mode & ~fdp->fd_cmask) & ALLPERMS) & ~S_ISTXT;
+	VATTR_SET(&va, va_mode, cmode & ACCESSPERMS);
+
+	NDINIT(&nd, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_USERSPACE,
+	       uap->path, ctx);
+
+	/* 
+	 * Initialize the extra fields in vnode_attr to pass down dataprotection 
+	 * extra fields.
+	 * 1. target cprotect class.
+	 * 2. set a flag to mark it as requiring open-raw-encrypted semantics. 
+	 */ 
+	if (uap->flags & O_CREAT) {	
+		VATTR_SET(&va, va_dataprotect_class, uap->dpclass);
+	}
+	
+	if (uap->dpflags & (O_DP_GETRAWENCRYPTED|O_DP_GETRAWUNENCRYPTED)) {
+		if ( uap->flags & (O_RDWR | O_WRONLY)) {
+			/* Not allowed to write raw encrypted bytes */
+			return EINVAL;		
+		}			
+		if (uap->dpflags & O_DP_GETRAWENCRYPTED) {
+		    VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWENCRYPTED);
+		}
+		if (uap->dpflags & O_DP_GETRAWUNENCRYPTED) {
+		    VATTR_SET(&va, va_dataprotect_flags, VA_DP_RAWUNENCRYPTED);
+		}
+	}
+
+	return (open1(ctx, &nd, uap->flags | O_CLOFORK, &va,
+	    guarded_fileproc_alloc_init, &crarg, retval));
+}
+
+/*
  * int guarded_kqueue_np(const guardid_t *guard, u_int guardflags);
  *
  * Create a guarded kqueue descriptor with guardid and guardflags.
  *
  * Same restrictions on guardflags as for guarded_open_np().
- * All kqueues are -always- close-on-exec and close-on-fork by themselves.
- *
- * XXX	Is it ever sensible to allow a kqueue fd (guarded or not) to
- *	be sent to another process via a fileport or socket?
+ * All kqueues are -always- close-on-exec and close-on-fork by themselves
+ * and are not sendable.
  */
 int
 guarded_kqueue_np(proc_t p, struct guarded_kqueue_np_args *uap, int32_t *retval)
@@ -401,7 +495,7 @@ guarded_close_np(proc_t p, struct guarded_close_np_args *uap,
 		return (error);
 
 	proc_fdlock(p);
-	if ((error = fp_lookup_guarded(p, fd, uguard, &gfp)) != 0) {
+	if ((error = fp_lookup_guarded(p, fd, uguard, &gfp, 1)) != 0) {
 		proc_fdunlock(p);
 		return (error);
 	}
@@ -444,6 +538,9 @@ guarded_close_np(proc_t p, struct guarded_close_np_args *uap,
  * the GUARD_CLOSE flag is being cleared, it is still possible to continue
  * to keep FD_CLOFORK on the descriptor by passing FD_CLOFORK via fdflagsp.
  *
+ * (File descriptors whose underlying fileglobs are marked FG_CONFINED are
+ * still close-on-fork, regardless of the setting of FD_CLOFORK.)
+ *
  * Example 1: Guard an unguarded descriptor during a set of operations,
  * then restore the original state of the descriptor.
  *
@@ -461,13 +558,9 @@ guarded_close_np(proc_t p, struct guarded_close_np_args *uap,
  * // do things with 'fd' with a different guard
  * change_fdguard_np(fd, &myg, GUARD_CLOSE, &gd, gdflags, &sav_flags);
  * // back to original guarded state
+ *
+ * XXX	This SPI is too much of a chainsaw and should be revised.
  */
-
-#define FDFLAGS_GET(p, fd) (*fdflags(p, fd) & (UF_EXCLOSE|UF_FORKCLOSE))
-#define FDFLAGS_SET(p, fd, bits) \
-	   (*fdflags(p, fd) |= ((bits) & (UF_EXCLOSE|UF_FORKCLOSE)))
-#define FDFLAGS_CLR(p, fd, bits) \
-	   (*fdflags(p, fd) &= ~((bits) & (UF_EXCLOSE|UF_FORKCLOSE)))
 
 int
 change_fdguard_np(proc_t p, struct change_fdguard_np_args *uap,
@@ -529,12 +622,9 @@ restart:
 		 */
 		if (0 == newg)
 			error = EINVAL; /* guards cannot contain zero */
-		else if (0 == uap->nguardflags)
-			error = EINVAL; /* attributes cannot be zero */
 		else if (((uap->nguardflags & GUARD_REQUIRED) != GUARD_REQUIRED) ||
-		    ((uap->guardflags & ~GUARD_ALL) != 0))
+		    ((uap->nguardflags & ~GUARD_ALL) != 0))
 			error = EINVAL; /* must have valid attributes too */
-	     
 		if (0 != error)
 			goto dropout;
 
@@ -564,6 +654,7 @@ restart:
 					FDFLAGS_SET(p, fd, UF_FORKCLOSE);
 				FDFLAGS_SET(p, fd,
 				    (nfdflags & FD_CLOFORK) ? UF_FORKCLOSE : 0);
+				/* FG_CONFINED enforced regardless */
 			} else {
 				error = EPERM;
 			}
@@ -591,12 +682,11 @@ restart:
 			};
 			struct fileproc *nfp =
 				guarded_fileproc_alloc_init(&crarg);
+			struct guarded_fileproc *gfp;
 
 			proc_fdlock(p);
 
 			switch (error = fp_tryswap(p, fd, nfp)) {
-				struct guarded_fileproc *gfp;
-
 			case 0: /* guarded-ness comes with side-effects */
 				gfp = FP_TO_GFP(nfp);
 				if (gfp->gf_attrs & GUARD_CLOSE)
@@ -651,6 +741,7 @@ restart:
 				FDFLAGS_CLR(p, fd, UF_FORKCLOSE | UF_EXCLOSE);
 				FDFLAGS_SET(p, fd,
 				    (nfdflags & FD_CLOFORK) ? UF_FORKCLOSE : 0);
+				/* FG_CONFINED enforced regardless */
 				FDFLAGS_SET(p, fd,
 				    (nfdflags & FD_CLOEXEC) ? UF_EXCLOSE : 0);
 				(void) fp_drop(p, fd, nfp, 1);
@@ -680,4 +771,191 @@ dropout:
 	proc_fdunlock(p);
 	return (error);
 }
-		
+
+/*
+ * user_ssize_t guarded_write_np(int fd, const guardid_t *guard,
+ *                          user_addr_t cbuf, user_ssize_t nbyte);
+ *
+ * Initial implementation of guarded writes.
+ */
+int
+guarded_write_np(struct proc *p, struct guarded_write_np_args *uap, user_ssize_t *retval)
+{
+	int error;      
+	int fd = uap->fd;
+	guardid_t uguard;
+	struct fileproc *fp;
+	struct guarded_fileproc *gfp;
+	bool wrote_some = false;
+
+	AUDIT_ARG(fd, fd);
+
+	if ((error = copyin(uap->guard, &uguard, sizeof (uguard))) != 0)
+		return (error);
+
+	error = fp_lookup_guarded(p, fd, uguard, &gfp, 0);
+	if (error)
+		return(error);
+
+	fp = GFP_TO_FP(gfp);
+	if ((fp->f_flag & FWRITE) == 0) {
+		error = EBADF;
+	} else {
+
+		struct vfs_context context = *(vfs_context_current());
+		context.vc_ucred = fp->f_fglob->fg_cred;
+
+		error = dofilewrite(&context, fp, uap->cbuf, uap->nbyte,
+			(off_t)-1, 0, retval);
+		wrote_some = *retval > 0;
+	}
+	if (wrote_some)
+	        fp_drop_written(p, fd, fp);
+	else
+	        fp_drop(p, fd, fp, 0);
+	return(error);
+}
+
+/*
+ * user_ssize_t guarded_pwrite_np(int fd, const guardid_t *guard,
+ *                        user_addr_t buf, user_size_t nbyte, off_t offset);
+ *
+ * Initial implementation of guarded pwrites.
+ */
+ int
+ guarded_pwrite_np(struct proc *p, struct guarded_pwrite_np_args *uap, user_ssize_t *retval)
+ {
+	struct fileproc *fp;
+	int error; 
+	int fd = uap->fd;
+	vnode_t vp  = (vnode_t)0;
+	guardid_t uguard;
+	struct guarded_fileproc *gfp;
+	bool wrote_some = false;
+
+	AUDIT_ARG(fd, fd);
+
+	if ((error = copyin(uap->guard, &uguard, sizeof (uguard))) != 0)
+		return (error);
+
+	error = fp_lookup_guarded(p, fd, uguard, &gfp, 0);
+	if (error)
+		return(error);
+
+	fp = GFP_TO_FP(gfp);
+	if ((fp->f_flag & FWRITE) == 0) {
+		error = EBADF;
+	} else {
+		struct vfs_context context = *vfs_context_current();
+		context.vc_ucred = fp->f_fglob->fg_cred;
+
+		if (fp->f_type != DTYPE_VNODE) {
+			error = ESPIPE;
+			goto errout;
+		}
+		vp = (vnode_t)fp->f_fglob->fg_data;
+		if (vnode_isfifo(vp)) {
+			error = ESPIPE;
+			goto errout;
+		} 
+		if ((vp->v_flag & VISTTY)) {
+			error = ENXIO;
+			goto errout;
+		}
+		if (uap->offset == (off_t)-1) {
+			error = EINVAL;
+			goto errout;
+		}
+
+		error = dofilewrite(&context, fp, uap->buf, uap->nbyte,
+			uap->offset, FOF_OFFSET, retval);
+		wrote_some = *retval > 0;
+	}
+errout:
+	if (wrote_some)
+	        fp_drop_written(p, fd, fp);
+	else
+	        fp_drop(p, fd, fp, 0);
+
+	KERNEL_DEBUG_CONSTANT((BSDDBG_CODE(DBG_BSD_SC_EXTENDED_INFO, SYS_guarded_pwrite_np) | DBG_FUNC_NONE),
+	      uap->fd, uap->nbyte, (unsigned int)((uap->offset >> 32)), (unsigned int)(uap->offset), 0);
+	
+        return(error);
+}
+
+/*
+ * user_ssize_t guarded_writev_np(int fd, const guardid_t *guard,
+ *                                   struct iovec *iovp, u_int iovcnt);
+ *
+ * Initial implementation of guarded writev.
+ *
+ */
+int
+guarded_writev_np(struct proc *p, struct guarded_writev_np_args *uap, user_ssize_t *retval)
+{
+	uio_t auio = NULL;
+	int error;
+	struct fileproc *fp;
+	struct user_iovec *iovp;
+	guardid_t uguard;
+	struct guarded_fileproc *gfp;
+	bool wrote_some = false;
+
+	AUDIT_ARG(fd, uap->fd);
+
+	/* Verify range bedfore calling uio_create() */
+	if (uap->iovcnt <= 0 || uap->iovcnt > UIO_MAXIOV)
+		return (EINVAL);
+
+	/* allocate a uio large enough to hold the number of iovecs passed */
+	auio = uio_create(uap->iovcnt, 0,
+				  (IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32),
+				  UIO_WRITE);
+				  
+	/* get location of iovecs within the uio.  then copyin the iovecs from
+	 * user space.
+	 */
+	iovp = uio_iovsaddr(auio);
+	if (iovp == NULL) {
+		error = ENOMEM;
+		goto ExitThisRoutine;
+	}
+	error = copyin_user_iovec_array(uap->iovp,
+		IS_64BIT_PROCESS(p) ? UIO_USERSPACE64 : UIO_USERSPACE32,
+		uap->iovcnt, iovp);
+	if (error) {
+		goto ExitThisRoutine;
+	}
+	
+	/* finalize uio_t for use and do the IO 
+	 */
+	error = uio_calculateresid(auio);
+	if (error) {
+		goto ExitThisRoutine;
+	}
+
+	if ((error = copyin(uap->guard, &uguard, sizeof (uguard))) != 0)
+		goto ExitThisRoutine;
+
+	error = fp_lookup_guarded(p, uap->fd, uguard, &gfp, 0);
+	if (error)
+		goto ExitThisRoutine;
+
+	fp = GFP_TO_FP(gfp);
+	if ((fp->f_flag & FWRITE) == 0) {
+		error = EBADF;
+	} else {
+		error = wr_uio(p, fp, auio, retval);
+		wrote_some = *retval > 0;
+	}
+	
+	if (wrote_some)
+	        fp_drop_written(p, uap->fd, fp);
+	else
+	        fp_drop(p, uap->fd, fp, 0);
+ExitThisRoutine:
+	if (auio != NULL) {
+		uio_free(auio);
+	}
+	return (error);
+}

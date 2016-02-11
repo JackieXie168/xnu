@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -110,6 +110,14 @@ extern int ipsec_bypass;
 extern int esp_udp_encap_port;
 #endif /* IPSEC */
 
+#if NECP
+#include <net/necp.h>
+#endif /* NECP */
+
+#if FLOW_DIVERT
+#include <netinet/flow_divert.h>
+#endif /* FLOW_DIVERT */
+
 #define	DBG_LAYER_IN_BEG	NETDBG_CODE(DBG_NETUDP, 0)
 #define	DBG_LAYER_IN_END	NETDBG_CODE(DBG_NETUDP, 2)
 #define	DBG_LAYER_OUT_BEG	NETDBG_CODE(DBG_NETUDP, 1)
@@ -169,7 +177,8 @@ extern void ipfw_stealth_stats_incr_udp(void);
 
 static int udp_getstat SYSCTL_HANDLER_ARGS;
 struct	udpstat udpstat;	/* from udp_var.h */
-SYSCTL_PROC(_net_inet_udp, UDPCTL_STATS, stats, CTLFLAG_RD | CTLFLAG_LOCKED,
+SYSCTL_PROC(_net_inet_udp, UDPCTL_STATS, stats,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED,
     0, 0, udp_getstat, "S,udpstat",
     "UDP statistics (struct udpstat, netinet/udp_var.h)");
 
@@ -197,11 +206,11 @@ static int udp_attach(struct socket *, int, struct proc *);
 static int udp_bind(struct socket *, struct sockaddr *, struct proc *);
 static int udp_connect(struct socket *, struct sockaddr *, struct proc *);
 static int udp_connectx(struct socket *, struct sockaddr_list **,
-    struct sockaddr_list **, struct proc *, uint32_t, associd_t, connid_t *,
-    uint32_t, void *, uint32_t);
+    struct sockaddr_list **, struct proc *, uint32_t, sae_associd_t,
+    sae_connid_t *, uint32_t, void *, uint32_t, struct uio *, user_ssize_t *);
 static int udp_detach(struct socket *);
 static int udp_disconnect(struct socket *);
-static int udp_disconnectx(struct socket *, associd_t, connid_t);
+static int udp_disconnectx(struct socket *, sae_associd_t, sae_connid_t);
 static int udp_send(struct socket *, int, struct mbuf *, struct sockaddr *,
     struct mbuf *, struct proc *);
 static void udp_append(struct inpcb *, struct ip *, struct mbuf *, int,
@@ -232,6 +241,7 @@ struct pr_usrreqs udp_usrreqs = {
 	.pru_sockaddr =		in_getsockaddr,
 	.pru_sosend =		sosend,
 	.pru_soreceive =	soreceive,
+	.pru_soreceive_list =	soreceive_list,
 };
 
 void
@@ -296,6 +306,7 @@ udp_input(struct mbuf *m, int iphlen)
 	struct ifnet *ifp = m->m_pkthdr.rcvif;
 	boolean_t cell = IFNET_IS_CELLULAR(ifp);
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
+	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 
 	bzero(&udp_in, sizeof (udp_in));
 	udp_in.sin_len = sizeof (struct sockaddr_in);
@@ -425,11 +436,7 @@ udp_input(struct mbuf *m, int iphlen)
                         if ((inp->inp_vflag & INP_IPV4) == 0)
                                 continue;
 #endif /* INET6 */
-			if (inp_restricted(inp, ifp))
-				continue;
-
-			if (IFNET_IS_CELLULAR(ifp) &&
-			    (inp->inp_flags & INP_NO_IFT_CELLULAR))
+			if (inp_restricted_recv(inp, ifp))
 				continue;
 
 			if ((inp->inp_moptions == NULL) &&
@@ -505,17 +512,16 @@ udp_input(struct mbuf *m, int iphlen)
 			reuse_sock = (inp->inp_socket->so_options &
 			    (SO_REUSEPORT|SO_REUSEADDR));
 
-#if IPSEC
+#if NECP
 			skipit = 0;
-			/* check AH/ESP integrity. */
-			if (ipsec_bypass == 0 &&
-			    ipsec4_in_reject_so(m, inp->inp_socket)) {
-				IPSEC_STAT_INCREMENT(ipsecstat.in_polvio);
+			if (!necp_socket_is_allowed_to_send_recv_v4(inp, 
+			    uh->uh_dport, uh->uh_sport, &ip->ip_dst,
+			    &ip->ip_src, ifp, NULL, NULL)) {
 				/* do not inject data to pcb */
 				skipit = 1;
 			}
 			if (skipit == 0)
-#endif /*IPSEC*/
+#endif /* NECP */
 			{
 				struct mbuf *n = NULL;
 
@@ -683,16 +689,14 @@ udp_input(struct mbuf *m, int iphlen)
 		IF_UDP_STATINC(ifp, cleanup);
 		goto bad;
 	}
-#if IPSEC
-	if (ipsec_bypass == 0 && inp != NULL) {
-		if (ipsec4_in_reject_so(m, inp->inp_socket)) {
-			IPSEC_STAT_INCREMENT(ipsecstat.in_polvio);
-			udp_unlock(inp->inp_socket, 1, 0);
-			IF_UDP_STATINC(ifp, badipsec);
-			goto bad;
-		}
+#if NECP
+	if (!necp_socket_is_allowed_to_send_recv_v4(inp, uh->uh_dport,
+	    uh->uh_sport, &ip->ip_dst, &ip->ip_src, ifp, NULL, NULL)) {
+		udp_unlock(inp->inp_socket, 1, 0);
+		IF_UDP_STATINC(ifp, badipsec);
+		goto bad;
 	}
-#endif /* IPSEC */
+#endif /* NECP */
 
 	/*
 	 * Construct sockaddr format source address.
@@ -737,8 +741,8 @@ udp_input(struct mbuf *m, int iphlen)
 		append_sa = (struct sockaddr *)&udp_in;
 	}
 	if (nstat_collect) {
-		INP_ADD_STAT(inp, cell, wifi, rxpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, rxbytes, m->m_pkthdr.len);
+		INP_ADD_STAT(inp, cell, wifi, wired, rxpackets, 1);
+		INP_ADD_STAT(inp, cell, wifi, wired, rxbytes, m->m_pkthdr.len);
 	}
 	so_recv_data_stat(inp->inp_socket, m, 0);
 	if (sbappendaddr(&inp->inp_socket->so_rcv, append_sa,
@@ -795,6 +799,7 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 	struct mbuf *opts = 0;
 	boolean_t cell = IFNET_IS_CELLULAR(ifp);
 	boolean_t wifi = (!cell && IFNET_IS_WIFI(ifp));
+	boolean_t wired = (!wifi && IFNET_IS_WIRED(ifp));
 	int ret = 0;
 
 #if CONFIG_MACF_NET
@@ -842,8 +847,9 @@ udp_append(struct inpcb *last, struct ip *ip, struct mbuf *n, int off,
 #endif /* INET6 */
 	append_sa = (struct sockaddr *)pudp_in;
 	if (nstat_collect) {
-		INP_ADD_STAT(last, cell, wifi, rxpackets, 1);
-		INP_ADD_STAT(last, cell, wifi, rxbytes, n->m_pkthdr.len);
+		INP_ADD_STAT(last, cell, wifi, wired, rxpackets, 1);
+		INP_ADD_STAT(last, cell, wifi, wired, rxbytes, 
+		    n->m_pkthdr.len);
 	}
 	so_recv_data_stat(last->inp_socket, n, 0);
 	m_adj(n, off);
@@ -946,7 +952,78 @@ udp_ctloutput(struct socket *so, struct sockopt *sopt)
 			else
 				inp->inp_flags &= ~INP_UDP_NOCKSUM;
 			break;
+		case UDP_KEEPALIVE_OFFLOAD:
+		{
+			struct udp_keepalive_offload ka;
+			/*
+			 * If the socket is not connected, the stack will
+			 * not know the destination address to put in the
+			 * keepalive datagram. Return an error now instead
+			 * of failing later.
+			 */
+			if (!(so->so_state & SS_ISCONNECTED)) {
+				error = EINVAL;
+				break;
+			}
+			if (sopt->sopt_valsize != sizeof(ka)) {
+				error = EINVAL;
+				break;
+			}
+			if ((error = sooptcopyin(sopt, &ka, sizeof(ka),
+			    sizeof(ka))) != 0)
+				break;
 
+			/* application should specify the type */
+			if (ka.ka_type == 0)
+				return (EINVAL);
+
+			if (ka.ka_interval == 0) {
+				/*
+				 * if interval is 0, disable the offload
+				 * mechanism
+				 */
+				if (inp->inp_keepalive_data != NULL)
+					FREE(inp->inp_keepalive_data,
+					    M_TEMP);
+				inp->inp_keepalive_data = NULL;
+				inp->inp_keepalive_datalen = 0;
+				inp->inp_keepalive_interval = 0;
+				inp->inp_keepalive_type = 0;
+				inp->inp_flags2 &= ~INP2_KEEPALIVE_OFFLOAD;
+			} else {
+				if (inp->inp_keepalive_data != NULL) {
+					FREE(inp->inp_keepalive_data,
+					    M_TEMP);
+					inp->inp_keepalive_data = NULL;
+				}
+
+				inp->inp_keepalive_datalen = min(
+				    ka.ka_data_len,
+				    UDP_KEEPALIVE_OFFLOAD_DATA_SIZE);
+				if (inp->inp_keepalive_datalen > 0) {
+					MALLOC(inp->inp_keepalive_data,
+					    u_int8_t *, 
+					    inp->inp_keepalive_datalen,
+					    M_TEMP, M_WAITOK);
+					if (inp->inp_keepalive_data == NULL) {
+						inp->inp_keepalive_datalen = 0;
+						error = ENOMEM;
+						break;
+					}
+					bcopy(ka.ka_data,
+					    inp->inp_keepalive_data,
+					    inp->inp_keepalive_datalen);
+				} else {
+					inp->inp_keepalive_datalen = 0;
+				}
+				inp->inp_keepalive_interval =
+				    min(UDP_KEEPALIVE_INTERVAL_MAX_SECONDS,
+				    ka.ka_interval);
+				inp->inp_keepalive_type = ka.ka_type;
+				inp->inp_flags2 |= INP2_KEEPALIVE_OFFLOAD;
+			}
+			break;
+		}
 		case SO_FLUSH:
 			if ((error = sooptcopyin(sopt, &optval, sizeof (optval),
 			    sizeof (optval))) != 0)
@@ -1080,7 +1157,7 @@ udp_pcblist SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_net_inet_udp, UDPCTL_PCBLIST, pcblist,
-    CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist,
     "S,xinpcb", "List of active UDP sockets");
 
 
@@ -1185,7 +1262,7 @@ udp_pcblist64 SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_net_inet_udp, OID_AUTO, pcblist64,
-    CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist64,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist64,
     "S,xinpcb64", "List of active UDP sockets");
 
 
@@ -1197,14 +1274,14 @@ udp_pcblist_n SYSCTL_HANDLER_ARGS
 }
 
 SYSCTL_PROC(_net_inet_udp, OID_AUTO, pcblist_n,
-    CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist_n,
+    CTLTYPE_STRUCT | CTLFLAG_RD | CTLFLAG_LOCKED, 0, 0, udp_pcblist_n,
     "S,xinpcb_n", "List of active UDP sockets");
 
 __private_extern__ void
-udp_get_ports_used(uint32_t ifindex, int protocol, uint32_t wildcardok,
+udp_get_ports_used(uint32_t ifindex, int protocol, uint32_t flags,
     bitstr_t *bitfield)
 {
-	inpcb_get_ports_used(ifindex, protocol, wildcardok, bitfield, &udbinfo);
+	inpcb_get_ports_used(ifindex, protocol, flags, bitfield, &udbinfo);
 }
 
 __private_extern__ uint32_t
@@ -1313,7 +1390,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	struct ifnet *outif = NULL;
 	struct flowadv *adv = &ipoa.ipoa_flowadv;
 	mbuf_svc_class_t msc = MBUF_SC_UNSPEC;
-	struct ifnet *origoutifp;
+	struct ifnet *origoutifp = NULL;
 	int flowadv = 0;
 
 	/* Enable flow advisory only when connected */
@@ -1367,8 +1444,12 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		outif = inp->inp_boundifp;
 		ipoa.ipoa_boundif = outif->if_index;
 	}
-	if (inp->inp_flags & INP_NO_IFT_CELLULAR)
+	if (INP_NO_CELLULAR(inp))
 		ipoa.ipoa_flags |=  IPOAF_NO_CELLULAR;
+	if (INP_NO_EXPENSIVE(inp))
+		ipoa.ipoa_flags |=  IPOAF_NO_EXPENSIVE;
+	if (INP_AWDL_UNRESTRICTED(inp))
+		ipoa.ipoa_flags |=  IPOAF_AWDL_UNRESTRICTED;
 	soopts |= IP_OUTARGS;
 
 	/*
@@ -1406,8 +1487,6 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		if (ia != NULL)
 			IFA_REMREF(&ia->ia_ifa);
 	}
-
-	origoutifp = inp->inp_last_outifp;
 
 	/*
 	 * IP_PKTINFO option check.  If a temporary scope or src address
@@ -1516,7 +1595,7 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	 * Calculate data length and get a mbuf
 	 * for UDP and IP headers.
 	 */
-	M_PREPEND(m, sizeof (struct udpiphdr), M_DONTWAIT);
+	M_PREPEND(m, sizeof (struct udpiphdr), M_DONTWAIT, 1);
 	if (m == 0) {
 		error = ENOBUFS;
 		goto abort;
@@ -1554,8 +1633,22 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 	KERNEL_DEBUG(DBG_LAYER_OUT_END, ui->ui_dport, ui->ui_sport,
 		     ui->ui_src.s_addr, ui->ui_dst.s_addr, ui->ui_ulen);
 
+#if NECP
+	{
+		necp_kernel_policy_id policy_id;
+		u_int32_t route_rule_id;
+		if (!necp_socket_is_allowed_to_send_recv_v4(inp, lport, fport,
+		    &laddr, &faddr, NULL, &policy_id, &route_rule_id)) {
+			error = EHOSTUNREACH;
+			goto abort;
+		}
+
+		necp_mark_packet_from_socket(m, inp, policy_id, route_rule_id);
+	}
+#endif /* NECP */
+
 #if IPSEC
-	if (ipsec_bypass == 0 && ipsec_setsocket(m, inp->inp_socket) != 0) {
+	if (inp->inp_sp != NULL && ipsec_setsocket(m, inp->inp_socket) != 0) {
 		error = ENOBUFS;
 		goto abort;
 	}
@@ -1602,16 +1695,17 @@ udp_output(struct inpcb *inp, struct mbuf *m, struct sockaddr *addr,
 		IMO_REMREF(mopts);
 
 	if (error == 0 && nstat_collect) {
-		boolean_t cell, wifi;
+		boolean_t cell, wifi, wired;
 
 		if (ro.ro_rt != NULL) {
 			cell = IFNET_IS_CELLULAR(ro.ro_rt->rt_ifp);
 			wifi = (!cell && IFNET_IS_WIFI(ro.ro_rt->rt_ifp));
+			wired = (!wifi && IFNET_IS_WIRED(ro.ro_rt->rt_ifp));
 		} else {
-			cell = wifi = FALSE;
+			cell = wifi = wired = FALSE;
 		}
-		INP_ADD_STAT(inp, cell, wifi, txpackets, 1);
-		INP_ADD_STAT(inp, cell, wifi, txbytes, len);
+		INP_ADD_STAT(inp, cell, wifi, wired, txpackets, 1);
+		INP_ADD_STAT(inp, cell, wifi, wired, txbytes, len);
 	}
 
 	if (flowadv && (adv->code == FADV_FLOW_CONTROLLED ||
@@ -1654,18 +1748,27 @@ abort:
 		 * If the destination route is unicast, update outifp with
 		 * that of the route interface used by IP.
 		 */
-		if (rt != NULL && (outifp = rt->rt_ifp) != inp->inp_last_outifp)
-			inp->inp_last_outifp = outifp;	/* no reference needed */
+		if (rt != NULL &&
+		    (outifp = rt->rt_ifp) != inp->inp_last_outifp) {
+			inp->inp_last_outifp = outifp; /* no reference needed */
+
+			so->so_pktheadroom = P2ROUNDUP(
+			    sizeof(struct udphdr) +
+			    sizeof(struct ip) +
+			    ifnet_hdrlen(outifp) +
+			    ifnet_packetpreamblelen(outifp),
+			    sizeof(u_int32_t));
+		}
 	} else {
 		ROUTE_RELEASE(&inp->inp_route);
 	}
 
 	/*
-	 * If output interface was cellular, and this socket is denied
-	 * access to it, generate an event.
+	 * If output interface was cellular/expensive, and this socket is
+	 * denied access to it, generate an event.
 	 */
 	if (error != 0 && (ipoa.ipoa_retflags & IPOARF_IFDENIED) &&
-	    (inp->inp_flags & INP_NO_IFT_CELLULAR))
+	    (INP_NO_CELLULAR(inp) || INP_NO_EXPENSIVE(inp)))
 		soevent(so, (SO_FILT_HINT_LOCKED|SO_FILT_HINT_IFDENIED));
 
 release:
@@ -1781,8 +1884,8 @@ udp_bind(struct socket *so, struct sockaddr *nam, struct proc *p)
 		return (EAFNOSUPPORT);
 
 	inp = sotoinpcb(so);
-	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
-		return (inp == NULL ? EINVAL : EPROTOTYPE);
+	if (inp == NULL)
+		return (EINVAL);
 	error = in_pcbbind(inp, nam, p);
 	return (error);
 }
@@ -1794,10 +1897,29 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 	int error;
 
 	inp = sotoinpcb(so);
-	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
-		return (inp == NULL ? EINVAL : EPROTOTYPE);
+	if (inp == NULL)
+		return (EINVAL);
 	if (inp->inp_faddr.s_addr != INADDR_ANY)
 		return (EISCONN);
+
+#if NECP
+#if FLOW_DIVERT
+	if (necp_socket_should_use_flow_divert(inp)) {
+		uint32_t fd_ctl_unit =
+		    necp_socket_get_flow_divert_control_unit(inp);
+		if (fd_ctl_unit > 0) {
+			error = flow_divert_pcb_init(so, fd_ctl_unit);
+			if (error == 0) {
+				error = flow_divert_connect_out(so, nam, p);
+			}
+		} else {
+			error = ENETDOWN;
+		}
+		return (error);
+	}
+#endif /* FLOW_DIVERT */
+#endif /* NECP */
+
 	error = in_pcbconnect(inp, nam, p, IFSCOPE_NONE, NULL);
 	if (error == 0) {
 		soisconnected(so);
@@ -1810,13 +1932,15 @@ udp_connect(struct socket *so, struct sockaddr *nam, struct proc *p)
 int
 udp_connectx_common(struct socket *so, int af,
     struct sockaddr_list **src_sl, struct sockaddr_list **dst_sl,
-    struct proc *p, uint32_t ifscope, associd_t aid, connid_t *pcid,
-    uint32_t flags, void *arg, uint32_t arglen)
+    struct proc *p, uint32_t ifscope, sae_associd_t aid, sae_connid_t *pcid,
+    uint32_t flags, void *arg, uint32_t arglen,
+    struct uio *uio, user_ssize_t *bytes_written)
 {
 #pragma unused(aid, flags, arg, arglen)
 	struct sockaddr_entry *src_se = NULL, *dst_se = NULL;
 	struct inpcb *inp = sotoinpcb(so);
 	int error;
+	user_ssize_t datalen = 0;
 
 	if (inp == NULL)
 		return (EINVAL);
@@ -1833,6 +1957,11 @@ udp_connectx_common(struct socket *so, int af,
 	VERIFY(dst_se->se_addr->sa_family == af);
 	VERIFY(src_se == NULL || src_se->se_addr->sa_family == af);
 
+#if NECP
+	inp_update_necp_policy(inp, src_se ? src_se->se_addr : NULL,
+	    dst_se ? dst_se->se_addr : NULL, ifscope);
+#endif /* NECP */
+	
 	/* bind socket to the specified interface, if requested */
 	if (ifscope != IFSCOPE_NONE &&
 	    (error = inp_bindif(inp, ifscope, NULL)) != 0)
@@ -1860,8 +1989,39 @@ udp_connectx_common(struct socket *so, int af,
 		/* NOTREACHED */
 	}
 
+	if (error != 0)
+		return (error);
+
+	/*
+	 * If there is data, copy it. DATA_IDEMPOTENT is ignored.
+	 * CONNECT_RESUME_ON_READ_WRITE is ignored. 
+	 */
+	if (uio != NULL) {
+		socket_unlock(so, 0);
+
+		VERIFY(bytes_written != NULL);
+
+		datalen = uio_resid(uio);
+		error = so->so_proto->pr_usrreqs->pru_sosend(so, NULL,
+	            (uio_t)uio, NULL, NULL, 0);
+		socket_lock(so, 0);
+
+		/* If error returned is EMSGSIZE, for example, disconnect */
+		if (error == 0 || error == EWOULDBLOCK)
+			*bytes_written = datalen - uio_resid(uio);
+		else
+			(void)so->so_proto->pr_usrreqs->pru_disconnectx(so,
+			    SAE_ASSOCID_ANY, SAE_CONNID_ANY);
+		/*
+		 * mask the EWOULDBLOCK error so that the caller
+		 * knows that atleast the connect was successful.
+		 */
+		if (error == EWOULDBLOCK)
+			error = 0;
+	}
+
 	if (error == 0 && pcid != NULL)
-		*pcid = 1;	/* there is only 1 connection for a UDP */
+		*pcid = 1;	/* there is only 1 connection for UDP */
 
 	return (error);
 }
@@ -1869,11 +2029,11 @@ udp_connectx_common(struct socket *so, int af,
 static int
 udp_connectx(struct socket *so, struct sockaddr_list **src_sl,
     struct sockaddr_list **dst_sl, struct proc *p, uint32_t ifscope,
-    associd_t aid, connid_t *pcid, uint32_t flags, void *arg,
-    uint32_t arglen)
+    sae_associd_t aid, sae_connid_t *pcid, uint32_t flags, void *arg,
+    uint32_t arglen, struct uio *uio, user_ssize_t *bytes_written)
 {
 	return (udp_connectx_common(so, AF_INET, src_sl, dst_sl,
-	    p, ifscope, aid, pcid, flags, arg, arglen));
+	    p, ifscope, aid, pcid, flags, arg, arglen, uio, bytes_written));
 }
 
 static int
@@ -1886,6 +2046,16 @@ udp_detach(struct socket *so)
 		panic("%s: so=%p null inp\n", __func__, so);
 		/* NOTREACHED */
 	}
+
+	/*
+	 * If this is a socket that does not want to wakeup the device
+	 * for it's traffic, the application might be waiting for 
+	 * close to complete before going to sleep. Send a notification 
+	 * for this kind of sockets
+	 */
+	if (so->so_options & SO_NOWAKEFROMSLEEP)
+		socket_post_kev_msg_closed(so);
+
 	in_pcbdetach(inp);
 	inp->inp_state = INPCB_STATE_DEAD;
 	return (0);
@@ -1897,7 +2067,11 @@ udp_disconnect(struct socket *so)
 	struct inpcb *inp;
 
 	inp = sotoinpcb(so);
-	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT))
+	if (inp == NULL
+#if NECP
+		|| (necp_socket_should_use_flow_divert(inp))
+#endif /* NECP */
+		)
 		return (inp == NULL ? EINVAL : EPROTOTYPE);
 	if (inp->inp_faddr.s_addr == INADDR_ANY)
 		return (ENOTCONN);
@@ -1914,10 +2088,10 @@ udp_disconnect(struct socket *so)
 }
 
 static int
-udp_disconnectx(struct socket *so, associd_t aid, connid_t cid)
+udp_disconnectx(struct socket *so, sae_associd_t aid, sae_connid_t cid)
 {
 #pragma unused(cid)
-	if (aid != ASSOCID_ANY && aid != ASSOCID_ALL)
+	if (aid != SAE_ASSOCID_ANY && aid != SAE_ASSOCID_ALL)
 		return (EINVAL);
 
 	return (udp_disconnect(so));
@@ -1927,17 +2101,28 @@ static int
 udp_send(struct socket *so, int flags, struct mbuf *m,
     struct sockaddr *addr, struct mbuf *control, struct proc *p)
 {
+#ifndef FLOW_DIVERT
 #pragma unused(flags)
+#endif /* !(FLOW_DIVERT) */
 	struct inpcb *inp;
 
 	inp = sotoinpcb(so);
-	if (inp == NULL || (inp->inp_flags2 & INP2_WANT_FLOW_DIVERT)) {
+	if (inp == NULL) {
 		if (m != NULL)
 			m_freem(m);
 		if (control != NULL)
 			m_freem(control);
-		return (inp == NULL ? EINVAL : EPROTOTYPE);
+		return (EINVAL);
 	}
+
+#if NECP
+#if FLOW_DIVERT
+	if (necp_socket_should_use_flow_divert(inp)) {
+		/* Implicit connect */
+		return (flow_divert_implicit_data_out(so, flags, m, addr, control, p));
+	}
+#endif /* FLOW_DIVERT */
+#endif /* NECP */
 
 	return (udp_output(inp, m, addr, control, p));
 }
@@ -2207,4 +2392,259 @@ udp_input_checksum(struct mbuf *m, struct udphdr *uh, int off, int ulen)
 	}
 
 	return (0);
+}
+
+extern void
+udp_fill_keepalive_offload_frames(ifnet_t ifp,
+     struct ifnet_keepalive_offload_frame *frames_array,
+     u_int32_t frames_array_count, size_t frame_data_offset,
+     u_int32_t *used_frames_count);
+
+void
+udp_fill_keepalive_offload_frames(ifnet_t ifp,
+    struct ifnet_keepalive_offload_frame *frames_array,
+    u_int32_t frames_array_count, size_t frame_data_offset,
+    u_int32_t *used_frames_count)
+{
+	struct inpcb *inp;
+	inp_gen_t gencnt;
+	u_int32_t frame_index = *used_frames_count;
+
+	if (ifp == NULL || frames_array == NULL ||
+	    frames_array_count == 0 ||
+	    frame_index >= frames_array_count ||
+	    frame_data_offset >= IFNET_KEEPALIVE_OFFLOAD_FRAME_DATA_SIZE)
+		return;
+
+	lck_rw_lock_shared(udbinfo.ipi_lock);
+	gencnt = udbinfo.ipi_gencnt;
+	LIST_FOREACH(inp, udbinfo.ipi_listhead, inp_list) {
+		struct socket *so;
+		u_int8_t *data;
+		struct ifnet_keepalive_offload_frame *frame;
+		struct mbuf *m = NULL;
+
+		if (frame_index >= frames_array_count)
+			break;
+
+		if (inp->inp_gencnt > gencnt ||
+		    inp->inp_state == INPCB_STATE_DEAD)
+			continue;
+
+		if ((so = inp->inp_socket) == NULL ||
+		    (so->so_state & SS_DEFUNCT))
+			continue;
+		/*
+		 * check for keepalive offload flag without socket
+		 * lock to avoid a deadlock
+		 */
+		if (!(inp->inp_flags2 & INP2_KEEPALIVE_OFFLOAD)) {
+			continue;
+		}
+
+		udp_lock(so, 1, 0);
+		if (!(inp->inp_vflag & (INP_IPV4 | INP_IPV6))) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		if ((inp->inp_vflag & INP_IPV4) &&
+		    (inp->inp_laddr.s_addr == INADDR_ANY ||
+		    inp->inp_faddr.s_addr == INADDR_ANY)) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		if ((inp->inp_vflag & INP_IPV6) &&
+		    (IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_laddr) ||
+		    IN6_IS_ADDR_UNSPECIFIED(&inp->in6p_faddr))) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		if (inp->inp_lport == 0 || inp->inp_fport == 0) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		if (inp->inp_last_outifp == NULL ||
+		    inp->inp_last_outifp->if_index != ifp->if_index) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		if ((inp->inp_vflag & INP_IPV4)) {
+			if ((frame_data_offset + sizeof(struct udpiphdr) + 
+			    inp->inp_keepalive_datalen) >
+			    IFNET_KEEPALIVE_OFFLOAD_FRAME_DATA_SIZE) {
+				udp_unlock(so, 1, 0);
+				continue;
+			}
+			if ((sizeof(struct udpiphdr) +
+			    inp->inp_keepalive_datalen) > _MHLEN) {
+				udp_unlock(so, 1, 0);
+				continue;
+			}
+		} else {
+			if ((frame_data_offset + sizeof(struct ip6_hdr) +
+			    sizeof(struct udphdr) +
+			    inp->inp_keepalive_datalen) >
+			    IFNET_KEEPALIVE_OFFLOAD_FRAME_DATA_SIZE) {
+				udp_unlock(so, 1, 0);
+				continue;
+			}
+			if ((sizeof(struct ip6_hdr) + sizeof(struct udphdr) +
+			    inp->inp_keepalive_datalen) > _MHLEN) {
+				udp_unlock(so, 1, 0);
+				continue;
+			}
+		}
+		MGETHDR(m, M_WAIT, MT_HEADER);
+		if (m == NULL) {
+			udp_unlock(so, 1, 0);
+			continue;
+		}
+		/*
+		 * This inp has all the information that is needed to
+		 * generate an offload frame.
+		 */
+		if (inp->inp_vflag & INP_IPV4) {
+			struct ip *ip;
+			struct udphdr *udp;
+
+			frame = &frames_array[frame_index];
+			frame->length = frame_data_offset +
+			    sizeof(struct udpiphdr) +
+			    inp->inp_keepalive_datalen;
+			frame->ether_type =
+			    IFNET_KEEPALIVE_OFFLOAD_FRAME_ETHERTYPE_IPV4;
+			frame->interval = inp->inp_keepalive_interval;
+			switch (inp->inp_keepalive_type) {
+			case UDP_KEEPALIVE_OFFLOAD_TYPE_AIRPLAY:
+				frame->type =
+				    IFNET_KEEPALIVE_OFFLOAD_FRAME_AIRPLAY;
+				break;
+			default:
+				break;
+			}
+			data = mtod(m, u_int8_t *);
+			bzero(data, sizeof(struct udpiphdr));
+			ip = (__typeof__(ip))(void *)data;
+			udp = (__typeof__(udp))(void *) (data +
+			    sizeof(struct ip));
+			m->m_len = sizeof(struct udpiphdr);
+			data = data + sizeof(struct udpiphdr);
+			if (inp->inp_keepalive_datalen > 0 &&
+			    inp->inp_keepalive_data != NULL) {
+				bcopy(inp->inp_keepalive_data, data,
+				    inp->inp_keepalive_datalen);
+				m->m_len += inp->inp_keepalive_datalen;
+			}
+			m->m_pkthdr.len = m->m_len;
+
+			ip->ip_v = IPVERSION;
+			ip->ip_hl = (sizeof(struct ip) >> 2);
+			ip->ip_p = IPPROTO_UDP;
+			ip->ip_len = htons(sizeof(struct udpiphdr) +
+			    (u_short)inp->inp_keepalive_datalen);
+			ip->ip_ttl = inp->inp_ip_ttl;
+			ip->ip_tos = inp->inp_ip_tos;
+			ip->ip_src = inp->inp_laddr;
+			ip->ip_dst = inp->inp_faddr;
+			ip->ip_sum = in_cksum_hdr_opt(ip);
+
+			udp->uh_sport = inp->inp_lport;
+			udp->uh_dport = inp->inp_fport;
+			udp->uh_ulen = htons(sizeof(struct udphdr) +
+			    (u_short)inp->inp_keepalive_datalen);
+
+			if (!(inp->inp_flags & INP_UDP_NOCKSUM)) {
+				udp->uh_sum = in_pseudo(ip->ip_src.s_addr,
+				    ip->ip_dst.s_addr,
+				    htons(sizeof(struct udphdr) +
+				    (u_short)inp->inp_keepalive_datalen +
+				    IPPROTO_UDP));
+				m->m_pkthdr.csum_flags = CSUM_UDP;
+				m->m_pkthdr.csum_data = offsetof(struct udphdr,
+				    uh_sum);
+			}
+			m->m_pkthdr.pkt_proto = IPPROTO_UDP;
+			in_delayed_cksum(m);
+			bcopy(m->m_data, frame->data + frame_data_offset,
+			    m->m_len);
+		} else {
+			struct ip6_hdr *ip6;
+			struct udphdr *udp6;
+
+			VERIFY(inp->inp_vflag & INP_IPV6);
+			frame = &frames_array[frame_index];
+			frame->length = frame_data_offset +
+			    sizeof(struct ip6_hdr) +
+			    sizeof(struct udphdr) +
+			    inp->inp_keepalive_datalen;
+			frame->ether_type =
+			    IFNET_KEEPALIVE_OFFLOAD_FRAME_ETHERTYPE_IPV6;
+			frame->interval = inp->inp_keepalive_interval;
+			switch (inp->inp_keepalive_type) {
+			case UDP_KEEPALIVE_OFFLOAD_TYPE_AIRPLAY:
+				frame->type =
+				    IFNET_KEEPALIVE_OFFLOAD_FRAME_AIRPLAY;
+				break;
+			default:
+				break;
+			}
+			data = mtod(m, u_int8_t *);
+			bzero(data, sizeof(struct ip6_hdr) + sizeof(struct udphdr));
+			ip6 = (__typeof__(ip6))(void *)data;
+			udp6 = (__typeof__(udp6))(void *)(data +
+			    sizeof(struct ip6_hdr));
+			m->m_len = sizeof(struct ip6_hdr) +
+			    sizeof(struct udphdr);
+			data = data + (sizeof(struct ip6_hdr) +
+			    sizeof(struct udphdr));
+			if (inp->inp_keepalive_datalen > 0 &&
+			    inp->inp_keepalive_data != NULL) {
+				bcopy(inp->inp_keepalive_data, data,
+				    inp->inp_keepalive_datalen);
+				m->m_len += inp->inp_keepalive_datalen;
+			}
+			m->m_pkthdr.len = m->m_len;
+			ip6->ip6_flow = inp->inp_flow & IPV6_FLOWINFO_MASK;
+			ip6->ip6_vfc &= ~IPV6_VERSION_MASK;
+			ip6->ip6_vfc |= IPV6_VERSION;
+			ip6->ip6_nxt = IPPROTO_UDP;
+			ip6->ip6_hlim = ip6_defhlim;
+			ip6->ip6_plen = htons(sizeof(struct udphdr) +
+			    (u_short)inp->inp_keepalive_datalen);
+			ip6->ip6_src = inp->in6p_laddr;
+			if (IN6_IS_SCOPE_EMBED(&ip6->ip6_src))
+				ip6->ip6_src.s6_addr16[1] = 0;
+
+			ip6->ip6_dst = inp->in6p_faddr;
+			if (IN6_IS_SCOPE_EMBED(&ip6->ip6_dst))
+				ip6->ip6_dst.s6_addr16[1] = 0;
+
+			udp6->uh_sport = inp->in6p_lport;
+			udp6->uh_dport = inp->in6p_fport;
+			udp6->uh_ulen = htons(sizeof(struct udphdr) +
+			    (u_short)inp->inp_keepalive_datalen);
+			if (!(inp->inp_flags & INP_UDP_NOCKSUM)) {
+				udp6->uh_sum = in6_pseudo(&ip6->ip6_src,
+				    &ip6->ip6_dst,
+				    htonl(sizeof(struct udphdr) +
+				    (u_short)inp->inp_keepalive_datalen +
+				    IPPROTO_UDP));
+				m->m_pkthdr.csum_flags = CSUM_UDPIPV6;
+				m->m_pkthdr.csum_data = offsetof(struct udphdr,
+				    uh_sum);
+			}
+			m->m_pkthdr.pkt_proto = IPPROTO_UDP;
+			in6_delayed_cksum(m);
+			bcopy(m->m_data, frame->data + frame_data_offset,
+			    m->m_len);
+		}
+		if (m != NULL) {
+			m_freem(m);
+			m = NULL;
+		}
+		frame_index++;
+		udp_unlock(so, 1, 0);
+	}
+	lck_rw_done(udbinfo.ipi_lock);
+	*used_frames_count = frame_index;
 }

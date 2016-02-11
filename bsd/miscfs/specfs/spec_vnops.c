@@ -91,7 +91,7 @@
 
 /* XXX following three prototypes should be in a header file somewhere */
 extern dev_t	chrtoblk(dev_t dev);
-extern int	iskmemdev(dev_t dev);
+extern boolean_t	iskmemdev(dev_t dev);
 extern int	bpfkqfilter(dev_t dev, struct knote *kn);
 extern int	ptsd_kqfilter(dev_t dev, struct knote *kn);
 
@@ -217,6 +217,8 @@ struct _throttle_io_info_t {
 
 	int32_t throttle_refcnt;
 	int32_t throttle_alloc;
+	int32_t throttle_disabled;
+	int32_t throttle_is_fusion_with_priority;
 };
 
 struct _throttle_io_info_t _throttle_io_info[LOWPRI_MAX_NUM_DEV];
@@ -307,17 +309,18 @@ spec_open(struct vnop_open_args *ap)
 			 */
 			if (securelevel >= 2 && isdisk(dev, VCHR))
 				return (EPERM);
+
+			/* Never allow writing to /dev/mem or /dev/kmem */
+			if (iskmemdev(dev))
+				return (EPERM);
 			/*
-			 * When running in secure mode, do not allow opens
-			 * for writing of /dev/mem, /dev/kmem, or character
-			 * devices whose corresponding block devices are
-			 * currently mounted.
+			 * When running in secure mode, do not allow opens for
+			 * writing of character devices whose corresponding block
+			 * devices are currently mounted.
 			 */
 			if (securelevel >= 1) {
 				if ((bdev = chrtoblk(dev)) != NODEV && check_mountedon(bdev, VBLK, &error))
 					return (error);
-				if (iskmemdev(dev))
-					return (EPERM);
 			}
 		}
 
@@ -464,7 +467,6 @@ spec_read(struct vnop_read_args *ap)
 			struct _throttle_io_info_t *throttle_info;
 
 			throttle_info = &_throttle_io_info[vp->v_un.vu_specinfo->si_devbsdunit];
-
 			throttle_info_update_internal(throttle_info, NULL, 0, vp->v_un.vu_specinfo->si_isssd);
                 }
 		error = (*cdevsw[major(vp->v_rdev)].d_read)
@@ -660,7 +662,7 @@ spec_ioctl(struct vnop_ioctl_args *ap)
 	int	retval = 0;
 
 	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_START,
-			      (unsigned int)dev, (unsigned int)ap->a_command, (unsigned int)ap->a_fflag, (unsigned int)ap->a_vp->v_type, 0);
+		dev, ap->a_command, ap->a_fflag, ap->a_vp->v_type, 0);
 
 	switch (ap->a_vp->v_type) {
 
@@ -680,8 +682,14 @@ spec_ioctl(struct vnop_ioctl_args *ap)
 				extent = unmap->extents;
 
 				for (i = 0; i < unmap->extentsCount; i++, extent++) {
-					KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 1) | DBG_FUNC_NONE, dev, extent->offset/ap->a_vp->v_specsize, extent->length, 0, 0);
+					KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 1) | DBG_FUNC_NONE, dev, 	
+						extent->offset/ap->a_vp->v_specsize, extent->length, 0, 0);
 				}
+			} else if (ap->a_command == DKIOCSYNCHRONIZE) {
+				dk_synchronize_t *synch;
+				synch = (dk_synchronize_t *)ap->a_data;
+				KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 1) | DBG_FUNC_NONE, dev, ap->a_command, 				
+					synch->options, 0, 0);
 			}
 		}
 		retval = (*bdevsw[major(dev)].d_ioctl)(dev, ap->a_command, ap->a_data, ap->a_fflag, p);
@@ -692,7 +700,7 @@ spec_ioctl(struct vnop_ioctl_args *ap)
 		/* NOTREACHED */
 	}
 	KERNEL_DEBUG_CONSTANT(FSDBG_CODE(DBG_IOCTL, 0) | DBG_FUNC_END,
-			      (unsigned int)dev, (unsigned int)ap->a_command, (unsigned int)ap->a_fflag, retval, 0);
+		dev, ap->a_command, ap->a_fflag, retval, 0);
 
 	return (retval);
 }
@@ -720,23 +728,20 @@ int
 spec_kqfilter(vnode_t vp, struct knote *kn)
 {
 	dev_t dev;
-	int err = EINVAL;
+	int err;
 
-	/*
-	 * For a few special kinds of devices, we can attach knotes.
-	 * Each filter function must check whether the dev type matches it.
-	 */
+	assert(vnode_ischr(vp));
+
 	dev = vnode_specrdev(vp);
 
-	if (vnode_istty(vp)) {
-		/* We can hook into TTYs... */
-		err = filt_specattach(kn);
-	} else {
 #if NETWORKING
-		/* Try a bpf device, as defined in bsd/net/bpf.c */
-		err = bpfkqfilter(dev, kn);
-#endif
+	/* Try a bpf device, as defined in bsd/net/bpf.c */
+	if ((err = bpfkqfilter(dev, kn)) == 0) {
+		return err;
 	}
+#endif
+	/* Try to attach to other char special devices */
+	err = filt_specattach(kn);
 
 	return err;
 }
@@ -1206,7 +1211,7 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 	 */
 
 	/* Assign global defaults */
-	if (isssd == TRUE)
+	if ((isssd == TRUE) && (info->throttle_is_fusion_with_priority == 0))
 		info->throttle_io_periods = &throttle_io_period_ssd_msecs[0];
 	else
 		info->throttle_io_periods = &throttle_io_period_msecs[0];
@@ -1233,13 +1238,20 @@ throttle_init_throttle_period(struct _throttle_io_info_t *info, boolean_t isssd)
 
 }
 
+#if CONFIG_IOSCHED
+extern	void vm_io_reprioritize_init(void);
+int	iosched_enabled = 1;
+#endif
+
 void
 throttle_init(void)
 {
         struct _throttle_io_info_t *info;
         int	i;
 	int	level;
-
+#if CONFIG_IOSCHED
+	int 	iosched;
+#endif
 	/*                                                                                                                                    
          * allocate lock group attribute and group                                                                                            
          */
@@ -1265,7 +1277,18 @@ throttle_init(void)
 			info->throttle_last_IO_pid[level] = 0;
 		}
 		info->throttle_next_wake_level = THROTTLE_LEVEL_END;
+		info->throttle_disabled = 0;
+		info->throttle_is_fusion_with_priority = 0;
 	}
+#if CONFIG_IOSCHED
+	if (PE_parse_boot_argn("iosched", &iosched, sizeof(iosched))) {
+		iosched_enabled = iosched;
+	}
+	if (iosched_enabled) {
+		/* Initialize I/O Reprioritization mechanism */
+		vm_io_reprioritize_init();
+	}
+#endif
 }
 
 void
@@ -1273,6 +1296,7 @@ sys_override_io_throttle(int flag)
 {
 	if (flag == THROTTLE_IO_ENABLE)
 		lowpri_throttle_enabled = 1;
+
 	if (flag == THROTTLE_IO_DISABLE)
 		lowpri_throttle_enabled = 0;
 }
@@ -1579,7 +1603,7 @@ throttle_io_will_be_throttled_internal(void * throttle_info, int * mylevel, int 
 int
 throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
 {
-    	void	*info;
+    	struct _throttle_io_info_t	*info;
 
 	/*
 	 * Should we just return zero if no mount point
@@ -1591,7 +1615,16 @@ throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
 	else
 	        info = mp->mnt_throttle_info;
 
-	return throttle_io_will_be_throttled_internal(info, NULL, NULL);
+	if (info->throttle_is_fusion_with_priority) {
+		uthread_t ut = get_bsdthread_info(current_thread());
+		if (ut->uu_lowpri_window == 0)
+			return (THROTTLE_DISENGAGED);
+	}
+
+	if (info->throttle_disabled)
+		return (THROTTLE_DISENGAGED);
+	else
+		return throttle_io_will_be_throttled_internal(info, NULL, NULL);
 }
 
 /* 
@@ -1599,18 +1632,18 @@ throttle_io_will_be_throttled(__unused int lowpri_window_msecs, mount_t mp)
  */
 
 static void 
-throttle_update_proc_stats(pid_t throttling_pid)
+throttle_update_proc_stats(pid_t throttling_pid, int count)
 {
 	proc_t throttling_proc;
 	proc_t throttled_proc = current_proc();
 
 	/* The throttled_proc is always the current proc; so we are not concerned with refs */
-	OSAddAtomic64(1, &(throttled_proc->was_throttled));
+	OSAddAtomic64(count, &(throttled_proc->was_throttled));
 	
 	/* The throttling pid might have exited by now */
 	throttling_proc = proc_find(throttling_pid);
 	if (throttling_proc != PROC_NULL) {
-		OSAddAtomic64(1, &(throttling_proc->did_throttle));
+		OSAddAtomic64(count, &(throttling_proc->did_throttle));
 		proc_rele(throttling_proc);
 	}
 }
@@ -1670,7 +1703,6 @@ throttle_lowpri_io(int sleep_amount)
 				goto done;
 		}
 		assert(throttling_level >= THROTTLE_LEVEL_START && throttling_level <= THROTTLE_LEVEL_END);
-		throttle_update_proc_stats(info->throttle_last_IO_pid[throttling_level]);
 		KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_THROTTLE, PROCESS_THROTTLED)) | DBG_FUNC_NONE,
 				info->throttle_last_IO_pid[throttling_level], throttling_level, proc_selfpid(), mylevel, 0);
 
@@ -1703,6 +1735,13 @@ done:
 	if (sleep_cnt) {
 		KERNEL_DEBUG_CONSTANT((FSDBG_CODE(DBG_FSRW, 97)) | DBG_FUNC_END,
 				      throttle_windows_msecs[mylevel], info->throttle_io_periods[mylevel], info->throttle_io_count, 0, 0);
+		/*
+		 * We update the stats for the last pid which opened a throttle window for the throttled thread.
+		 * This might not be completely accurate since the multiple throttles seen by the lower tier pid
+		 * might have been caused by various higher prio pids. However, updating these stats accurately 
+		 * means doing a proc_find while holding the throttle lock which leads to deadlock.
+		 */
+		throttle_update_proc_stats(info->throttle_last_IO_pid[throttling_level], sleep_cnt);
 	}
 
 	throttle_info_rel(info);
@@ -1730,10 +1769,12 @@ void throttle_set_thread_io_policy(int policy)
 }
 
 
-static
 void throttle_info_reset_window(uthread_t ut)
 {
 	struct _throttle_io_info_t *info;
+
+	if (ut == NULL) 
+		ut = get_bsdthread_info(current_thread());
 
 	if ( (info = ut->uu_throttle_info) ) {
 		throttle_info_rel(info);
@@ -1747,7 +1788,7 @@ void throttle_info_reset_window(uthread_t ut)
 static
 void throttle_info_set_initial_window(uthread_t ut, struct _throttle_io_info_t *info, boolean_t BC_throttle, boolean_t isssd)
 {
-	if (lowpri_throttle_enabled == 0)
+	if (lowpri_throttle_enabled == 0 || info->throttle_disabled)
 		return;
 
 	if (info->throttle_io_periods == 0) {
@@ -1770,7 +1811,7 @@ void throttle_info_update_internal(struct _throttle_io_info_t *info, uthread_t u
 {
 	int	thread_throttle_level;
 
-	if (lowpri_throttle_enabled == 0)
+	if (lowpri_throttle_enabled == 0 || info->throttle_disabled)
 		return;
 
 	if (ut == NULL)
@@ -1858,6 +1899,31 @@ void throttle_info_update_by_mask(void *throttle_info_handle, int flags)
 	 */
 	throttle_info_update(throttle_info, flags);
 }
+/*
+ * KPI routine
+ * 
+ * This routine marks the throttle info as disabled. Used for mount points which 
+ * support I/O scheduling.
+ */
+
+void throttle_info_disable_throttle(int devno, boolean_t isfusion)
+{
+	struct _throttle_io_info_t *info;
+
+	if (devno < 0 || devno >= LOWPRI_MAX_NUM_DEV) 
+		panic("Illegal devno (%d) passed into throttle_info_disable_throttle()", devno);
+
+	info = &_throttle_io_info[devno];
+	// don't disable software throttling on devices that are part of a fusion device
+	// and override the software throttle periods to use HDD periods
+	if (isfusion) {
+		info->throttle_is_fusion_with_priority = isfusion;
+		throttle_init_throttle_period(info, FALSE);
+	}
+	info->throttle_disabled = !info->throttle_is_fusion_with_priority;
+	return;
+} 
+
 
 /*
  * KPI routine (private)
@@ -1922,6 +1988,8 @@ spec_strategy(struct vnop_strategy_args *ap)
 	int	strategy_ret;
 	struct _throttle_io_info_t *throttle_info;
 	boolean_t isssd = FALSE;
+	int code = 0;
+
 	proc_t curproc = current_proc();
 
         bp = ap->a_bp;
@@ -1935,10 +2003,34 @@ spec_strategy(struct vnop_strategy_args *ap)
 	if (bp->b_flags & B_META)
 		bap->ba_flags |= BA_META;
 
+#if CONFIG_IOSCHED
+	/* 
+	 * For I/O Scheduling, we currently do not have a way to track and expedite metadata I/Os.
+	 * To ensure we dont get into priority inversions due to metadata I/Os, we use the following rules:
+	 * For metadata reads, ceil all I/Os to IOSCHED_METADATA_TIER & mark them passive if the I/O tier was upgraded
+	 * For metadata writes, unconditionally mark them as IOSCHED_METADATA_TIER and passive
+	 */
+	if (bap->ba_flags & BA_META) {
+		if (mp && (mp->mnt_ioflags & MNT_IOFLAGS_IOSCHED_SUPPORTED)) {
+			if (bp->b_flags & B_READ) {
+				if (io_tier > IOSCHED_METADATA_TIER) {
+					io_tier = IOSCHED_METADATA_TIER;
+					passive = 1;
+				}
+			} else {
+				io_tier = IOSCHED_METADATA_TIER;
+				passive = 1;
+			}
+		}
+	}
+#endif /* CONFIG_IOSCHED */
+			
 	SET_BUFATTR_IO_TIER(bap, io_tier);
 
-	if (passive)
+	if (passive) {
 		bp->b_flags |= B_PASSIVE;
+		bap->ba_flags |= BA_PASSIVE;
+	}
 
 	if ((curproc != NULL) && ((curproc->p_flag & P_DELAYIDLESLEEP) == P_DELAYIDLESLEEP))
 		bap->ba_flags |= BA_DELAYIDLESLEEP;
@@ -1948,38 +2040,38 @@ spec_strategy(struct vnop_strategy_args *ap)
 	if (((bflags & B_READ) == 0) && ((bflags & B_ASYNC) == 0))
 		bufattr_markquickcomplete(bap);
 
-        if (kdebug_enable) {
-	        int    code = 0;
+	if (bflags & B_READ)
+	        code |= DKIO_READ;
+	if (bflags & B_ASYNC)
+	        code |= DKIO_ASYNC;
+	if (bflags & B_META)
+	        code |= DKIO_META;
+	else if (bflags & B_PAGEIO)
+	        code |= DKIO_PAGING;
 
-		if (bflags & B_READ)
-		        code |= DKIO_READ;
-		if (bflags & B_ASYNC)
-		        code |= DKIO_ASYNC;
+	if (io_tier != 0)
+		code |= DKIO_THROTTLE;
 
-		if (bflags & B_META)
-		        code |= DKIO_META;
-		else if (bflags & B_PAGEIO)
-		        code |= DKIO_PAGING;
+	code |= ((io_tier << DKIO_TIER_SHIFT) & DKIO_TIER_MASK);
 
-		if (io_tier != 0)
-			code |= DKIO_THROTTLE;
+	if (bflags & B_PASSIVE)
+		code |= DKIO_PASSIVE;
 
-		code |= ((io_tier << DKIO_TIER_SHIFT) & DKIO_TIER_MASK);
+	if (bap->ba_flags & BA_NOCACHE)
+		code |= DKIO_NOCACHE;
 
-		if (bflags & B_PASSIVE)
-			code |= DKIO_PASSIVE;
-
-		if (bap->ba_flags & BA_NOCACHE)
-			code |= DKIO_NOCACHE;
-
+	if (kdebug_enable) {
 		KERNEL_DEBUG_CONSTANT_IST(KDEBUG_COMMON, FSDBG_CODE(DBG_DKRW, code) | DBG_FUNC_NONE,
 					  buf_kernel_addrperm_addr(bp), bdev, (int)buf_blkno(bp), buf_count(bp), 0);
         }
+
+	thread_update_io_stats(current_thread(), buf_count(bp), code);
+
 	if (mp != NULL) {
 		if ((mp->mnt_kern_flag & MNTK_SSD) && !ignore_is_ssd)
 			isssd = TRUE;
 		throttle_info = &_throttle_io_info[mp->mnt_devbsdunit];
-	} else
+	} else 
 		throttle_info = &_throttle_io_info[LOWPRI_MAX_NUM_DEV - 1];
 
 	throttle_info_update_internal(throttle_info, ut, bflags, isssd);
@@ -2060,7 +2152,6 @@ spec_close(struct vnop_close_args *ap)
 	int flags = ap->a_fflag;
 	struct proc *p = vfs_context_proc(ap->a_context);
 	struct session *sessp;
-	int do_rele = 0;
 
 	switch (vp->v_type) {
 
@@ -2078,7 +2169,7 @@ spec_close(struct vnop_close_args *ap)
 		devsw_lock(dev, S_IFCHR);
 		if (sessp != SESSION_NULL) {
 			if (vp == sessp->s_ttyvp && vcount(vp) == 1) {
-				struct tty *tp;
+				struct tty *tp = TTY_NULL;
 
 				devsw_unlock(dev, S_IFCHR);
 				session_lock(sessp);
@@ -2088,14 +2179,20 @@ spec_close(struct vnop_close_args *ap)
 					sessp->s_ttyvid = 0;
 					sessp->s_ttyp = TTY_NULL;
 					sessp->s_ttypgrpid = NO_PID;
-					do_rele = 1;
 				} 
 				session_unlock(sessp);
 
-				if (do_rele) {
-					vnode_rele(vp);
-					if (NULL != tp)
-						ttyfree(tp);
+				if (tp != TTY_NULL) {
+					/*
+					 * We may have won a race with a proc_exit
+					 * of the session leader, the winner
+					 * clears the flag (even if not set)
+					 */
+					tty_lock(tp);
+					ttyclrpgrphup(tp);
+					tty_unlock(tp);
+
+					ttyfree(tp);
 				}
 				devsw_lock(dev, S_IFCHR);
 			}
@@ -2291,15 +2388,20 @@ filt_specattach(struct knote *kn)
 		return ENXIO;
 	}
 
-	if ((cdevsw_flags[major(dev)] & CDEVSW_SELECT_KQUEUE) == 0) {
+	/*
+	 * For a few special kinds of devices, we can attach knotes with
+	 * no restrictions because their "select" vectors return the amount
+	 * of data available.  Others require an explicit NOTE_LOWAT with
+	 * data of 1, indicating that the caller doesn't care about actual
+	 * data counts, just an indication that the device has data.
+	 */
+
+	if ((cdevsw_flags[major(dev)] & CDEVSW_SELECT_KQUEUE) == 0 &&
+	    ((kn->kn_sfflags & NOTE_LOWAT) == 0 || kn->kn_sdata != 1)) {
 		return EINVAL;
 	}
 
-	/* Resulting wql is safe to unlink even if it has never been linked */
-	kn->kn_hook = wait_queue_link_allocate();
-	if (kn->kn_hook == NULL) {
-		return EAGAIN;
-	}
+	kn->kn_hook_data = 0;
 
 	kn->kn_fop = &spec_filtops;
 	kn->kn_hookid = vnode_vid(vp);
@@ -2312,22 +2414,24 @@ filt_specattach(struct knote *kn)
 static void 
 filt_specdetach(struct knote *kn)
 {
-	kern_return_t ret;
+	knote_clearstayqueued(kn);
 
-	/* 
-	 * Given wait queue link and wait queue set, unlink.  This is subtle.
-	 * If the device has been revoked from under us, selclearthread() will
-	 * have removed our link from the kqueue's wait queue set, which 
-	 * wait_queue_set_unlink_one() will detect and handle.
+	/*
+	 * This is potentially tricky: the device's selinfo waitq that was
+	 * tricked into being part of this knote's waitq set may not be a part
+	 * of any other set, and the device itself may have revoked the memory
+	 * in which the waitq was held. We use the knote's kn_hook_data field
+	 * to keep the ID of the waitq's prepost table object. This
+	 * object keeps a pointer back to the waitq, and gives us a safe way
+	 * to decouple the dereferencing of driver allocated memory: if the
+	 * driver goes away (taking the waitq with it) then the prepost table
+	 * object will be invalidated. The waitq details are handled in the
+	 * waitq API invoked here.
 	 */
-	ret = wait_queue_set_unlink_one(kn->kn_kq->kq_wqs, kn->kn_hook);
-	if (ret != KERN_SUCCESS) {
-		panic("filt_specdetach(): failed to unlink wait queue link.");
+	if (kn->kn_hook_data) {
+		waitq_unlink_by_prepost_id(kn->kn_hook_data, kn->kn_kq->kq_wqs);
+		kn->kn_hook_data = 0;
 	}
-
-	(void)wait_queue_link_free(kn->kn_hook);
-	kn->kn_hook = NULL;
-	kn->kn_status &= ~KN_STAYQUEUED;
 }
 
 static int 
@@ -2335,15 +2439,15 @@ filt_spec(struct knote *kn, long hint)
 {
 	vnode_t vp;
 	uthread_t uth;
-	wait_queue_set_t old_wqs;
+	struct waitq_set *old_wqs;
 	vfs_context_t ctx;
 	int selres;
 	int error;
 	int use_offset;
 	dev_t dev;
 	uint64_t flags;
-
-	assert(kn->kn_hook != NULL);
+	uint64_t rsvd, rsvd_arg;
+	uint64_t *rlptr = NULL;
 
 	if (hint != 0) {
 		panic("filt_spec(): nonzero hint?");
@@ -2362,13 +2466,59 @@ filt_spec(struct knote *kn, long hint)
 	dev = vnode_specrdev(vp);
 	flags = cdevsw_flags[major(dev)];
 	use_offset = ((flags & CDEVSW_USE_OFFSET) != 0);
-	assert((flags & CDEVSW_SELECT_KQUEUE) != 0);
 
-	/* Trick selrecord() into hooking kqueue's wait queue set into device wait queue */
+	/*
+	 * This function may be called many times to link or re-link the
+	 * underlying vnode to the kqueue.  If we've already linked the two,
+	 * we will have a valid kn_hook_data which ties us to the underlying
+	 * device's waitq via a the waitq's prepost table object. However,
+	 * devices can abort any select action by calling selthreadclear().
+	 * This is OK because the table object will be invalidated by the
+	 * driver (through a call to selthreadclear), so any attempt to access
+	 * the associated waitq will fail because the table object is invalid.
+	 *
+	 * Even if we've already registered, we need to pass a pointer
+	 * to a reserved link structure. Otherwise, selrecord() will
+	 * infer that we're in the second pass of select() and won't
+	 * actually do anything!
+	 */
+	rsvd = rsvd_arg = waitq_link_reserve(NULL);
+	rlptr = (void *)&rsvd_arg;
+
+	/*
+	 * Trick selrecord() into hooking kqueue's wait queue set
+	 * set into device's selinfo wait queue
+	 */
 	old_wqs = uth->uu_wqset;
 	uth->uu_wqset = kn->kn_kq->kq_wqs;
-	selres = VNOP_SELECT(vp, filter_to_seltype(kn->kn_filter), 0, kn->kn_hook, ctx);
+	selres = VNOP_SELECT(vp, filter_to_seltype(kn->kn_filter),
+			     0, rlptr, ctx);
 	uth->uu_wqset = old_wqs;
+
+	/*
+	 * make sure to cleanup the reserved link - this guards against
+	 * drivers that may not actually call selrecord().
+	 */
+	waitq_link_release(rsvd);
+	if (rsvd != rsvd_arg) {
+		/* the driver / handler called selrecord() */
+		struct waitq *wq;
+		memcpy(&wq, rlptr, sizeof(void *));
+
+		/*
+		 * The waitq_get_prepost_id() function will (potentially)
+		 * allocate a prepost table object for the waitq and return
+		 * the table object's ID to us.  It will also set the
+		 * waitq_prepost_id field within the waitq structure.
+		 *
+		 * We can just overwrite kn_hook_data because it's simply a
+		 * table ID used to grab a reference when needed.
+		 *
+		 * We have a reference on the vnode, so we know that the
+		 * device won't go away while we get this ID.
+		 */
+		kn->kn_hook_data = waitq_get_prepost_id(wq);
+	}
 
 	if (use_offset) {
 		if (kn->kn_fp->f_fglob->fg_offset >= (uint32_t)selres) {
@@ -2382,6 +2532,9 @@ filt_spec(struct knote *kn, long hint)
 
 	vnode_put(vp);
 
+	if ((kn->kn_sfflags & NOTE_LOWAT) != 0)
+		return (kn->kn_data >= kn->kn_sdata);
+
 	return (kn->kn_data != 0);
 }
 
@@ -2390,9 +2543,11 @@ filt_specpeek(struct knote *kn)
 {
 	vnode_t vp;
 	uthread_t uth;
-	wait_queue_set_t old_wqs;
+	struct waitq_set *old_wqs;
 	vfs_context_t ctx;
 	int error, selres;
+	uint64_t rsvd, rsvd_arg;
+	uint64_t *rlptr = NULL;
 	
 	uth = get_bsdthread_info(current_thread());
 	ctx = vfs_context_current();
@@ -2404,12 +2559,44 @@ filt_specpeek(struct knote *kn)
 	}
 
 	/*
-	 * Why pass the link here?  Because we may not have registered in the past...
+	 * Even if we've already registered, we need to pass a pointer
+	 * to a reserved link structure. Otherwise, selrecord() will
+	 * infer that we're in the second pass of select() and won't
+	 * actually do anything!
 	 */
+	rsvd = rsvd_arg = waitq_link_reserve(NULL);
+	rlptr = (void *)&rsvd_arg;
+
 	old_wqs = uth->uu_wqset;
 	uth->uu_wqset = kn->kn_kq->kq_wqs;
-	selres = VNOP_SELECT(vp, filter_to_seltype(kn->kn_filter), 0, kn->kn_hook, ctx);
+	selres = VNOP_SELECT(vp, filter_to_seltype(kn->kn_filter),
+			     0, (void *)rlptr, ctx);
 	uth->uu_wqset = old_wqs;
+
+	/*
+	 * make sure to cleanup the reserved link - this guards against
+	 * drivers that may not actually call selrecord()
+	 */
+	waitq_link_release(rsvd);
+	if (rsvd != rsvd_arg) {
+		/* the driver / handler called selrecord() */
+		struct waitq *wq;
+		memcpy(&wq, rlptr, sizeof(void *));
+
+		/*
+		 * The waitq_get_prepost_id() function will (potentially)
+		 * allocate a prepost table object for the waitq and return
+		 * the table object's ID to us.  It will also set the
+		 * waitq_prepost_id field within the waitq structure.
+		 *
+		 * We can just overwrite kn_hook_data because it's simply a
+		 * table ID used to grab a reference when needed.
+		 *
+		 * We have a reference on the vnode, so we know that the
+		 * device won't go away while we get this ID.
+		 */
+		kn->kn_hook_data = waitq_get_prepost_id(wq);
+	}
 
 	vnode_put(vp);
 	return selres;

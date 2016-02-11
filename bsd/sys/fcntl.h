@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2007 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -132,6 +132,22 @@
 #define	FDEFER		0x2000		/* defer for next gc pass */
 #define	FHASLOCK	0x4000		/* descriptor holds advisory lock */
 #endif
+
+#if __DARWIN_C_LEVEL >= 200809L 
+/*
+ * Descriptor value for the current working directory
+ */
+#define AT_FDCWD	-2
+
+/*
+ * Flags for the at functions
+ */
+#define AT_EACCESS		0x0010	/* Use effective ids in access check */
+#define AT_SYMLINK_NOFOLLOW	0x0020	/* Act on the symlink itself not the target */
+#define AT_SYMLINK_FOLLOW	0x0040	/* Act on target of symlink */
+#define AT_REMOVEDIR		0x0080	/* Path refers to directory */
+#endif
+
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define	O_EVTONLY	0x8000		/* descriptor requested for event notifications only */
 #endif
@@ -174,9 +190,14 @@
 #define O_CLOFORK	0x8000000	/* implicitly set FD_CLOFORK */
 #endif
 
+#ifdef KERNEL
+#define FUNENCRYPTED	0x10000000
+#endif
+
 /* Data Protection Flags */
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 #define O_DP_GETRAWENCRYPTED	0x0001
+#define O_DP_GETRAWUNENCRYPTED	0x0002
 #endif
 
 
@@ -211,8 +232,8 @@
  */
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
-#define CPF_OVERWRITE 1
-#define CPF_IGNORE_MODE 2
+#define CPF_OVERWRITE    0x0001
+#define CPF_IGNORE_MODE  0x0002
 #define CPF_MASK (CPF_OVERWRITE|CPF_IGNORE_MODE)
 #endif
 
@@ -291,7 +312,7 @@
 #define F_SETBACKINGSTORE	70	/* Mark the file as being the backing store for another filesystem */
 #define F_GETPATH_MTMINFO	71 	/* return the full path of the FD, but error in specific mtmd circumstances */
 
-/* 72 is free.  It used to be F_GETENCRYPTEDDATA, which is now removed. */
+#define F_GETCODEDIR		72	/* Returns the code directory, with associated hashes, to the caller */
 
 #define F_SETNOSIGPIPE		73	/* No SIGPIPE generated on EPIPE */
 #define F_GETNOSIGPIPE		74	/* Status of SIGPIPE for this fd */
@@ -313,7 +334,34 @@
 					* written should be written in greedy mode for additional speed at
 					* the cost of storage efficiency. A nonzero value enables it, 0 disables it.
 					*/
+
+#define F_SETIOTYPE		82  /* 
+							 * Use parameters to describe content being written to the FD. See
+							 * flag definitions below for argument bits.
+							 */
 #endif
+
+#define F_ADDFILESIGS_FOR_DYLD_SIM 83	/* Add signature from same file, only if it is signed by Apple (used by dyld for simulator) */
+
+#ifdef PRIVATE
+#define F_RECYCLE			84	/* Recycle vnode; debug/development builds only */
+#endif
+
+#define F_BARRIERFSYNC		85	/* fsync + issue barrier to drive */
+
+#ifdef PRIVATE
+#define F_OFD_SETLK		90	/* Acquire or release open file description lock */
+#define F_OFD_SETLKW		91	/* (as F_OFD_SETLK but blocking if conflicting lock) */
+#define F_OFD_GETLK		92	/* Examine OFD lock */
+
+#define F_OFD_SETLKWTIMEOUT	93	/* (as F_OFD_SETLKW but return if timeout) */
+#define F_OFD_GETLKPID		94	/* get record locking information */
+
+#define F_SETCONFINED		95	/* "confine" OFD to process */
+#define F_GETCONFINED		96	/* is-fd-confined? */
+#endif
+
+#define F_ADDFILESIGS_RETURN	97	/* Add signature from same file, return end offset in structure on sucess */
 
 
 // FS-specific fcntl()'s numbers begin at 0x00010000 and go up
@@ -342,6 +390,15 @@
 #define	F_PROV		0x080		/* Non-coalesced provisional lock */
 #define F_WAKE1_SAFE    0x100           /* its safe to only wake one waiter */
 #define	F_ABORT		0x200		/* lock attempt aborted (force umount) */
+#define	F_OFD_LOCK	0x400		/* Use "OFD" semantics for lock */
+#endif
+
+#if PRIVATE
+/* 
+ * ISOCHRONOUS attempts to sustain a minimum platform-dependent throughput 
+ * for the duration of the I/O delivered to the driver.
+ */
+#define F_IOTYPE_ISOCHRONOUS 0x0001 
 #endif
 
 /*
@@ -411,6 +468,51 @@ struct radvisory {
 
 #ifdef KERNEL
 #pragma pack()
+#endif /* KERNEL */
+
+#ifndef	KERNEL
+/** Information the user passes in to get the codeblobs out of the kernel */
+typedef struct fcodeblobs {
+	void 		*f_cd_hash;
+	size_t		f_hash_size;
+	void		*f_cd_buffer;
+	size_t		f_cd_size;
+	unsigned int	*f_out_size;
+	int		f_arch;
+	int		__padding;
+} fcodeblobs_t;
+#endif /* KERNEL */
+
+#ifdef KERNEL
+typedef struct user32_fcodeblobs {
+	user32_addr_t	f_cd_hash;
+	user32_size_t	f_hash_size;
+	user32_addr_t	f_cd_buffer;
+	user32_size_t	f_cd_size;
+	user32_addr_t	f_out_size;
+	int		f_arch;
+} user32_fcodeblobs_t;
+
+/* LP64 version of fcodeblobs */
+typedef struct user64_fcodeblobs {
+	user64_addr_t	f_cd_hash;
+	user64_size_t	f_hash_size;
+	user64_addr_t	f_cd_buffer;
+	user64_size_t	f_cd_size;
+	user64_addr_t	f_out_size;
+	int		f_arch;
+	int		__padding;
+} user64_fcodeblobs_t;
+
+/* kernel version of fcodeblobs */
+typedef struct user_fcodeblobs {
+	user_addr_t	f_cd_hash;
+	user_size_t	f_hash_size;
+	user_addr_t	f_cd_buffer;
+	user_size_t	f_cd_size;
+	user_addr_t	f_out_size;
+	int		f_arch;
+} user_fcodeblobs_t;
 #endif /* KERNEL */
 
 /*
@@ -586,6 +688,9 @@ typedef enum {
 
 __BEGIN_DECLS
 int	open(const char *, int, ...) __DARWIN_ALIAS_C(open);
+#if __DARWIN_C_LEVEL >= 200809L
+int	openat(int, const char *, int, ...) __DARWIN_NOCANCEL(openat) __OSX_AVAILABLE_STARTING(__MAC_10_10, __IPHONE_8_0);
+#endif
 int	creat(const char *, mode_t) __DARWIN_ALIAS_C(creat);
 int	fcntl(int, int, ...) __DARWIN_ALIAS_C(fcntl);
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -608,7 +713,10 @@ int     fileport_makeport(int, fileport_t*);
 int     fileport_makefd(fileport_t);
 #endif /* PRIVATE */
 int	openx_np(const char *, int, filesec_t);
-/* data-protected non-portable open(2) */
+/* 
+ * data-protected non-portable open(2) :
+ int open_dprotected_np(user_addr_t path, int flags, int class, int dpflags, int mode)
+ */ 
 int open_dprotected_np ( const char *, int, int, int, ...);
 int	flock(int, int);
 filesec_t filesec_init(void);

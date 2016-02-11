@@ -248,12 +248,12 @@ extern errno_t sock_settclassopt(socket_t so, const void* optval, size_t optlen)
 extern errno_t sock_gettclassopt(socket_t so, void* optval, size_t* optlen);
 
 #ifdef XNU_KERNEL_PRIVATE
-extern void socket_set_traffic_mgt_flags_locked(socket_t so, u_int32_t flags);
-extern void socket_clear_traffic_mgt_flags_locked(socket_t so, u_int32_t flags);
+extern void socket_set_traffic_mgt_flags_locked(socket_t so, u_int8_t flags);
+extern void socket_clear_traffic_mgt_flags_locked(socket_t so, u_int8_t flags);
 #endif /* XNU_KERNEL_PRIVATE */
 #ifdef BSD_KERNEL_PRIVATE
-extern void socket_set_traffic_mgt_flags(socket_t so, u_int32_t flags);
-extern void socket_clear_traffic_mgt_flags(socket_t so, u_int32_t flags);
+extern void socket_set_traffic_mgt_flags(socket_t so, u_int8_t flags);
+extern void socket_clear_traffic_mgt_flags(socket_t so, u_int8_t flags);
 extern errno_t socket_defunct(struct proc *, socket_t so, int);
 extern errno_t sock_receive_internal(socket_t, struct msghdr *, mbuf_t *,
     int, size_t *);
@@ -551,6 +551,14 @@ extern errno_t sock_setupcalls(socket_t sock, sock_upcall read_callback,
 */
 extern errno_t sock_catchevents(socket_t sock, sock_evupcall event_callback,
     void *event_context, u_int32_t event_mask);
+/*
+	@function sock_iskernel
+	@discussion Returns true if the socket was created by the kernel or
+	        is owned by the kernel.
+	@param sock The socket.
+	@result True if the kernel owns the socket.
+*/
+extern int sock_iskernel(socket_t);
 #endif /* KERNEL_PRIVATE */
 
 __END_DECLS

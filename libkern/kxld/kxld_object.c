@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009-2012 Apple Inc. All rights reserved.
+ * Copyright (c) 2009-2014 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -329,7 +329,13 @@ get_target_machine_info(KXLDObject *object, cpu_type_t cputype __unused,
 
 #if   defined(__x86_64__)
     object->cputype = CPU_TYPE_X86_64;
+/* FIXME: we need clang to provide a __x86_64h__ macro for the sub-type. Using
+ * __AVX2__ is a temporary solution until this is available. */
+#if   defined(__AVX2__)
+    object->cpusubtype = CPU_SUBTYPE_X86_64_H;
+#else
     object->cpusubtype = CPU_SUBTYPE_X86_64_ALL;
+#endif
     return KERN_SUCCESS;
 #else 
     kxld_log(kKxldLogLinking, kKxldLogErr, 
@@ -374,6 +380,9 @@ get_target_machine_info(KXLDObject *object, cpu_type_t cputype __unused,
         case CPU_TYPE_ARM:
             object->cpusubtype = CPU_SUBTYPE_ARM_ALL;
             break;
+        case CPU_TYPE_ARM64:
+            object->cpusubtype = CPU_SUBTYPE_ARM64_ALL;
+            break;
         default:
             object->cpusubtype = 0;
             break;
@@ -386,6 +395,7 @@ get_target_machine_info(KXLDObject *object, cpu_type_t cputype __unused,
 
     switch(object->cputype) {
     case CPU_TYPE_ARM:
+    case CPU_TYPE_ARM64:
     case CPU_TYPE_I386:
     case CPU_TYPE_X86_64:
         object->target_order = NX_LittleEndian;
@@ -452,8 +462,7 @@ get_macho_slice_for_arch(KXLDObject *object, u_char *file, u_long size)
 
         /* Locate the Mach-O for the requested architecture */
 
-        arch = NXFindBestFatArch(object->cputype, object->cpusubtype, archs, 
-            fat->nfat_arch);
+        arch = NXFindBestFatArch(object->cputype, object->cpusubtype, archs, fat->nfat_arch);
         require_action(arch, finish, rval=KERN_FAILURE;
             kxld_log(kKxldLogLinking, kKxldLogErr, kKxldLogArchNotFound));
         require_action(size >= arch->offset + arch->size, finish, 
@@ -485,6 +494,7 @@ get_macho_slice_for_arch(KXLDObject *object, u_char *file, u_long size)
     require_action(object->cputype == mach_hdr->cputype, finish,
         rval=KERN_FAILURE;
         kxld_log(kKxldLogLinking, kKxldLogErr, kKxldLogTruncatedMachO));
+    object->cpusubtype = mach_hdr->cpusubtype;  /* <rdar://problem/16008438> */
 
     rval = KERN_SUCCESS;
 finish:
@@ -624,6 +634,7 @@ init_from_final_linked_image(KXLDObject *object, u_int *filetype_out,
             break;
         case LC_VERSION_MIN_MACOSX:
         case LC_VERSION_MIN_IPHONEOS:
+        case LC_VERSION_MIN_WATCHOS:
             versionmin_hdr = (struct version_min_command *) cmd_hdr;
             kxld_versionmin_init_from_macho(&object->versionmin, versionmin_hdr);
             break;
@@ -666,7 +677,7 @@ init_from_final_linked_image(KXLDObject *object, u_int *filetype_out,
         default:
             rval=KERN_FAILURE;
             kxld_log(kKxldLogLinking, kKxldLogErr, kKxldLogMalformedMachO
-                "Invalid segment type in MH_KEXT_BUNDLE kext: %u.", cmd_hdr->cmd);
+                "Invalid load command type in MH_KEXT_BUNDLE kext: %u.", cmd_hdr->cmd);
             goto finish;
         }
 
@@ -950,12 +961,13 @@ init_from_object(KXLDObject *object)
             break;
         case LC_VERSION_MIN_MACOSX:
         case LC_VERSION_MIN_IPHONEOS:
+        case LC_VERSION_MIN_WATCHOS:
         case LC_SOURCE_VERSION:
             /* Not supported for object files, fall through */
         default:
             rval = KERN_FAILURE;
             kxld_log(kKxldLogLinking, kKxldLogErr, kKxldLogMalformedMachO
-                "Invalid segment type in MH_OBJECT kext: %u.", cmd_hdr->cmd);
+                "Invalid load command type in MH_OBJECT kext: %u.", cmd_hdr->cmd);
             goto finish;
         }
     }
@@ -1131,7 +1143,7 @@ get_macho_data_size(const KXLDObject *object)
          */
         if ((symtab_size + reloc_size) > seg_vmsize) {
             u_long  overflow = (symtab_size + reloc_size) - seg_vmsize;
-            data_size += round_page(overflow);
+            data_size += kxld_round_page_cross_safe(overflow);
         }
     }
 #endif  // KXLD_PIC_KEXTS
@@ -1478,7 +1490,8 @@ target_supports_protected_segments(const KXLDObject *object)
 {
     return (object->is_final_image && 
             (object->cputype == CPU_TYPE_X86_64 ||
-             object->cputype == CPU_TYPE_ARM));
+             object->cputype == CPU_TYPE_ARM ||
+             object->cputype == CPU_TYPE_ARM64));
 }
 
 /*******************************************************************************
@@ -1699,7 +1712,7 @@ kxld_object_get_vmsize(const KXLDObject *object, u_long *header_size,
     /* vmsize is the padded header page(s) + segment vmsizes */
 
     *header_size = (object->is_final_image) ?
-        0 : round_page(get_macho_header_size(object));
+        0 : (u_long)kxld_round_page_cross_safe(get_macho_header_size(object));
     *vmsize = *header_size + get_macho_data_size(object);
 
 }
@@ -1735,7 +1748,6 @@ kxld_object_export_linked_object(const KXLDObject *object,
     /* Calculate the size of the headers and data */
 
     header_size = get_macho_header_size(object);
-    data_offset = (object->is_final_image) ? header_size : round_page(header_size);
     size = object->output_buffer_size;
 
     /* Copy data to the file */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Apple Inc. All rights reserved.
+ * Copyright (c) 2000-2015 Apple Inc. All rights reserved.
  *
  * @APPLE_OSREFERENCE_LICENSE_HEADER_START@
  * 
@@ -169,6 +169,10 @@ struct so_tcdbg {
 #define SO_WANTMORE	0x4000		/* APPLE: Give hint when more data ready */
 #define SO_WANTOOBFLAG	0x8000		/* APPLE: Want OOB in MSG_FLAG on receive */
 
+#ifdef PRIVATE
+#define	SO_NOWAKEFROMSLEEP	0x10000	/* Don't wake for traffic to this socket */
+#endif
+
 #endif  /* (!__APPLE__) */
 #endif	/* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
@@ -204,6 +208,7 @@ struct so_tcdbg {
 #define	 SO_RESTRICT_DENY_IN	0x1	/* deny inbound (trapdoor) */
 #define	 SO_RESTRICT_DENY_OUT	0x2	/* deny outbound (trapdoor) */
 #define	 SO_RESTRICT_DENY_CELLULAR 0x4	/* deny use of cellular (trapdoor) */
+#define	 SO_RESTRICT_DENY_EXPENSIVE 0x8	/* deny use of expensive if (trapdoor)*/
 #endif /* PRIVATE */
 #define SO_RANDOMPORT   0x1082  /* APPLE: request local port randomization */
 #define SO_NP_EXTENSIONS	0x1083	/* To turn off some POSIX behavior */
@@ -319,8 +324,38 @@ struct so_tcdbg {
 
 #define	SO_DELEGATED		0x1107	/* set socket as delegate (pid_t) */
 #define	SO_DELEGATED_UUID	0x1108	/* set socket as delegate (uuid_t) */
-
+#define	SO_NECP_ATTRIBUTES	0x1109	/* NECP socket attributes (domain, account, etc.) */
+#define	SO_CFIL_SOCK_ID		0x1110	/* get content filter socket ID (cfil_sock_id_t) */
+#if MPTCP
+#define SO_MPTCP_FASTJOIN	0x1111	/* fast join MPTCP */
+#endif /* MPTCP */
 #endif /* PRIVATE */
+#define SO_NUMRCVPKT		0x1112	/* number of datagrams in receive socket buffer */
+#ifdef PRIVATE
+#define	SO_AWDL_UNRESTRICTED 	0x1113  /* try to use AWDL in restricted mode */
+#define SO_EXTENDED_BK_IDLE	0x1114	/* extended time to keep socket idle after app is suspended (int) */
+#endif /* PRIVATE */
+
+typedef __uint32_t sae_associd_t;
+#define	SAE_ASSOCID_ANY	0
+#define	SAE_ASSOCID_ALL	((sae_associd_t)(-1ULL))
+
+typedef __uint32_t sae_connid_t;
+#define	SAE_CONNID_ANY	0
+#define	SAE_CONNID_ALL	((sae_connid_t)(-1ULL))
+
+/* connectx() flag parameters */
+#define CONNECT_RESUME_ON_READ_WRITE	0x1 /* resume connect() on read/write */
+#define CONNECT_DATA_IDEMPOTENT		0x2 /* data is idempotent */
+
+/* sockaddr endpoints */
+typedef struct sa_endpoints {
+	unsigned int	sae_srcif;      /* optional source interface */
+	struct sockaddr	*sae_srcaddr;   /* optional source address */
+	socklen_t	sae_srcaddrlen; /* size of source address */
+	struct sockaddr	*sae_dstaddr;   /* destination address */
+	socklen_t	sae_dstaddrlen; /* size of destination address */
+} sa_endpoints_t;
 #endif	/* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 
 /*
@@ -355,6 +390,7 @@ struct so_np_extensions {
 #ifdef KERNEL_PRIVATE
 #define SONPX_MASK_VALID		(SONPX_SETOPTSHUT)
 #define IS_SO_TC_BACKGROUND(_tc_) ((_tc_) == SO_TC_BK || (_tc_) == SO_TC_BK_SYS)
+#define IS_SO_TC_BACKGROUNDSYSTEM(_tc_) ((_tc_) == SO_TC_BK_SYS)
 #endif /* KERNEL_PRIVATE */
 
 #endif
@@ -659,7 +695,29 @@ struct msghdr {
 	int		msg_flags;	/* [XSI] flags on received message */
 };
 
-#ifdef KERNEL
+#ifdef PRIVATE
+/*
+ * Extended version for sendmsg_x() and recvmsg_x() calls
+ *
+ * For recvmsg_x(), the size of the data received is given by the field
+ * msg_datalen.
+ *
+ * For sendmsg_x(), the size of the data to send is given by the length of 
+ * the iovec array -- like sendmsg(). The field msg_datalen is ignored.
+ */
+struct msghdr_x {
+	void		*msg_name;	/* optional address */
+	socklen_t	msg_namelen;	/* size of address */
+	struct iovec 	*msg_iov;	/* scatter/gather array */
+	int		msg_iovlen;	/* # elements in msg_iov */
+	void		*msg_control;	/* ancillary data, see below */
+	socklen_t	msg_controllen;	/* ancillary data buffer len */
+	int		msg_flags;	/* flags on received message */
+	size_t		msg_datalen;	/* byte length of buffer in msg_iov */
+};
+#endif /* PRIVATE */
+
+#ifdef XNU_KERNEL_PRIVATE
 /*
  * In-kernel representation of "struct msghdr" from
  * userspace. Has enough precision for 32-bit or
@@ -706,7 +764,96 @@ struct user32_msghdr {
 	int		msg_flags;	/* flags on received message */
 };
 
-#endif // KERNEL
+/*
+ * In-kernel representation of "struct msghdr_x" from
+ * userspace. Has enough precision for 32-bit or
+ * 64-bit clients, but does not need to be packed.
+ */
+
+struct user_msghdr_x {
+	user_addr_t	msg_name;	/* optional address */
+	socklen_t	msg_namelen;	/* size of address */
+	user_addr_t	msg_iov;	/* scatter/gather array */
+	int		msg_iovlen;	/* # elements in msg_iov */
+	user_addr_t	msg_control;	/* ancillary data, see below */
+	socklen_t	msg_controllen;	/* ancillary data buffer len */
+	int		msg_flags;	/* flags on received message */
+	size_t		msg_datalen;	/* byte length of buffer in msg_iov */
+};
+
+/*
+ * LP64 user version of struct msghdr_x
+ * WARNING - keep in sync with struct msghdr_x
+ */
+
+struct user64_msghdr_x {
+	user64_addr_t	msg_name;	/* optional address */
+	socklen_t	msg_namelen;	/* size of address */
+	user64_addr_t	msg_iov;	/* scatter/gather array */
+	int		msg_iovlen;	/* # elements in msg_iov */
+	user64_addr_t	msg_control;	/* ancillary data, see below */
+	socklen_t	msg_controllen;	/* ancillary data buffer len */
+	int		msg_flags;	/* flags on received message */
+	user64_size_t	msg_datalen;	/* byte length of buffer in msg_iov */
+};
+
+/*
+ * ILP32 user version of struct msghdr_x
+ * WARNING - keep in sync with struct msghdr_x
+ */
+
+struct user32_msghdr_x {
+	user32_addr_t	msg_name;	/* optional address */
+	socklen_t	msg_namelen;	/* size of address */
+	user32_addr_t	msg_iov;	/* scatter/gather array */
+	int		msg_iovlen;	/* # elements in msg_iov */
+	user32_addr_t	msg_control;	/* ancillary data, see below */
+	socklen_t	msg_controllen;	/* ancillary data buffer len */
+	int		msg_flags;	/* flags on received message */
+	user32_size_t	msg_datalen;	/* byte length of buffer in msg_iov */
+};
+
+/*
+ * In-kernel representation of "struct sa_endpoints" from
+ * userspace. Has enough precision for 32-bit or
+ * 64-bit clients, but does not need to be packed.
+ */
+
+struct user_sa_endpoints {
+	unsigned int	sae_srcif;	/* optional source interface */
+	user_addr_t	sae_srcaddr;	/* optional source address */
+	socklen_t	sae_srcaddrlen;	/* size of source address */
+	user_addr_t	sae_dstaddr;	/* destination address */
+	socklen_t	sae_dstaddrlen;	/* size of destination address */
+};
+
+/*
+ * LP64 user version of struct sa_endpoints
+ * WARNING - keep in sync with struct sa_endpoints
+ */
+
+struct user64_sa_endpoints {
+	unsigned int	sae_srcif;	/* optional source interface */
+	user64_addr_t	sae_srcaddr;	/* optional source address */
+	socklen_t	sae_srcaddrlen;	/* size of source address */
+	user64_addr_t	sae_dstaddr;	/* destination address */
+	socklen_t	sae_dstaddrlen;	/* size of destination address */
+};
+
+/*
+ * ILP32 user version of struct sa_endpoints
+ * WARNING - keep in sync with struct sa_endpoints
+ */
+
+struct user32_sa_endpoints {
+	unsigned int	sae_srcif;	/* optional source interface */
+	user32_addr_t	sae_srcaddr;	/* optional source address */
+	socklen_t	sae_srcaddrlen;	/* size of source address */
+	user32_addr_t	sae_dstaddr;	/* destination address */
+	socklen_t	sae_dstaddrlen;	/* size of destination address */
+};
+
+#endif /* XNU_KERNEL_PRIVATE */
 
 #define	MSG_OOB		0x1		/* process out-of-band data */
 #define	MSG_PEEK	0x2		/* peek at incoming message */
@@ -738,6 +885,7 @@ struct user32_msghdr {
 #define MSG_NEEDSA	0x10000		/* Fail receive if socket address cannot be allocated */
 #ifdef KERNEL_PRIVATE
 #define MSG_NBIO	0x20000		/* FIONBIO mode, used by fifofs */
+#define MSG_SKIPCFIL	0x40000		/* skip pass content filter */
 #endif
 #ifdef	KERNEL
 #define MSG_USEUPCALL	0x80000000 /* Inherit upcall in sock_accept */
@@ -910,20 +1058,13 @@ struct user32_sf_hdtr {
 
 #ifdef PRIVATE
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
-typedef __uint32_t associd_t;
-#define	ASSOCID_ANY	0
-#define	ASSOCID_ALL	((associd_t)(-1ULL))
-
-typedef __uint32_t connid_t;
-#define	CONNID_ANY	0
-#define	CONNID_ALL	((connid_t)(-1ULL))
 
 /*
  * Structure for SIOCGASSOCIDS
  */
 struct so_aidreq {
 	__uint32_t	sar_cnt;	/* number of associations */
-	associd_t	*sar_aidp;	/* array of association IDs */
+	sae_associd_t	*sar_aidp;	/* array of association IDs */
 };
 
 #ifdef BSD_KERNEL_PRIVATE
@@ -942,20 +1083,20 @@ struct so_aidreq64 {
  * Structure for SIOCGCONNIDS
  */
 struct so_cidreq {
-	associd_t	scr_aid;	/* association ID */
+	sae_associd_t	scr_aid;	/* association ID */
 	__uint32_t	scr_cnt;	/* number of connections */
-	connid_t	*scr_cidp;	/* array of connection IDs */
+	sae_connid_t	*scr_cidp;	/* array of connection IDs */
 };
 
 #ifdef BSD_KERNEL_PRIVATE
 struct so_cidreq32 {
-	associd_t	scr_aid;
+	sae_associd_t	scr_aid;
 	__uint32_t	scr_cnt;
 	user32_addr_t	scr_cidp;
 };
 
 struct so_cidreq64 {
-	associd_t	scr_aid;
+	sae_associd_t	scr_aid;
 	__uint32_t	scr_cnt;
 	user64_addr_t	scr_cidp __attribute__((aligned(8)));
 };
@@ -965,7 +1106,7 @@ struct so_cidreq64 {
  * Structure for SIOCGCONNINFO
  */
 struct so_cinforeq {
-	connid_t	scir_cid;		/* connection ID */
+	sae_connid_t	scir_cid;		/* connection ID */
 	__uint32_t	scir_flags;		/* see flags below */
 	__uint32_t	scir_ifindex;		/* (last) outbound interface */
 	__int32_t	scir_error;		/* most recent error */
@@ -980,7 +1121,7 @@ struct so_cinforeq {
 
 #ifdef BSD_KERNEL_PRIVATE
 struct so_cinforeq32 {
-	connid_t	scir_cid;
+	sae_connid_t	scir_cid;
 	__uint32_t	scir_flags;
 	__uint32_t	scir_ifindex;
 	__int32_t	scir_error;
@@ -994,7 +1135,7 @@ struct so_cinforeq32 {
 };
 
 struct so_cinforeq64 {
-	connid_t	scir_cid;
+	sae_connid_t	scir_cid;
 	__uint32_t	scir_flags;
 	__uint32_t	scir_ifindex;
 	__int32_t	scir_error;
@@ -1029,7 +1170,7 @@ struct so_cinforeq64 {
  * Structure for SIOC{S,G}CONNORDER
  */
 struct so_cordreq {
-	connid_t	sco_cid;		/* connection ID */
+	sae_connid_t	sco_cid;		/* connection ID */
 	__uint32_t	sco_rank;		/* rank (0 means unspecified) */
 };
 
@@ -1059,13 +1200,97 @@ struct kev_netpolicy_ifdenied {
 	struct netpolicy_event_data	ev_data;
 };
 
+/*
+ * Socket subclass (of KEV_NETWORK_CLASS)
+ */
+#define	KEV_SOCKET_SUBCLASS	4
+
+/*
+ * Events for KEV_SOCKET_SUBCLASS of KEV_NETWORK_CLASS
+ */
+#define	KEV_SOCKET_CLOSED	1	/* completely closed by protocol */
+
+/*
+ * Common structure for KEV_SOCKET_SUBCLASS
+ */
+struct kev_socket_event_data {
+	struct sockaddr_storage kev_sockname;
+	struct sockaddr_storage kev_peername;
+};
+
+struct kev_socket_closed {
+	struct kev_socket_event_data ev_data;
+};
+
 #ifndef	KERNEL
 __BEGIN_DECLS
-extern int connectx(int s, struct sockaddr *, socklen_t, struct sockaddr *,
-    socklen_t, __uint32_t, associd_t, connid_t *);
-extern int disconnectx(int s, associd_t, connid_t);
-extern int peeloff(int s, associd_t);
+
+extern int peeloff(int s, sae_associd_t);
 extern int socket_delegate(int, int, int, pid_t);
+
+/*
+ * recvmsg_x() is a system call similar to recvmsg(2) to receive
+ * several datagrams at once in the array of message headers "msgp".
+ *
+ * recvmsg_x() can be used only with protocols handlers that have been specially
+ * modified to support sending and receiving several datagrams at once.
+ * 
+ * The size of the array "msgp" is given by the argument "cnt".
+ *
+ * The "flags" arguments supports only the value MSG_DONTWAIT.
+ * 
+ * Each member of "msgp" array is of type "struct msghdr_x".
+ *
+ * The "msg_iov" and "msg_iovlen" are input parameters that describe where to
+ * store a datagram in a scatter gather locations of buffers -- see recvmsg(2).
+ * On output the field "msg_datalen" gives the length of the received datagram.
+ *
+ * The field "msg_flags" must be set to zero on input. On output, "msg_flags"
+ * may have MSG_TRUNC set to indicate the trailing portion of the datagram was
+ * discarded because the datagram was larger than the buffer supplied.
+ * recvmsg_x() returns as soon as a datagram is truncated.
+ *
+ * recvmsg_x() may return with less than "cnt" datagrams received based on
+ * the low water mark and the amount of data pending in the socket buffer.
+ *
+ * recvmsg_x() returns the number of datagrams that have been received,
+ * or -1 if an error occurred. 
+ *
+ * NOTE: This a private system call, the API is subject to change.
+ */
+ssize_t recvmsg_x(int s, const struct msghdr_x *msgp, u_int cnt, int flags);
+
+/*
+ * sendmsg_x() is a system call similar to send(2) to send
+ * several datagrams at once in the array of message headers "msgp".
+ *
+ * sendmsg_x() can be used only with protocols handlers that have been specially
+ * modified to support sending and receiving several datagrams at once.
+ * 
+ * The size of the array "msgp" is given by the argument "cnt".
+ *
+ * The "flags" arguments supports only the value MSG_DONTWAIT.
+ * 
+ * Each member of "msgp" array is of type "struct msghdr_x".
+ *
+ * The "msg_iov" and "msg_iovlen" are input parameters that specify the
+ * data to be sent in a scatter gather locations of buffers -- see sendmsg(2).
+ *
+ * sendmsg_x() fails with EMSGSIZE if the sum of the length of the datagrams
+ * is greater than the high water mark.
+ *
+ * Address and ancillary data are not supported so the following fields
+ * must be set to zero on input:
+ *   "msg_name", "msg_namelen", "msg_control" and "msg_controllen".
+ *
+ * The field "msg_flags" and "msg_datalen" must be set to zero on input. 
+ *
+ * sendmsg_x() returns the number of datagrams that have been sent,
+ * or -1 if an error occurred. 
+ *
+ * NOTE: This a private system call, the API is subject to change.
+ */
+ssize_t sendmsg_x(int s, const struct msghdr_x *msgp, u_int cnt, int flags);
 __END_DECLS
 #endif /* !KERNEL */
 #endif	/* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
@@ -1073,6 +1298,7 @@ __END_DECLS
 
 #ifndef	KERNEL
 __BEGIN_DECLS
+
 int	accept(int, struct sockaddr * __restrict, socklen_t * __restrict)
 		__DARWIN_ALIAS_C(accept);
 int	bind(int, const struct sockaddr *, socklen_t) __DARWIN_ALIAS(bind);
@@ -1103,6 +1329,9 @@ int	sendfile(int, int, off_t, off_t *, struct sf_hdtr *, int);
 
 #if !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
 void	pfctlinput(int, struct sockaddr *);
+int connectx(int , const sa_endpoints_t *, sae_associd_t, unsigned int,
+    const struct iovec *, unsigned int, size_t *, sae_connid_t *);
+int disconnectx(int , sae_associd_t, sae_connid_t);
 #endif	/* (!_POSIX_C_SOURCE || _DARWIN_C_SOURCE) */
 __END_DECLS
 #endif /* !KERNEL */

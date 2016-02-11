@@ -56,13 +56,11 @@ make_runmode(thread_t thread)
 	 */
 	const int mode = chudxnu_thread_get_scheduler_state(thread);
 	
-#if !TARGET_OS_EMBEDDED
 	if( 0 == mode)
 	{
 		return (chudxnu_thread_get_idle(thread) ? TH_IDLE : TH_IDLE_N);
 	}
 	else
-#endif
 	{
 		// Today we happen to know there's a one-to-one mapping.
 		return ((mode & 0xffff) | ((~mode & 0xffff) << 16));
@@ -75,7 +73,7 @@ void
 kperf_threadinfo_sample(struct threadinfo *ti, struct kperf_context *context)
 {
 	thread_t cur_thread = context->cur_thread;
-	BUF_INFO1( PERF_TI_SAMPLE, (uintptr_t)cur_thread );
+	BUF_INFO1( PERF_TI_SAMPLE, (uintptr_t)thread_tid(cur_thread) );
 
 	// fill out the fields
 	ti->pid = context->cur_pid;
@@ -114,7 +112,7 @@ kperf_threadinfo_extra_sample(struct tinfo_ex *tex, struct kperf_context *contex
 	/* check if there's anything for us to do */
 	if( t_chud & T_AST_NAME )
 	{
-		BUF_INFO1( PERF_TI_XSAMPLE, (uintptr_t)cur_thread );
+		BUF_INFO1( PERF_TI_XSAMPLE, (uintptr_t)thread_tid(cur_thread) );
 
 		/* get the name out */
 #ifdef FIXME
@@ -218,11 +216,9 @@ typedef enum { // Target Thread State - can be OR'd
 extern "C" AppleProfileTriggerClientThreadRunMode AppleProfileGetRunModeOfThread(thread_t thread) {	
 	const int mode = chudxnu_thread_get_scheduler_state(thread);
 	
-#if !TARGET_OS_EMBEDDED
 	if (0 == mode) {
 		return (chudxnu_thread_get_idle(thread) ? kAppleProfileTriggerClientThreadModeIdle : kAppleProfileTriggerClientThreadModeNotIdle);
 	} else
-#endif
 	return (AppleProfileTriggerClientThreadRunMode)((mode & 0xffff) | ((~mode & 0xffff) << 16)); // Today we happen to know there's a one-to-one mapping.
 }
 

@@ -222,6 +222,7 @@ typedef struct vm_purgeable_info	*vm_purgeable_info_t;
 #define VM_PAGE_QUERY_PAGE_EXTERNAL	0x80
 #define VM_PAGE_QUERY_PAGE_CS_VALIDATED	0x100
 #define VM_PAGE_QUERY_PAGE_CS_TAINTED	0x200
+#define VM_PAGE_QUERY_PAGE_CS_NX	0x400
 
 #ifdef	MACH_KERNEL_PRIVATE
 
@@ -245,9 +246,9 @@ struct pmap_statistics {
 	integer_t	external_peak;
 	integer_t	reusable;
 	integer_t	reusable_peak;
-	uint64_t	compressed;
-	uint64_t	compressed_peak;
-	uint64_t	compressed_lifetime;
+	uint64_t	compressed __attribute__((aligned(8)));
+	uint64_t	compressed_peak __attribute__((aligned(8)));
+	uint64_t	compressed_lifetime __attribute__((aligned(8)));
 };
 
 typedef struct pmap_statistics	*pmap_statistics_t;
@@ -292,7 +293,11 @@ typedef struct pmap_statistics	*pmap_statistics_t;
 #define VM_FLAGS_FIXED		0x0000
 #define VM_FLAGS_ANYWHERE	0x0001
 #define VM_FLAGS_PURGABLE	0x0002
+#ifdef KERNEL_PRIVATE
+#endif /* KERNEL_PRIVATE */
 #define VM_FLAGS_NO_CACHE	0x0010
+#define VM_FLAGS_RESILIENT_CODESIGN	0x0020
+#define VM_FLAGS_RESILIENT_MEDIA	0x0040
 #ifdef KERNEL_PRIVATE
 #define VM_FLAGS_PERMANENT	0x0100	/* mapping can NEVER be unmapped */
 #define VM_FLAGS_GUARD_AFTER	0x0200	/* guard page after the mapping */
@@ -304,26 +309,22 @@ typedef struct pmap_statistics	*pmap_statistics_t;
 #define VM_FLAGS_OVERWRITE	0x4000	/* delete any existing mappings first */
 #ifdef KERNEL_PRIVATE
 #define VM_FLAGS_NO_PMAP_CHECK	0x8000	/* do not check that pmap is empty */
-#define	VM_FLAGS_MAP_JIT	0x80000	/* Used to mark an entry as describing a JIT region */
 #endif /* KERNEL_PRIVATE */
-#define VM_FLAGS_RETURN_DATA_ADDR	0x100000 /* Return address of target data, rather than base of page */
 /*
  * VM_FLAGS_SUPERPAGE_MASK
  *	3 bits that specify whether large pages should be used instead of
  *	base pages (!=0), as well as the requested page size.
  */
 #define VM_FLAGS_SUPERPAGE_MASK	0x70000	/* bits 0x10000, 0x20000, 0x40000 */
-#define VM_FLAGS_SUPERPAGE_SHIFT 16
-
-#define SUPERPAGE_NONE			0	/* no superpages, if all bits are 0 */
-#define SUPERPAGE_SIZE_ANY		1
-#define VM_FLAGS_SUPERPAGE_NONE     (SUPERPAGE_NONE     << VM_FLAGS_SUPERPAGE_SHIFT)
-#define VM_FLAGS_SUPERPAGE_SIZE_ANY (SUPERPAGE_SIZE_ANY << VM_FLAGS_SUPERPAGE_SHIFT)
-#if defined(__x86_64__) || !defined(KERNEL)
-#define SUPERPAGE_SIZE_2MB		2
-#define VM_FLAGS_SUPERPAGE_SIZE_2MB (SUPERPAGE_SIZE_2MB<<VM_FLAGS_SUPERPAGE_SHIFT)
-#endif
-
+#ifdef KERNEL_PRIVATE
+#define	VM_FLAGS_MAP_JIT	0x80000	/* Used to mark an entry as describing a JIT region */
+#endif /* KERNEL_PRIVATE */
+#define VM_FLAGS_RETURN_DATA_ADDR	0x100000 /* Return address of target data, rather than base of page */
+#ifdef KERNEL_PRIVATE
+#define VM_FLAGS_IOKIT_ACCT		0x200000 /* IOKit accounting */
+#define VM_FLAGS_KEEP_MAP_LOCKED	0x400000 /* Keep the map locked when returning from vm_map_enter() */
+#endif /* KERNEL_PRIVATE */
+#define VM_FLAGS_RETURN_4K_DATA_ADDR	0x800000 /* Return 4K aligned address of target data */
 #define VM_FLAGS_ALIAS_MASK	0xFF000000
 #define VM_GET_FLAGS_ALIAS(flags, alias)			\
 		(alias) = ((flags) & VM_FLAGS_ALIAS_MASK) >> 24	
@@ -339,11 +340,24 @@ typedef struct pmap_statistics	*pmap_statistics_t;
 				 VM_FLAGS_OVERWRITE |		\
 				 VM_FLAGS_SUPERPAGE_MASK |	\
 				 VM_FLAGS_ALIAS_MASK)
-#define VM_FLAGS_USER_MAP	(VM_FLAGS_USER_ALLOCATE | VM_FLAGS_RETURN_DATA_ADDR)
+#define VM_FLAGS_USER_MAP	(VM_FLAGS_USER_ALLOCATE |	\
+				 VM_FLAGS_RETURN_4K_DATA_ADDR |	\
+				 VM_FLAGS_RETURN_DATA_ADDR)
 #define VM_FLAGS_USER_REMAP	(VM_FLAGS_FIXED |    \
 				 VM_FLAGS_ANYWHERE | \
 				 VM_FLAGS_OVERWRITE| \
-				 VM_FLAGS_RETURN_DATA_ADDR)
+				 VM_FLAGS_RETURN_DATA_ADDR |\
+				 VM_FLAGS_RESILIENT_CODESIGN)
+
+#define VM_FLAGS_SUPERPAGE_SHIFT 16
+#define SUPERPAGE_NONE			0	/* no superpages, if all bits are 0 */
+#define SUPERPAGE_SIZE_ANY		1
+#define VM_FLAGS_SUPERPAGE_NONE     (SUPERPAGE_NONE     << VM_FLAGS_SUPERPAGE_SHIFT)
+#define VM_FLAGS_SUPERPAGE_SIZE_ANY (SUPERPAGE_SIZE_ANY << VM_FLAGS_SUPERPAGE_SHIFT)
+#if defined(__x86_64__) || !defined(KERNEL)
+#define SUPERPAGE_SIZE_2MB		2
+#define VM_FLAGS_SUPERPAGE_SIZE_2MB (SUPERPAGE_SIZE_2MB<<VM_FLAGS_SUPERPAGE_SHIFT)
+#endif
 
 #define VM_MEMORY_MALLOC 1
 #define VM_MEMORY_MALLOC_SMALL 2
@@ -449,10 +463,88 @@ typedef struct pmap_statistics	*pmap_statistics_t;
 /* CoreUI image block data */
 #define VM_MEMORY_COREUI 76
 
+/* CoreUI image file */
+#define VM_MEMORY_COREUIFILE 77
+
+/* Genealogy buffers */
+#define VM_MEMORY_GENEALOGY 78
+
+/* RawCamera VM allocated memory */
+#define VM_MEMORY_RAWCAMERA 79
+
+/* corpse info for dead process */
+#define VM_MEMORY_CORPSEINFO 80
+
+/* Apple System Logger (ASL) messages */
+#define VM_MEMORY_ASL 81
+
 /* Reserve 240-255 for application */
 #define VM_MEMORY_APPLICATION_SPECIFIC_1 240
 #define VM_MEMORY_APPLICATION_SPECIFIC_16 255
 
 #define VM_MAKE_TAG(tag) ((tag) << 24)
+
+
+
+#if KERNEL_PRIVATE
+
+/* kernel map tags */
+
+#define VM_KERN_MEMORY_NONE		0
+
+#define VM_KERN_MEMORY_OSFMK		1
+#define VM_KERN_MEMORY_BSD		2
+#define VM_KERN_MEMORY_IOKIT		3
+#define VM_KERN_MEMORY_LIBKERN		4
+#define VM_KERN_MEMORY_OSKEXT		5
+#define VM_KERN_MEMORY_KEXT		6
+#define VM_KERN_MEMORY_IPC		7
+#define VM_KERN_MEMORY_STACK		8
+#define VM_KERN_MEMORY_CPU		9
+#define VM_KERN_MEMORY_PMAP		10
+#define VM_KERN_MEMORY_PTE		11
+#define VM_KERN_MEMORY_ZONE		12
+#define VM_KERN_MEMORY_KALLOC		13
+#define VM_KERN_MEMORY_COMPRESSOR	14
+#define VM_KERN_MEMORY_COMPRESSED_DATA	15
+#define VM_KERN_MEMORY_PHANTOM_CACHE	16
+#define VM_KERN_MEMORY_WAITQ		17
+#define VM_KERN_MEMORY_DIAG		18
+#define VM_KERN_MEMORY_LOG		19
+#define VM_KERN_MEMORY_FILE		20
+#define VM_KERN_MEMORY_MBUF		21
+#define VM_KERN_MEMORY_UBC		22
+#define VM_KERN_MEMORY_SECURITY		23
+#define VM_KERN_MEMORY_MLOCK		24
+//
+#define VM_KERN_MEMORY_FIRST_DYNAMIC	25
+/* out of tags: */
+#define VM_KERN_MEMORY_ANY		255
+#define VM_KERN_MEMORY_COUNT		256
+
+/* end kernel map tags */
+
+// mach_memory_info.flags
+#define VM_KERN_SITE_TYPE		0x000000FF
+#define VM_KERN_SITE_TAG		0x00000000
+#define VM_KERN_SITE_KMOD		0x00000001
+#define VM_KERN_SITE_KERNEL		0x00000002
+#define VM_KERN_SITE_COUNTER		0x00000003
+#define VM_KERN_SITE_WIRED		0x00000100	/* add to wired count */
+#define VM_KERN_SITE_HIDE		0x00000200	/* no zprint */
+
+#define VM_KERN_COUNT_MANAGED		0
+#define VM_KERN_COUNT_RESERVED		1
+#define VM_KERN_COUNT_WIRED		2
+#define VM_KERN_COUNT_WIRED_MANAGED 	3
+#define VM_KERN_COUNT_STOLEN		4
+#define VM_KERN_COUNT_LOPAGE		5
+#define VM_KERN_COUNT_MAP_KERNEL	6
+#define VM_KERN_COUNT_MAP_ZONE		7
+#define VM_KERN_COUNT_MAP_KALLOC	8
+
+#define VM_KERN_COUNTER_COUNT		9
+
+#endif /* KERNEL_PRIVATE */
 
 #endif	/* _MACH_VM_STATISTICS_H_ */
