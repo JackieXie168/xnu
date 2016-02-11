@@ -2,12 +2,12 @@ set -e
 
 function CopyHeader {
     install -d `dirname "${XNU_INSTALL_BASE}/usr/include/$1"`
-    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
+    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/usr/include/$1"
 }
 
 function CopyPrivateHeader {
     install -d `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
-    install "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
+    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
 }
 
 CopyHeader AssertMacros.h
@@ -48,3 +48,11 @@ CopyPrivateHeader corecrypto/ccrng.h
 CopyPrivateHeader corecrypto/ccrng_system.h
 CopyPrivateHeader corecrypto/ccsha1.h
 CopyPrivateHeader corecrypto/ccsha2.h
+
+# These headers must also be present in Kernel.framework, so I symlink them there.
+pushd "${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
+ln -sfh "../../../../../../../usr/include/Availability.h" Availability.h
+ln -sfh "../../../../../../../usr/include/AvailabilityInternal.h" AvailabilityInternal.h
+ln -sfh "../../../../../../../usr/include/AvailabilityMacros.h" AvailabilityMacros.h
+ln -sfh "../../../../../../../usr/include/AssertMacros.h" AssertMacros.h
+popd
