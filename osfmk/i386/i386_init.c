@@ -107,6 +107,7 @@
 #else
 #define DBG(x...)
 #endif
+#include "lapic_irq_remap.c"
 
 int			debug_task;
 
@@ -382,6 +383,7 @@ vstart(vm_offset_t boot_args_start)
 		DBG("CPU: %d, GSBASE initial value: 0x%llx\n", cpu, rdmsr64(MSR_IA32_GS_BASE));
 	}
 
+	_lapic_irq_remap();
 	postcode(VSTART_CPU_DESC_INIT);
 	if(is_boot_cpu)
 		cpu_desc_init64(cpu_datap(cpu));

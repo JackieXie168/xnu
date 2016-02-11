@@ -62,7 +62,8 @@ PE_incoming_interrupt(int interrupt)
                     void *, vector->refCon);
 #endif
 
-	vector->handler(vector->target, NULL, vector->nub, interrupt);
+	if (vector->handler != NULL)
+		vector->handler(vector->target, NULL, vector->nub, interrupt);
 
 #if CONFIG_DTRACE && DEVELOPMENT
         DTRACE_INT5(interrupt_complete, void *, vector->nub, int, 0, 
