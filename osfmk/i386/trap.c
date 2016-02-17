@@ -1207,7 +1207,7 @@ sync_iss_to_iks(x86_saved_state_t *saved_state)
 	if (saved_state && saved_state->flavor == THREAD_STATE_NONE)
 		pal_get_kern_regs( saved_state );
 
-	if ((kstack = current_thread()->kernel_stack) != 0) {
+	if (current_thread() != NULL && (kstack = current_thread()->kernel_stack) != 0) {
 		x86_saved_state64_t	*regs = saved_state64(saved_state);
 
 		iks = STACK_IKS(kstack);
@@ -1256,7 +1256,7 @@ sync_iss_to_iks_unconditionally(__unused x86_saved_state_t *saved_state) {
 	struct x86_kernel_state *iks;
 	vm_offset_t kstack;
 
-	if ((kstack = current_thread()->kernel_stack) != 0) {
+	if (current_thread() != NULL && (kstack = current_thread()->kernel_stack) != 0) {
 		iks = STACK_IKS(kstack);
 		/* Display the trap handler path */
 		__asm__ volatile("movq %%rbx, %0" : "=m" (iks->k_rbx));
