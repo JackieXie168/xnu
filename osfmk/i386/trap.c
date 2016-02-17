@@ -530,14 +530,16 @@ kernel_trap(
 	intr  = (saved_state->isf.rflags & EFL_IF) != 0;	/* state of ints at trap */
 	kern_ip = (vm_offset_t)saved_state->isf.rip;
 
-	myast = ast_pending();
+    if (current_cpu_datap() != NULL) {
+        myast = ast_pending();
 
-	perfASTCallback astfn = perfASTHook;
-	if (__improbable(astfn != NULL)) {
-		if (*myast & AST_CHUD_ALL)
-			astfn(AST_CHUD_ALL, myast);
-	} else
-		*myast &= ~AST_CHUD_ALL;
+        perfASTCallback astfn = perfASTHook;
+        if (__improbable(astfn != NULL)) {
+            if (*myast & AST_CHUD_ALL)
+                astfn(AST_CHUD_ALL, myast);
+        } else
+            *myast &= ~AST_CHUD_ALL;
+    }
 
 
 #if CONFIG_DTRACE
