@@ -322,6 +322,8 @@ L_common_dispatch:
 	mov	%rcx, %cr3
 4:
 	mov	%gs:CPU_ACTIVE_THREAD, %rcx	/* Get the active thread */
+	cmpq $0, %rcx
+	jz 5f
 	movl	$-1, TH_IOTIER_OVERRIDE(%rcx)	/* Reset IO tier override to -1 before handling trap */
 	cmpq	$0, TH_PCB_IDS(%rcx)	/* Is there a debug register state? */
 	je	5f
