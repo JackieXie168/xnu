@@ -5038,8 +5038,8 @@ OSKext::loadExecutable()
         goto register_kmod;
     }
 
-    /* <rdar://problem/21444003> all callers must be entitled */
-    if (FALSE == IOTaskHasEntitlement(current_task(), "com.apple.rootless.kext-management")) {
+    /* <rdar://problem/21444003> all user-mode callers must be entitled */
+    if (current_task() != kernel_task && FALSE == IOTaskHasEntitlement(current_task(), "com.apple.rootless.kext-management")) {
         OSKextLog(this,
                   kOSKextLogErrorLevel | kOSKextLogLoadFlag,
                   "Not entitled to link kext '%s'",
@@ -5316,7 +5316,7 @@ finish:
             kfree(kmod_info->reference_list,
                 num_kmod_refs * sizeof(kmod_reference_t));
         }
-        if (isInterface()) {
+        if (isInterface() && kmod_info != NULL) {
             kfree(kmod_info, sizeof(kmod_info_t));
         }
         kmod_info = NULL;
