@@ -265,8 +265,10 @@ tsc_init(void)
 		 */
 		if (N_by_2_bus_ratio)
 			tscFCvtt2n = busFCvtt2n * 2 / (1 + 2*tscGranularity);
-		else
+		else if (tscGranularity != 0)
 			tscFCvtt2n = busFCvtt2n / tscGranularity;
+		else
+			tscFCvtt2n = busFCvtt2n;
 
 		tscFreq = ((1 * Giga)  << 32) / tscFCvtt2n;
 		tscFCvtn2t = 0xFFFFFFFFFFFFFFFFULL / tscFCvtt2n;
