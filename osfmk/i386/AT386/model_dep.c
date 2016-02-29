@@ -91,6 +91,7 @@
 #include <i386/machine_routines.h>
 #include <i386/mp.h>		/* mp_rendezvous_break_lock */
 #include <i386/cpuid.h>
+#include <i386/cpu_data.h>
 #include <i386/fpu.h>
 #include <i386/machine_cpu.h>
 #include <i386/pmap.h>
@@ -872,7 +873,7 @@ static int pid_from_task(task_t task)
 {
         int pid = -1;
 
-        if (task->bsd_info)
+        if (task != NULL && task->bsd_info)
                 pid = proc_pid(task->bsd_info);
 
         return pid;
@@ -894,7 +895,8 @@ Debugger(
 	unsigned long pi_size = 0;
 	void *stackptr;
 	int cn = cpu_number();
-	task_t task = current_task();
+	task_t task = NULL;
+	if (current_thread() != NULL) task = current_task();
 	int	task_pid = pid_from_task(task);
 	boolean_t old_doprnt_hide_pointers = doprnt_hide_pointers;
 
