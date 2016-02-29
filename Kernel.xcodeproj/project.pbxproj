@@ -2326,7 +2326,7 @@
 		1F3EC2221C6C4D61003D7461 /* trap.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = trap.c; sourceTree = "<group>"; };
 		1F3EC2231C6C4D61003D7461 /* trap.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = trap.h; sourceTree = "<group>"; };
 		1F3EC2241C6C4D61003D7461 /* trap_native.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = trap_native.c; sourceTree = "<group>"; };
-		1F3EC2251C6C4D61003D7461 /* tsc.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tsc.c; sourceTree = "<group>"; };
+		1F3EC2251C6C4D61003D7461 /* tsc.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = tsc.c; sourceTree = "<group>"; usesTabs = 1; };
 		1F3EC2261C6C4D61003D7461 /* tsc.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tsc.h; sourceTree = "<group>"; };
 		1F3EC2271C6C4D61003D7461 /* tss.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = tss.h; sourceTree = "<group>"; };
 		1F3EC2281C6C4D61003D7461 /* ucode.c */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.c; path = ucode.c; sourceTree = "<group>"; };
@@ -3597,6 +3597,7 @@
 				1F051CD11859223C008F6CAE /* Products */,
 			);
 			sourceTree = "<group>";
+			usesTabs = 1;
 		};
 		1F051CD11859223C008F6CAE /* Products */ = {
 			isa = PBXGroup;
