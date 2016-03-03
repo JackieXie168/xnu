@@ -8,6 +8,7 @@ function CopyHeader {
 function CopyPrivateHeader {
     install -d `dirname "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"`
     cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/System.framework/PrivateHeaders/$1"
+    cp -f "${SRCROOT}/EXTERNAL_HEADERS/$1" "${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/PrivateHeaders/$1"
 }
 
 CopyHeader AssertMacros.h
