@@ -51,9 +51,9 @@ CopyPrivateHeader corecrypto/ccsha1.h
 CopyPrivateHeader corecrypto/ccsha2.h
 
 # These headers must also be present in Kernel.framework, so I symlink them there.
-pushd "${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/Versions/A/Headers"
+pushd "${XNU_INSTALL_BASE}/System/Library/Frameworks/Kernel.framework/Versions/A/Headers" > /dev/null
 ln -sfh "../../../../../../../usr/include/Availability.h" Availability.h
 ln -sfh "../../../../../../../usr/include/AvailabilityInternal.h" AvailabilityInternal.h
 ln -sfh "../../../../../../../usr/include/AvailabilityMacros.h" AvailabilityMacros.h
 ln -sfh "../../../../../../../usr/include/AssertMacros.h" AssertMacros.h
-popd
+popd > /dev/null
